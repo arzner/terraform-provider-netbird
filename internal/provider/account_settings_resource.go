@@ -59,6 +59,7 @@ type AccountSettingsModel struct {
 	DnsDomain                          types.String `tfsdk:"dns_domain"`
 	NetworkRange                       types.String `tfsdk:"network_range"`
 	LazyConnectionEnabled              types.Bool   `tfsdk:"lazy_connection_enabled"`
+	LocalMfaEnabled                    types.Bool   `tfsdk:"local_mfa_enabled"`
 	UserApprovalRequired               types.Bool   `tfsdk:"user_approval_required"`
 	NetworkTrafficLogsGroups           types.List   `tfsdk:"network_traffic_logs_groups"`
 	PeerExposeEnabled                  types.Bool   `tfsdk:"peer_expose_enabled"`
@@ -184,6 +185,12 @@ func (r *AccountSettings) Schema(ctx context.Context, req resource.SchemaRequest
 				Computed:            true,
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
+			"local_mfa_enabled": schema.BoolAttribute{
+				MarkdownDescription: "Enables or disables TOTP multi-factor authentication for local users. Only applicable when the embedded identity provider is enabled.",
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
 			"user_approval_required": schema.BoolAttribute{
 				MarkdownDescription: "Enables manual approval for new users joining via domain matching. When enabled, users are blocked with pending approval status until explicitly approved by an admin.",
 				Optional:            true,
@@ -254,6 +261,7 @@ func accountAPIToTerraform(ctx context.Context, account *api.Account, data *Acco
 	data.DnsDomain = types.StringPointerValue(account.Settings.DnsDomain)
 	data.NetworkRange = types.StringPointerValue(account.Settings.NetworkRange)
 	data.LazyConnectionEnabled = types.BoolPointerValue(account.Settings.LazyConnectionEnabled)
+	data.LocalMfaEnabled = types.BoolPointerValue(account.Settings.LocalMfaEnabled)
 	data.UserApprovalRequired = types.BoolValue(account.Settings.Extra.UserApprovalRequired)
 	logsGroups, d := sortedStringList(ctx, data.NetworkTrafficLogsGroups, account.Settings.Extra.NetworkTrafficLogsGroups)
 	ret.Append(d...)
@@ -312,6 +320,7 @@ func accountTerraformToAPI(ctx context.Context, account *api.Account, data Accou
 	settings.DnsDomain = stringDefaultPointer(data.DnsDomain, account.Settings.DnsDomain)
 	settings.NetworkRange = stringDefaultPointer(data.NetworkRange, account.Settings.NetworkRange)
 	settings.LazyConnectionEnabled = boolDefaultPointer(data.LazyConnectionEnabled, account.Settings.LazyConnectionEnabled)
+	settings.LocalMfaEnabled = boolDefaultPointer(data.LocalMfaEnabled, account.Settings.LocalMfaEnabled)
 	settings.PeerExposeEnabled = boolDefault(data.PeerExposeEnabled, account.Settings.PeerExposeEnabled)
 	settings.PeerExposeGroups = stringListDefault(ctx, data.PeerExposeGroups, account.Settings.PeerExposeGroups)
 
