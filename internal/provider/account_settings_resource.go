@@ -6,7 +6,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int32validator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -352,17 +351,15 @@ func (r *AccountSettings) Read(ctx context.Context, req resource.ReadRequest, re
 	}
 
 	accounts, err := r.client.Accounts.List(ctx)
-	account := &accounts[0]
-
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			resp.State.RemoveResource(ctx)
-			return
-		} else {
-			resp.Diagnostics.AddError("Error getting AccountSettings", err.Error())
-		}
+		resp.Diagnostics.AddError("Error getting AccountSettings", err.Error())
 		return
 	}
+	if len(accounts) == 0 {
+		resp.State.RemoveResource(ctx)
+		return
+	}
+	account := &accounts[0]
 
 	resp.Diagnostics.Append(accountAPIToTerraform(ctx, account, &data)...)
 
