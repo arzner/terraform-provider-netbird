@@ -3,8 +3,12 @@
 package provider
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"maps"
+	"net/http"
 	"slices"
 	"testing"
 
@@ -171,20 +175,61 @@ func testAccountSettings(accountID string) (api.AccountSettings, error) {
 }
 
 // setUnmodeledAccountSettings sets metrics_push_enabled and auto_update_always
-// through the API. It sends the account's current settings with only those two
-// changed, because the server resets any field an update request leaves out,
-// and drops the two read-only fields the server computes.
+// through the API, keeping every other setting (see setAccountSettingsRaw).
 func setUnmodeledAccountSettings(accountID string, metricsPush, autoUpdateAlways *bool) error {
-	settings, err := testAccountSettings(accountID)
+	return setAccountSettingsRaw(accountID, api.AccountSettings{MetricsPushEnabled: metricsPush, AutoUpdateAlways: autoUpdateAlways})
+}
+
+// setAccountSettingsRaw sets the fields of change that are not nil, through the
+// same raw-JSON path the provider uses, so settings this client library does
+// not know keep their values on the server.
+func setAccountSettingsRaw(accountID string, change api.AccountSettings) error {
+	client := testClient()
+	accounts, err := listAccountsRaw(context.Background(), client)
 	if err != nil {
 		return err
 	}
-	settings.MetricsPushEnabled = metricsPush
-	settings.AutoUpdateAlways = autoUpdateAlways
-	settings.EmbeddedIdpEnabled = nil
-	settings.LocalAuthDisabled = nil
-	_, err = testClient().Accounts.Update(context.Background(), accountID, api.AccountRequest{Settings: settings})
+	current, err := selectAccount(accounts, accountID)
+	if err != nil {
+		return err
+	}
+	typed, err := json.Marshal(change)
+	if err != nil {
+		return err
+	}
+	var overlay map[string]json.RawMessage
+	if err := json.Unmarshal(typed, &overlay); err != nil {
+		return err
+	}
+	settings := maps.Clone(current.settings)
+	for _, k := range readOnlySettings {
+		delete(settings, k)
+	}
+	// Only the pointer fields set in change: the typed zero values of the
+	// non-pointer fields must not overwrite the account's.
+	for k, v := range overlay {
+		if _, isPointer := pointerSettings[k]; isPointer {
+			settings[k] = v
+		}
+	}
+	body, err := json.Marshal(map[string]any{"settings": settings})
+	if err != nil {
+		return err
+	}
+	resp, err := client.NewRequest(context.Background(), http.MethodPut, "/api/accounts/"+accountID, bytes.NewReader(body), nil)
+	if err != nil {
+		return err
+	}
+	_, err = readBody(resp)
 	return err
+}
+
+// pointerSettings are the optional settings setAccountSettingsRaw may change.
+var pointerSettings = map[string]struct{}{
+	"network_range_v6":     {},
+	"ipv6_enabled_groups":  {},
+	"metrics_push_enabled": {},
+	"auto_update_always":   {},
 }
 
 func testAccountResource(rName string) string {
@@ -300,16 +345,8 @@ func Test_Account_IPv6(t *testing.T) {
 		t.Fatalf("could not read the account's settings: %v", err)
 	}
 	t.Cleanup(func() {
-		settings, err := testAccountSettings(env.AccountID)
-		if err != nil {
-			t.Errorf("could not read the account's settings: %v", err)
-			return
-		}
-		settings.NetworkRangeV6 = original.NetworkRangeV6
-		settings.Ipv6EnabledGroups = original.Ipv6EnabledGroups
-		settings.EmbeddedIdpEnabled = nil
-		settings.LocalAuthDisabled = nil
-		if _, err := testClient().Accounts.Update(context.Background(), env.AccountID, api.AccountRequest{Settings: settings}); err != nil {
+		restore := api.AccountSettings{NetworkRangeV6: original.NetworkRangeV6, Ipv6EnabledGroups: original.Ipv6EnabledGroups}
+		if err := setAccountSettingsRaw(env.AccountID, restore); err != nil {
 			t.Errorf("could not restore the IPv6 settings: %v", err)
 		}
 	})

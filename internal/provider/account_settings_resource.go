@@ -178,12 +178,14 @@ func (r *AccountSettings) Schema(ctx context.Context, req resource.SchemaRequest
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				Validators:          []validator.String{canonicalPrefix{ipv6: false}},
 			},
 			"network_range_v6": schema.StringAttribute{
 				MarkdownDescription: "Allows to define a custom IPv6 overlay network range for the account in CIDR format",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				Validators:          []validator.String{canonicalPrefix{ipv6: true}},
 			},
 			"ipv6_enabled_groups": schema.ListAttribute{
 				MarkdownDescription: "List of group IDs whose peers receive IPv6 overlay addresses. Peers not in any of these groups are not allocated an IPv6 address.",

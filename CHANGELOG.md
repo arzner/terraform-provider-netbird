@@ -15,6 +15,9 @@ Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
 - `netbird_account_settings`: `local_mfa_enabled` (upstream netbirdio/terraform-provider-netbird#227 by Nathan).
 - `netbird_account_settings`: `network_range_v6` and `ipv6_enabled_groups`, also in the data source
   (#3; upstream #272).
+- `netbird_account_settings`: `network_range` and `network_range_v6` must be written in canonical
+  CIDR form (host bits zero, lower case, shortest IPv6 form), the way the server returns them;
+  any other spelling used to fail the apply with an inconsistent result.
 
 ### Fixed
 
