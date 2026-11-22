@@ -23,6 +23,9 @@ Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
   any other spelling used to fail the apply with an inconsistent result.
 - The provider address is `registry.terraform.io/arzner/netbird` (#6). Releases are signed
   with the key in `release-signing-key.asc` and their notes come from this file.
+- The acceptance suite runs with OpenTofu as well as Terraform: Terraform 1.14 to 1.17 and
+  OpenTofu 1.12 to 1.13 on `main`, the newest line of each on pull requests (#16). Terraform
+  1.12 and 1.13 are no longer tested.
 - Built against the NetBird client library v0.83.2 (was v0.81.0-canary.pr-7662.1); the acceptance
   suite runs against a NetBird v0.83.2 server (#3; upstream #280 bumps to 0.83.1).
 
