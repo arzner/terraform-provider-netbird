@@ -6,7 +6,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int32validator"
@@ -272,17 +271,6 @@ func accountAPIToTerraform(ctx context.Context, account *api.Account, data *Acco
 	return ret
 }
 
-// accountByID returns the listed account with the given ID. The update request
-// starts from that account's settings, so it must be the account being updated,
-// not whichever one the list returns first.
-func accountByID(accounts []api.Account, id string) (*api.Account, error) {
-	idx := slices.IndexFunc(accounts, func(a api.Account) bool { return a.Id == id })
-	if idx < 0 {
-		return nil, fmt.Errorf("account %s is not among the %d accounts the management server lists", id, len(accounts))
-	}
-	return &accounts[idx], nil
-}
-
 // accountTerraformToAPI builds the update request for the account's settings.
 // The management server builds the stored settings from the request alone and
 // saves every column, so a field missing from the request is reset. The
@@ -337,17 +325,7 @@ func (r *AccountSettings) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	accounts, err := r.client.Accounts.List(ctx)
-	if err != nil {
-		resp.Diagnostics.AddError("Error getting AccountSettings", err.Error())
-		return
-	}
-
-	account := &accounts[0]
-
-	updateRequest := accountTerraformToAPI(ctx, account, data)
-
-	account, err = r.client.Accounts.Update(ctx, account.Id, updateRequest)
+	account, err := updateAccountSettings(ctx, r.client, "", data)
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating AccountSettings", err.Error())
 		return
@@ -411,21 +389,7 @@ func (r *AccountSettings) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
-	accounts, err := r.client.Accounts.List(ctx)
-	if err != nil {
-		resp.Diagnostics.AddError("Error getting AccountSettings", err.Error())
-		return
-	}
-	account, err := accountByID(accounts, data.Id.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Account not found", err.Error())
-		return
-	}
-
-	updateRequest := accountTerraformToAPI(ctx, account, data)
-
-	account, err = r.client.Accounts.Update(ctx, data.Id.ValueString(), updateRequest)
-
+	account, err := updateAccountSettings(ctx, r.client, data.Id.ValueString(), data)
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating AccountSettings", err.Error())
 		return
