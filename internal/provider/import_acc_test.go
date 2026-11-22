@@ -345,33 +345,36 @@ resource "netbird_agent_network_policy" "%[1]s" {
 	}
 }
 
-// Test_Import_AccountSettingsTakesAnyID records something the table above
-// cannot: the account settings resource accepts whatever ID it is handed.
-//
-// Its Read fetches the account the token belongs to and ignores the ID
-// entirely, so there is no such thing as an account settings object that does
-// not exist, and no ID that can be wrong. That is reasonable for a singleton —
-// there is exactly one account to bind to — but it means an import typo is
-// silently accepted rather than reported, which is worth knowing before someone
-// spends an afternoon on it.
-func Test_Import_AccountSettingsTakesAnyID(t *testing.T) {
+// Test_Import_AccountSettingsChecksTheID: refresh reads the account whose ID is
+// in state, so importing an ID the management server does not list fails like
+// any other import of a missing object, instead of silently binding to
+// whichever account the token sees. Importing the real ID works.
+func Test_Import_AccountSettingsChecksTheID(t *testing.T) {
 	testE2E(t)
 	n := "i" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
 	address := "netbird_account_settings." + n
+	config := fmt.Sprintf(`
+resource "netbird_account_settings" "%[1]s" {
+  peer_login_expiration_enabled = true
+}`, n)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testEnsureManagementRunning(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: fmt.Sprintf(`
-resource "netbird_account_settings" "%[1]s" {
-  peer_login_expiration_enabled = true
-}`, n),
+				Config:        config,
 				ResourceName:  address,
 				ImportState:   true,
 				ImportStateId: "not-an-account-id",
-				Check: resource.TestCheckResourceAttr(address,
-					"id", mustE2E().AccountID),
+				ExpectError:   regexp.MustCompile(`Cannot import non-existent remote object`),
+			},
+			{
+				Config:             config,
+				ResourceName:       address,
+				ImportState:        true,
+				ImportStateId:      mustE2E().AccountID,
+				ImportStatePersist: true,
+				Check:              resource.TestCheckResourceAttr(address, "id", mustE2E().AccountID),
 			},
 		},
 	})

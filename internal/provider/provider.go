@@ -92,6 +92,7 @@ func (p *NetBirdProvider) Configure(ctx context.Context, req provider.ConfigureR
 	client := netbird.NewWithOptions(
 		netbird.WithManagementURL(managementURL),
 		netbird.WithPAT(token),
+		netbird.WithHttpClient(newBoundedClient()),
 		netbird.WithUserAgent(fmt.Sprintf("terraform-provider-netbird/%s Terraform/%s", p.version, req.TerraformVersion)))
 	if !data.TenantAccount.IsNull() && !data.TenantAccount.IsUnknown() {
 		client = client.Impersonate(data.TenantAccount.ValueString())
