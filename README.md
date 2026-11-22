@@ -89,6 +89,27 @@ Moving from `netbirdio/netbird` needs no change to resources or state beyond
 the address: `terraform state replace-provider netbirdio/netbird arzner/netbird`.
 Check usage in [docs](./docs/index.md).
 
+### Compatibility with NetBird
+
+Provider versions follow their own semantic versioning. Each release is built
+against one NetBird client library version and passes the acceptance suite
+against a NetBird server built from that same version: its *tested* version.
+The tested NetBird minor line is supported; the one before it is meant to be
+supported too once the acceptance suite also runs against it (not yet).
+Older servers may work but are not promised.
+
+| Provider | Tested with NetBird | Supported NetBird |
+| --- | --- | --- |
+| 0.1.x | v0.83.2 | 0.83 |
+
+A new NetBird release is adopted by bumping the dependency, which runs the
+acceptance suite against the new server and the API spec check, and is
+followed by a provider release. A daily workflow also runs the suite
+against the newest NetBird release before the bump and opens an issue
+labelled `netbird-latest` when it fails. A NetBird change that breaks
+existing configurations is released as a new minor version (0.x) or, from
+1.0, a major version, and spelled out in the changelog.
+
 ### Verifying a release
 
 Each release carries `SHA256SUMS` and its detached signature `SHA256SUMS.sig`,

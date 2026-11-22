@@ -24,13 +24,27 @@ on:
       - main
     paths-ignore:
       - 'README.md'
-  # For running the full matrix on a branch before merging it.
+  # For running the full matrix on a branch before merging it, or the suite
+  # against another NetBird release.
   workflow_dispatch:
     inputs:
       full_matrix:
         description: 'Run every supported Terraform and OpenTofu version'
         type: boolean
         default: false
+      netbird_version:
+        description: 'Test against this NetBird release (vX.Y.Z) instead of the one go.mod pins'
+        type: string
+        default: ''
+  # netbird-latest.yml runs the suite against the newest NetBird release.
+  workflow_call:
+    inputs:
+      full_matrix:
+        type: boolean
+        default: false
+      netbird_version:
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -68,6 +82,17 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
+      - name: Use the requested NetBird release
+        if: inputs.netbird_version != ''
+        env:
+          NB_VERSION: ${{ inputs.netbird_version }}
+        run: |
+          if ! [[ $NB_VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::netbird_version must look like v1.2.3, got: $NB_VERSION"
+            exit 1
+          fi
+          go get "github.com/netbirdio/netbird@$NB_VERSION"
+          go mod tidy
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to the container registry
         env:
@@ -102,6 +127,20 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
+      # Only for a run against another NetBird release: the module moves in this
+      # job's checkout, never in the repository, and the images, the harness and
+      # the provider all follow it.
+      - name: Use the requested NetBird release
+        if: inputs.netbird_version != ''
+        env:
+          NB_VERSION: ${{ inputs.netbird_version }}
+        run: |
+          if ! [[ $NB_VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::netbird_version must look like v1.2.3, got: $NB_VERSION"
+            exit 1
+          fi
+          go get "github.com/netbirdio/netbird@$NB_VERSION"
+          go mod tidy
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to the container registry
         # Without a login nothing resolves and the harness builds the images.
@@ -134,7 +173,7 @@ jobs:
         # for it run every supported line of both. Each version is a wildcard, so
         # a patch release is picked up without a change here; a new minor line
         # is edited here and in the README compatibility table.
-        include: ${{ fromJSON((github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_matrix)) && '[{"label":"terraform 1.14.*","cli":"terraform","version":"1.14.*"},{"label":"terraform 1.15.*","cli":"terraform","version":"1.15.*"},{"label":"terraform 1.16.*","cli":"terraform","version":"1.16.*"},{"label":"terraform 1.17.*","cli":"terraform","version":"1.17.*"},{"label":"opentofu 1.12.*","cli":"opentofu","version":"1.12.*"},{"label":"opentofu 1.13.*","cli":"opentofu","version":"1.13.*"}]' || '[{"label":"terraform","cli":"terraform","version":"1.17.*"},{"label":"opentofu","cli":"opentofu","version":"1.13.*"}]') }}
+        include: ${{ fromJSON((github.event_name == 'push' || inputs.full_matrix) && '[{"label":"terraform 1.14.*","cli":"terraform","version":"1.14.*"},{"label":"terraform 1.15.*","cli":"terraform","version":"1.15.*"},{"label":"terraform 1.16.*","cli":"terraform","version":"1.16.*"},{"label":"terraform 1.17.*","cli":"terraform","version":"1.17.*"},{"label":"opentofu 1.12.*","cli":"opentofu","version":"1.12.*"},{"label":"opentofu 1.13.*","cli":"opentofu","version":"1.13.*"}]' || '[{"label":"terraform","cli":"terraform","version":"1.17.*"},{"label":"opentofu","cli":"opentofu","version":"1.13.*"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -145,6 +184,20 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
+      # Only for a run against another NetBird release: the module moves in this
+      # job's checkout, never in the repository, and the images, the harness and
+      # the provider all follow it.
+      - name: Use the requested NetBird release
+        if: inputs.netbird_version != ''
+        env:
+          NB_VERSION: ${{ inputs.netbird_version }}
+        run: |
+          if ! [[ $NB_VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::netbird_version must look like v1.2.3, got: $NB_VERSION"
+            exit 1
+          fi
+          go get "github.com/netbirdio/netbird@$NB_VERSION"
+          go mod tidy
       - if: matrix.cli == 'terraform'
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:

@@ -1,0 +1,113 @@
+# Early warning for NetBird releases: once a day, run the acceptance suite
+# against the newest NetBird release while go.mod still pins an older one. A
+# break shows up here, as an issue labelled netbird-latest, before anyone bumps
+# the dependency or upgrades a server. When the suite passes again, the issue
+# is closed with a note.
+name: NetBird latest
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+# One run at a time, so two runs never both find no issue and open two.
+concurrency:
+  group: netbird-latest
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      latest: ${{ steps.versions.outputs.latest }}
+      pinned: ${{ steps.versions.outputs.pinned }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest=$(gh api repos/netbirdio/netbird/releases/latest --jq .tag_name)
+          pinned=$(awk '$1 == "github.com/netbirdio/netbird" { print $2; exit }' go.mod)
+          # A release tag is exactly vX.Y.Z; the pin may be any Go module
+          # version, but never contains whitespace or shell syntax.
+          if ! [[ $latest =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::unexpected latest release: $latest"
+            exit 1
+          fi
+          if ! [[ $pinned =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::unexpected pinned version: $pinned"
+            exit 1
+          fi
+          echo "pinned $pinned, latest release $latest"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    name: Against the latest release
+    needs: resolve
+    # The pinned version is tested on every pull request and push already.
+    if: needs.resolve.outputs.latest != needs.resolve.outputs.pinned
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/e2e.yml
+    with:
+      netbird_version: ${{ needs.resolve.outputs.latest }}
+
+  # Opens, updates or closes the issue for the newest release. When go.mod
+  # already pins it, the suite ran on the pull request that bumped it (a
+  # required check), so an open issue for it is closed.
+  report:
+    name: Report
+    needs: [resolve, e2e]
+    if: always() && needs.resolve.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ needs.e2e.result }}
+          LATEST: ${{ needs.resolve.outputs.latest }}
+          PINNED: ${{ needs.resolve.outputs.pinned }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Acceptance suite fails against NetBird $LATEST"
+          issues=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --label netbird-latest --limit 1000 --json number,title)
+          open=$(jq -r --arg t "$title" 'map(select(.title == $t)) | .[0].number // empty' <<<"$issues")
+          # Closes every open netbird-latest issue: a failure against an older
+          # release is superseded once the newest one passes.
+          close_all() {
+            for n in $(jq -r '.[].number' <<<"$issues"); do
+              gh issue close "$n" -R "$GITHUB_REPOSITORY" --comment "$1"
+            done
+          }
+          if [ "$LATEST" = "$PINNED" ]; then
+            close_all "go.mod now pins $LATEST, which the required acceptance checks test on every pull request: $RUN_URL"
+            exit 0
+          fi
+          if [ "$RESULT" = success ]; then
+            echo "passes against $LATEST"
+            close_all "The acceptance suite passes against NetBird $LATEST: $RUN_URL"
+            exit 0
+          fi
+          body="The daily run of the acceptance suite against NetBird $LATEST fails ($RESULT); go.mod pins $PINNED.
+
+          Latest failing run: $RUN_URL ($(date -u +%Y-%m-%d))
+
+          Find what changed in NetBird, fix the provider or record the incompatibility, and bump the dependency (see the compatibility policy in the README)."
+          # A daily run would comment every day while a release stays broken;
+          # it keeps the latest run in the issue body instead.
+          if [ -n "$open" ]; then
+            gh issue edit "$open" -R "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --label netbird-latest --title "$title" --body "$body"
+          fi
