@@ -39,12 +39,14 @@ resource "netbird_account_settings" "example" {
 - `auto_update_version` (String) Set Clients auto-update version. "latest", "disabled", or a specific version (e.g "0.64.5")
 - `dns_domain` (String) Allows to define a custom DNS domain for the account
 - `groups_propagation_enabled` (Boolean) Allows propagate the new user auto groups to peers that belongs to the user
+- `ipv6_enabled_groups` (List of String) List of group IDs whose peers receive IPv6 overlay addresses. Peers not in any of these groups are not allocated an IPv6 address.
 - `jwt_allow_groups` (List of String) List of groups to which users are allowed access
 - `jwt_groups_claim_name` (String) Name of the claim from which we extract groups names to add it to account groups.
 - `jwt_groups_enabled` (Boolean) Allows extract groups from JWT claim and add it to account groups.
 - `lazy_connection_enabled` (Boolean) Enables or disables experimental lazy connection
 - `local_mfa_enabled` (Boolean) Enables or disables TOTP multi-factor authentication for local users. Only applicable when the embedded identity provider is enabled.
 - `network_range` (String) Allows to define a custom network range for the account in CIDR format
+- `network_range_v6` (String) Allows to define a custom IPv6 overlay network range for the account in CIDR format
 - `network_traffic_logs_enabled` (Boolean) Enables or disables network traffic logging. If enabled, all network traffic events from peers will be stored.
 - `network_traffic_logs_groups` (List of String) Limits traffic logging to these groups. If unset all peers are enabled.
 - `network_traffic_packet_counter_enabled` (Boolean) Enables or disables network traffic packet counter. If enabled, network packets and their size will be counted and reported. (This can have an slight impact on performance)
