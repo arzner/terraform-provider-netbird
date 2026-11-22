@@ -21,9 +21,10 @@ Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
   current settings (upstream #244 by chad-loder) and, beyond that, sends back as they are the
   settings the compiled client library does not know, so a management server newer than the
   library keeps them too.
-- `netbird_account_settings` updates and refreshes the account by its ID, and returns an error
-  instead of panicking when the token sees no account or the account list fails, in the resource
-  and the data source (#4; upstream #118, #277, fix #276 by Tim Rabl).
+- `netbird_account_settings` updates and refreshes the account by its ID and no longer panics on
+  an empty or failed account list (#4; upstream #118, #277, fix #276 by Tim Rabl): a failed list
+  is an error everywhere; an empty list is an error on create, update and in the data source,
+  while refresh removes a resource whose account is no longer listed.
 - Management API responses are bounded to 64 MiB, error responses included, and their
   connections are released.
 
