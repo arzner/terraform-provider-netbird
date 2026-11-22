@@ -34,6 +34,9 @@ Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
   fails as a missing object instead of binding to the token's account.
 - Management API responses are bounded to 64 MiB, error responses included, and their
   connections are released.
+- `netbird_group` with attached network resources can be updated again; a plan without
+  `resources` keeps the attached ones instead of detaching them (#5; upstream #104, #150,
+  fix #268 by Andreas Wapf).
 
 ### Removed
 
