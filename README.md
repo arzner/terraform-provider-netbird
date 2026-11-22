@@ -104,7 +104,7 @@ Older servers may work but are not promised.
 
 A new NetBird release is adopted by bumping the dependency, which runs the
 acceptance suite against the new server and the API spec check, and is
-followed by a provider release. A weekly workflow also runs the suite
+followed by a provider release. A daily workflow also runs the suite
 against the newest NetBird release before the bump and opens an issue
 labelled `netbird-latest` when it fails. A NetBird change that breaks
 existing configurations is released as a new minor version (0.x) or, from

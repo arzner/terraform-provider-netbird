@@ -1,4 +1,4 @@
-# Early warning for NetBird releases: once a week, run the acceptance suite
+# Early warning for NetBird releases: once a day, run the acceptance suite
 # against the newest NetBird release while go.mod still pins an older one. A
 # break shows up here, as an issue labelled netbird-latest, before anyone bumps
 # the dependency or upgrades a server. When the suite passes again, the issue
@@ -7,7 +7,7 @@ name: NetBird latest
 
 on:
   schedule:
-    - cron: '17 5 * * 1'
+    - cron: '17 5 * * *'
   workflow_dispatch:
 
 permissions: {}
@@ -99,13 +99,15 @@ jobs:
             close_all "The acceptance suite passes against NetBird $LATEST: $RUN_URL"
             exit 0
           fi
-          if [ -n "$open" ]; then
-            gh issue comment "$open" -R "$GITHUB_REPOSITORY" --body "Still failing: $RUN_URL"
-          else
-            gh issue create -R "$GITHUB_REPOSITORY" --label netbird-latest --title "$title" --body \
-              "The weekly run of the acceptance suite against NetBird $LATEST failed ($RESULT); go.mod pins $PINNED.
+          body="The daily run of the acceptance suite against NetBird $LATEST fails ($RESULT); go.mod pins $PINNED.
 
-          Run: $RUN_URL
+          Latest failing run: $RUN_URL ($(date -u +%Y-%m-%d))
 
           Find what changed in NetBird, fix the provider or record the incompatibility, and bump the dependency (see the compatibility policy in the README)."
+          # A daily run would comment every day while a release stays broken;
+          # it keeps the latest run in the issue body instead.
+          if [ -n "$open" ]; then
+            gh issue edit "$open" -R "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --label netbird-latest --title "$title" --body "$body"
           fi
