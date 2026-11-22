@@ -151,3 +151,31 @@ func TestAccountSettingsDataSourceReadListFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestAccountSettingsReadSelectsTheStateAccount(t *testing.T) {
+	ctx := context.Background()
+	body := `[{"id":"other","settings":{"peer_login_expiration":1,"extra":{}}},` +
+		`{"id":"account-1","settings":{"peer_login_expiration":2,"extra":{}}}]`
+	r, schema := accountSettingsResource(t, accountsClient(t, http.StatusOK, body))
+	id := "account-1"
+	state := tfsdk.State{Schema: schema.Schema, Raw: objectValue(t, schema.Schema.Type().TerraformType(ctx), &id)}
+
+	resp := resource.ReadResponse{State: state}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics)
+	}
+	var got AccountSettingsModel
+	resp.Diagnostics.Append(resp.State.Get(ctx, &got)...)
+	if got.Id.ValueString() != "account-1" || got.PeerLoginExpiration.ValueInt32() != 2 {
+		t.Fatalf("expected account-1 with peer_login_expiration 2, found %s with %d", got.Id.ValueString(), got.PeerLoginExpiration.ValueInt32())
+	}
+
+	gone := "gone"
+	state = tfsdk.State{Schema: schema.Schema, Raw: objectValue(t, schema.Schema.Type().TerraformType(ctx), &gone)}
+	resp = resource.ReadResponse{State: state}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+	if !resp.State.Raw.IsNull() {
+		t.Fatal("an account that is no longer listed must be removed from state")
+	}
+}

@@ -355,11 +355,11 @@ func (r *AccountSettings) Read(ctx context.Context, req resource.ReadRequest, re
 		resp.Diagnostics.AddError("Error getting AccountSettings", err.Error())
 		return
 	}
-	if len(accounts) == 0 {
+	account := stateAccount(accounts, data.Id.ValueString())
+	if account == nil {
 		resp.State.RemoveResource(ctx)
 		return
 	}
-	account := &accounts[0]
 
 	resp.Diagnostics.Append(accountAPIToTerraform(ctx, account, &data)...)
 

@@ -87,8 +87,9 @@ func selectAccount(accounts []rawAccount, id string) (*rawAccount, error) {
 
 // mergeSettings lays the typed request over the current raw settings. Keys the
 // typed request carries replace the current ones; every other key, including
-// ones the compiled API types do not know, is sent back unchanged. The nested
-// extra object is merged the same way.
+// ones the compiled API types do not know, is sent back unchanged. Where both
+// sides hold an object (extra, dashboard_features) the merge recurses, so the
+// object's unknown members are kept as well.
 func mergeSettings(current map[string]json.RawMessage, request api.AccountRequest) (map[string]json.RawMessage, error) {
 	typed, err := json.Marshal(request.Settings)
 	if err != nil {
@@ -105,32 +106,59 @@ func mergeSettings(current map[string]json.RawMessage, request api.AccountReques
 	for _, k := range readOnlySettings {
 		delete(out, k)
 	}
-	for k, v := range overlay {
-		if k == "extra" {
-			merged, err := mergeObject(out[k], v)
-			if err != nil {
-				return nil, fmt.Errorf("merging extra settings: %w", err)
-			}
-			v = merged
-		}
-		out[k] = v
+	if err := mergeInto(out, overlay); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
 
-func mergeObject(current, overlay json.RawMessage) (json.RawMessage, error) {
-	base := map[string]json.RawMessage{}
-	if len(current) > 0 && string(current) != "null" {
-		if err := json.Unmarshal(current, &base); err != nil {
-			return nil, err
+// mergeInto copies overlay into base key by key, recursing where both values
+// are JSON objects.
+func mergeInto(base, overlay map[string]json.RawMessage) error {
+	for k, v := range overlay {
+		cur, ok := asObject(base[k])
+		top, isObj := asObject(v)
+		if ok && isObj {
+			if err := mergeInto(cur, top); err != nil {
+				return fmt.Errorf("%s: %w", k, err)
+			}
+			merged, err := json.Marshal(cur)
+			if err != nil {
+				return fmt.Errorf("%s: %w", k, err)
+			}
+			v = merged
+		}
+		base[k] = v
+	}
+	return nil
+}
+
+// asObject decodes raw as a JSON object; ok is false for anything else.
+func asObject(raw json.RawMessage) (map[string]json.RawMessage, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, false
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &m); err != nil || m == nil {
+		return nil, false
+	}
+	return m, true
+}
+
+// stateAccount returns the account a resource in state refers to: the one with
+// its ID, or the first one listed when the state has no ID yet. Nil means the
+// account is gone.
+func stateAccount(accounts []api.Account, id string) *api.Account {
+	if id == "" && len(accounts) > 0 {
+		return &accounts[0]
+	}
+	for i := range accounts {
+		if accounts[i].Id == id {
+			return &accounts[i]
 		}
 	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(overlay, &top); err != nil {
-		return nil, err
-	}
-	maps.Copy(base, top)
-	return json.Marshal(base)
+	return nil
 }
 
 // updateAccountSettings applies the plan to the account's settings and returns

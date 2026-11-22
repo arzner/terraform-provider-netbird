@@ -38,6 +38,7 @@ const stubAccounts = `[{
     "ipv6_enabled_groups": ["g-all"],
     "peer_hostname_collision_rejected": true,
     "future_setting": {"nested": [1, 2]},
+    "dashboard_features": {"agent_network": true, "future_feature": true},
     "embedded_idp_enabled": true,
     "local_auth_disabled": false,
     "extra": {
@@ -62,9 +63,11 @@ func Test_updateAccountSettings_keepsSettingsUnknownToTheClient(t *testing.T) {
 			if err := json.Unmarshal(body, &put); err != nil {
 				t.Errorf("request body is not a JSON object: %v", err)
 			}
-			var accounts []json.RawMessage
+			var accounts []map[string]json.RawMessage
 			_ = json.Unmarshal([]byte(stubAccounts), &accounts)
-			_, _ = w.Write(accounts[0])
+			accounts[0]["settings"], _ = json.Marshal(put["settings"])
+			out, _ := json.Marshal(accounts[0])
+			_, _ = w.Write(out)
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -81,8 +84,13 @@ func Test_updateAccountSettings_keepsSettingsUnknownToTheClient(t *testing.T) {
 		JwtAllowGroups:             types.ListNull(types.StringType),
 		PeerLoginExpirationEnabled: types.BoolNull(),
 	}
-	if _, err := updateAccountSettings(context.Background(), netbird.New(srv.URL, "token"), "acc1", data); err != nil {
+	updated, err := updateAccountSettings(context.Background(), netbird.New(srv.URL, "token"), "acc1", data)
+	if err != nil {
 		t.Fatalf("update: %v", err)
+	}
+	if updated.Settings.LocalMfaEnabled == nil || !*updated.Settings.LocalMfaEnabled || updated.Settings.PeerLoginExpiration != 3600 {
+		t.Errorf("returned account: expected local MFA on and peer_login_expiration 3600, found %v and %d",
+			updated.Settings.LocalMfaEnabled, updated.Settings.PeerLoginExpiration)
 	}
 	settings := put["settings"]
 	if settings == nil {
@@ -100,6 +108,7 @@ func Test_updateAccountSettings_keepsSettingsUnknownToTheClient(t *testing.T) {
 		"ipv6_enabled_groups":              `["g-all"]`,
 		"peer_hostname_collision_rejected": `true`,
 		"future_setting":                   `{"nested":[1,2]}`,
+		"dashboard_features":               `{"agent_network":true,"future_feature":true}`,
 	}
 	for k, v := range want {
 		if got := compact(t, settings[k]); got != v {
@@ -153,6 +162,60 @@ func Test_mergeSettings_withoutCurrentSettings(t *testing.T) {
 	}
 	if got := compact(t, out["peer_login_expiration"]); got != `60` {
 		t.Fatalf("peer_login_expiration: expected 60, found %s", got)
+	}
+}
+
+func Test_mergeSettings_nestedObjects(t *testing.T) {
+	current := map[string]json.RawMessage{
+		"dashboard_features": json.RawMessage(`{"agent_network":false,"future_feature":true}`),
+		"extra":              json.RawMessage(`{"peer_approval_enabled":false,"future_extra":1}`),
+		"jwt_allow_groups":   json.RawMessage(`["a","b"]`),
+	}
+	on := true
+	request := api.AccountRequest{Settings: api.AccountSettings{
+		DashboardFeatures: &api.AccountDashboardFeatures{AgentNetwork: &on},
+		Extra:             &api.AccountExtraSettings{PeerApprovalEnabled: true},
+		JwtAllowGroups:    &[]string{},
+	}}
+	out, err := mergeSettings(current, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{
+		"dashboard_features": `{"agent_network":true,"future_feature":true}`,
+		"jwt_allow_groups":   `[]`,
+	} {
+		if got := compact(t, out[k]); got != v {
+			t.Errorf("%s: expected %s, found %s", k, v, got)
+		}
+	}
+	var extra map[string]any
+	_ = json.Unmarshal(out["extra"], &extra)
+	if extra["peer_approval_enabled"] != true || extra["future_extra"] != float64(1) {
+		t.Errorf("extra: expected the managed value set and the unknown kept, found %v", extra)
+	}
+}
+
+func Test_stateAccount(t *testing.T) {
+	accounts := []api.Account{{Id: "first"}, {Id: "managed"}}
+	if got := stateAccount(accounts, "managed"); got == nil || got.Id != "managed" {
+		t.Errorf("expected account managed, found %v", got)
+	}
+	if got := stateAccount(accounts, ""); got == nil || got.Id != "first" {
+		t.Errorf("without an ID: expected the first account, found %v", got)
+	}
+	if got := stateAccount(accounts, "gone"); got != nil {
+		t.Errorf("expected no account for an ID the list does not hold, found %v", got)
+	}
+	if got := stateAccount(nil, ""); got != nil {
+		t.Errorf("expected no account for an empty list, found %v", got)
+	}
+}
+
+func Test_selectAccount_byID(t *testing.T) {
+	accounts := []rawAccount{{account: api.Account{Id: "first"}}, {account: api.Account{Id: "managed"}}}
+	if got, err := selectAccount(accounts, "managed"); err != nil || got.account.Id != "managed" {
+		t.Errorf("expected account managed, found %v (err %v)", got, err)
 	}
 }
 
