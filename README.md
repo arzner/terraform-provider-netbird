@@ -39,7 +39,10 @@ A Terraform Provider for managing your [NetBird](https://netbird.io) Account and
 
 ## Requirements
 
-- [Terraform](https://developer.hashicorp.com/terraform/downloads) >= 1.0
+- [Terraform](https://developer.hashicorp.com/terraform/downloads) 1.14 to 1.17 or
+  [OpenTofu](https://opentofu.org/) 1.12 to 1.13: the versions the acceptance suite runs
+  with (pull requests use the newest line of each, `main` all of them). Older versions
+  may work but are not tested.
 - [Go](https://golang.org/doc/install) >= 1.23
 - [NetBird Account](https://docs.netbird.io/)
 

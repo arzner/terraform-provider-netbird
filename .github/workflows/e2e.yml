@@ -28,7 +28,7 @@ on:
   workflow_dispatch:
     inputs:
       full_matrix:
-        description: 'Run every supported Terraform version'
+        description: 'Run every supported Terraform and OpenTofu version'
         type: boolean
         default: false
 
@@ -76,7 +76,7 @@ jobs:
           PUSH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         run: .github/scripts/e2e-images.sh
   acceptance:
-    name: Acceptance tests
+    name: Acceptance tests (${{ matrix.label }})
     needs: images
     runs-on: ubuntu-latest
     permissions:
@@ -89,11 +89,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The current CLI line and the three before it on main and on a dispatch
-        # that asks for them; the current line alone everywhere else. Each entry is
-        # a wildcard, so a patch release is picked up without a change here — only
-        # a new minor line is worth editing for.
-        terraform: ${{ fromJSON((github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_matrix)) && '["1.12.*","1.13.*","1.14.*","1.15.*"]' || '["1.15.*"]') }}
+        # Pull requests run the current Terraform and OpenTofu lines, under
+        # stable names the branch ruleset requires. Main and a dispatch that asks
+        # for it run every supported line of both. Each version is a wildcard, so
+        # a patch release is picked up without a change here; a new minor line
+        # is edited here and in the README compatibility table.
+        include: ${{ fromJSON((github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.full_matrix)) && '[{"label":"terraform 1.14.*","cli":"terraform","version":"1.14.*"},{"label":"terraform 1.15.*","cli":"terraform","version":"1.15.*"},{"label":"terraform 1.16.*","cli":"terraform","version":"1.16.*"},{"label":"terraform 1.17.*","cli":"terraform","version":"1.17.*"},{"label":"opentofu 1.12.*","cli":"opentofu","version":"1.12.*"},{"label":"opentofu 1.13.*","cli":"opentofu","version":"1.13.*"}]' || '[{"label":"terraform","cli":"terraform","version":"1.17.*"},{"label":"opentofu","cli":"opentofu","version":"1.13.*"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -104,10 +105,31 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+      - if: matrix.cli == 'terraform'
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
-          terraform_version: ${{ matrix.terraform }}
+          terraform_version: ${{ matrix.version }}
           terraform_wrapper: false
+      - if: matrix.cli == 'opentofu'
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ matrix.version }}
+          tofu_wrapper: false
+      # terraform-plugin-testing runs whichever CLI TF_ACC_TERRAFORM_PATH names
+      # and writes provider addresses under TF_ACC_PROVIDER_HOST, so the same
+      # suite runs against OpenTofu with the OpenTofu registry host.
+      - name: Select the CLI
+        env:
+          CLI: ${{ matrix.cli }}
+        run: |
+          if [ "$CLI" = opentofu ]; then
+            echo "TF_ACC_TERRAFORM_PATH=$(command -v tofu)" >> "$GITHUB_ENV"
+            echo "TF_ACC_PROVIDER_HOST=registry.opentofu.org" >> "$GITHUB_ENV"
+            tofu version
+          else
+            echo "TF_ACC_TERRAFORM_PATH=$(command -v terraform)" >> "$GITHUB_ENV"
+            terraform version
+          fi
       # The harness builds its images with `docker buildx --load`, and exporting a
       # local layer cache needs the container driver rather than the default
       # docker one.
