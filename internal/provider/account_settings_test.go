@@ -6,9 +6,69 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
+
+func Test_AccountSettings_LocalMFASchema(t *testing.T) {
+	ctx := context.Background()
+	var resourceResp resource.SchemaResponse
+	(&AccountSettings{}).Schema(ctx, resource.SchemaRequest{}, &resourceResp)
+	attribute, ok := resourceResp.Schema.Attributes["local_mfa_enabled"]
+	if !ok {
+		t.Fatal("account settings resource must expose local_mfa_enabled")
+	}
+	if !attribute.IsOptional() || !attribute.IsComputed() {
+		t.Fatal("local_mfa_enabled must be optional and computed to adopt server settings")
+	}
+	var dataSourceResp datasource.SchemaResponse
+	(&AccountSettingsDataSource{}).Schema(ctx, datasource.SchemaRequest{}, &dataSourceResp)
+	attributeDS, ok := dataSourceResp.Schema.Attributes["local_mfa_enabled"]
+	if !ok || !attributeDS.IsComputed() {
+		t.Fatal("account settings data source must expose computed local_mfa_enabled")
+	}
+}
+
+func Test_AccountSettings_LocalMFAMapping(t *testing.T) {
+	cases := []struct {
+		name    string
+		current *bool
+		planned types.Bool
+		want    *bool
+	}{
+		{"enable", valPtr(false), types.BoolValue(true), valPtr(true)},
+		{"disable", valPtr(true), types.BoolValue(false), valPtr(false)},
+		{"omitted enabled", valPtr(true), types.BoolNull(), valPtr(true)},
+		{"omitted disabled", valPtr(false), types.BoolNull(), valPtr(false)},
+		{"unknown enabled", valPtr(true), types.BoolUnknown(), valPtr(true)},
+		{"unknown disabled", valPtr(false), types.BoolUnknown(), valPtr(false)},
+		{"unavailable", nil, types.BoolNull(), nil},
+		{"unknown unavailable", nil, types.BoolUnknown(), nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := context.Background()
+			account := &api.Account{Settings: api.AccountSettings{
+				LocalMfaEnabled: c.current,
+				Extra:           &api.AccountExtraSettings{},
+			}}
+			var data AccountSettingsModel
+			if diagnostics := accountAPIToTerraform(ctx, account, &data); diagnostics.HasError() {
+				t.Fatalf("map account settings: %v", diagnostics)
+			}
+			if !data.LocalMfaEnabled.Equal(types.BoolPointerValue(c.current)) {
+				t.Fatalf("read local_mfa_enabled: got %v, want %v", data.LocalMfaEnabled, c.current)
+			}
+			data.LocalMfaEnabled = c.planned
+			request := accountTerraformToAPI(ctx, account, data)
+			if !reflect.DeepEqual(request.Settings.LocalMfaEnabled, c.want) {
+				t.Fatalf("write local_mfa_enabled: got %v, want %v", request.Settings.LocalMfaEnabled, c.want)
+			}
+		})
+	}
+}
 
 func Test_accountAPIToTerraform(t *testing.T) {
 	cases := []struct {
@@ -62,6 +122,8 @@ func Test_accountAPIToTerraform(t *testing.T) {
 				AutoUpdateVersion:                  types.StringNull(),
 				DnsDomain:                          types.StringNull(),
 				NetworkRange:                       types.StringNull(),
+				NetworkRangeV6:                     types.StringNull(),
+				Ipv6EnabledGroups:                  types.ListNull(types.StringType),
 				LazyConnectionEnabled:              types.BoolNull(),
 				UserApprovalRequired:               types.BoolValue(false),
 				NetworkTrafficLogsGroups:           types.ListNull(types.StringType),
@@ -76,7 +138,10 @@ func Test_accountAPIToTerraform(t *testing.T) {
 					AutoUpdateVersion:               valPtr("latest"),
 					DnsDomain:                       valPtr("custom.com"),
 					NetworkRange:                    valPtr("100.64.0.0/10"),
+					NetworkRangeV6:                  valPtr("fd00:1234::/64"),
+					Ipv6EnabledGroups:               &[]string{"g2", "g1"},
 					LazyConnectionEnabled:           valPtr(true),
+					LocalMfaEnabled:                 valPtr(true),
 					GroupsPropagationEnabled:        valPtr(true),
 					JwtAllowGroups:                  &[]string{"test"},
 					JwtGroupsClaimName:              valPtr("test"),
@@ -116,7 +181,10 @@ func Test_accountAPIToTerraform(t *testing.T) {
 				AutoUpdateVersion:                  types.StringValue("latest"),
 				DnsDomain:                          types.StringValue("custom.com"),
 				NetworkRange:                       types.StringValue("100.64.0.0/10"),
+				NetworkRangeV6:                     types.StringValue("fd00:1234::/64"),
+				Ipv6EnabledGroups:                  types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g1"), types.StringValue("g2")}),
 				LazyConnectionEnabled:              types.BoolValue(true),
+				LocalMfaEnabled:                    types.BoolValue(true),
 				UserApprovalRequired:               types.BoolValue(true),
 				NetworkTrafficLogsGroups:           types.ListValueMust(types.StringType, []attr.Value{types.StringValue("group1")}),
 				PeerExposeEnabled:                  types.BoolValue(true),
@@ -294,5 +362,111 @@ func Test_accountTerraformToAPI(t *testing.T) {
 		if !reflect.DeepEqual(out, c.expected) {
 			t.Fatalf("Expected:\n%#v\nFound:\n%#v", c.expected, out)
 		}
+	}
+}
+
+func Test_accountTerraformToAPI_keepsUnmodeledSettings(t *testing.T) {
+	enabled := true
+	groups := []string{"group6"}
+	v6Range := "fd00:1234:5678::/64"
+	account := &api.Account{
+		Id: "a",
+		Settings: api.AccountSettings{
+			AgentNetworkOnly:   &enabled,
+			AutoUpdateAlways:   &enabled,
+			DashboardFeatures:  &api.AccountDashboardFeatures{AgentNetwork: &enabled},
+			EmbeddedIdpEnabled: &enabled,
+			LocalAuthDisabled:  &enabled,
+			Ipv6EnabledGroups:  &groups,
+			LocalMfaEnabled:    &enabled,
+			MetricsPushEnabled: &enabled,
+			NetworkRangeV6:     &v6Range,
+			Extra:              &api.AccountExtraSettings{},
+		},
+	}
+	data := AccountSettingsModel{
+		Id:               types.StringValue("a"),
+		JwtGroupsEnabled: types.BoolValue(true),
+	}
+
+	out := accountTerraformToAPI(context.Background(), account, data).Settings
+
+	if out.JwtGroupsEnabled == nil || !*out.JwtGroupsEnabled {
+		t.Fatalf("jwt_groups_enabled: expected true, found %v", out.JwtGroupsEnabled)
+	}
+	if out.EmbeddedIdpEnabled != nil || out.LocalAuthDisabled != nil {
+		t.Errorf("read-only fields: expected none in the request, found embedded_idp_enabled %v, local_auth_disabled %v",
+			out.EmbeddedIdpEnabled, out.LocalAuthDisabled)
+	}
+	for name, v := range map[string]*bool{
+		"agent_network_only":               out.AgentNetworkOnly,
+		"auto_update_always":               out.AutoUpdateAlways,
+		"local_mfa_enabled":                out.LocalMfaEnabled,
+		"metrics_push_enabled":             out.MetricsPushEnabled,
+		"dashboard_features.agent_network": dashboardAgentNetwork(out.DashboardFeatures),
+	} {
+		if v == nil || !*v {
+			t.Errorf("%s: expected the account's true to be kept, found %v", name, v)
+		}
+	}
+	if out.Ipv6EnabledGroups == nil || !reflect.DeepEqual(*out.Ipv6EnabledGroups, groups) {
+		t.Errorf("ipv6_enabled_groups: expected %v, found %v", groups, out.Ipv6EnabledGroups)
+	}
+	if out.NetworkRangeV6 == nil || *out.NetworkRangeV6 != v6Range {
+		t.Errorf("network_range_v6: expected %s, found %v", v6Range, out.NetworkRangeV6)
+	}
+}
+
+func Test_accountTerraformToAPI_withoutExtra(t *testing.T) {
+	account := &api.Account{Id: "a"}
+	data := AccountSettingsModel{
+		Id:                       types.StringValue("a"),
+		PeerApprovalEnabled:      types.BoolValue(true),
+		NetworkTrafficLogsGroups: types.ListNull(types.StringType),
+	}
+
+	out := accountTerraformToAPI(context.Background(), account, data).Settings
+
+	if out.Extra == nil || !out.Extra.PeerApprovalEnabled {
+		t.Fatalf("extra: expected peer_approval_enabled true, found %#v", out.Extra)
+	}
+}
+
+// dashboardAgentNetwork reads dashboard_features.agent_network, nil when the
+// features object is absent.
+func dashboardAgentNetwork(f *api.AccountDashboardFeatures) *bool {
+	if f == nil {
+		return nil
+	}
+	return f.AgentNetwork
+}
+
+func Test_accountTerraformToAPI_ipv6(t *testing.T) {
+	v6 := "fd00:1234::/64"
+	current := &api.Account{Id: "a", Settings: api.AccountSettings{
+		NetworkRangeV6:    &v6,
+		Ipv6EnabledGroups: &[]string{"all"},
+		Extra:             &api.AccountExtraSettings{},
+	}}
+
+	kept := accountTerraformToAPI(context.Background(), current, AccountSettingsModel{
+		Id:                types.StringValue("a"),
+		NetworkRangeV6:    types.StringNull(),
+		Ipv6EnabledGroups: types.ListNull(types.StringType),
+	}).Settings
+	if kept.NetworkRangeV6 == nil || *kept.NetworkRangeV6 != v6 || kept.Ipv6EnabledGroups == nil || !reflect.DeepEqual(*kept.Ipv6EnabledGroups, []string{"all"}) {
+		t.Errorf("unset: expected the account's values, found %v and %v", kept.NetworkRangeV6, kept.Ipv6EnabledGroups)
+	}
+
+	set := accountTerraformToAPI(context.Background(), current, AccountSettingsModel{
+		Id:                types.StringValue("a"),
+		NetworkRangeV6:    types.StringValue("fd00:5678::/64"),
+		Ipv6EnabledGroups: types.ListValueMust(types.StringType, []attr.Value{}),
+	}).Settings
+	if set.NetworkRangeV6 == nil || *set.NetworkRangeV6 != "fd00:5678::/64" {
+		t.Errorf("network_range_v6: expected fd00:5678::/64, found %v", set.NetworkRangeV6)
+	}
+	if set.Ipv6EnabledGroups == nil || len(*set.Ipv6EnabledGroups) != 0 {
+		t.Errorf("ipv6_enabled_groups: expected an explicit empty list, found %v", set.Ipv6EnabledGroups)
 	}
 }

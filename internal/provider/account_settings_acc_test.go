@@ -3,8 +3,12 @@
 package provider
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"maps"
+	"net/http"
 	"slices"
 	"testing"
 
@@ -99,12 +103,303 @@ func Test_Account_Update(t *testing.T) {
 	})
 }
 
+// Test_Account_Update_KeepsUnmodeledSettings sets settings the resource does
+// not model through the API, then applies a change to a modeled one. The
+// server rebuilds the settings from the update request, so the apply keeps
+// them only if the provider carries them into the request.
+func Test_Account_Update_KeepsUnmodeledSettings(t *testing.T) {
+	env := testE2E(t)
+	rName := "acc" + acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum)
+	rNameFull := "netbird_account_settings." + rName
+	original, err := testAccountSettings(env.AccountID)
+	if err != nil {
+		t.Fatalf("could not read the account's settings: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := setUnmodeledAccountSettings(env.AccountID, original.MetricsPushEnabled, original.AutoUpdateAlways); err != nil {
+			t.Errorf("could not restore the unmodeled settings: %v", err)
+		}
+	})
+	enabled := true
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccountResourceWithJWT(rName, true),
+				Check:  resource.TestCheckResourceAttr(rNameFull, "jwt_groups_enabled", "true"),
+			},
+			{
+				PreConfig: func() {
+					if err := setUnmodeledAccountSettings(env.AccountID, &enabled, &enabled); err != nil {
+						t.Fatalf("could not set the unmodeled settings: %v", err)
+					}
+				},
+				Config:           testAccountResourceWithJWT(rName, false),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "jwt_groups_enabled", "false"),
+					func(s *terraform.State) error {
+						settings, err := testAccountSettings(env.AccountID)
+						if err != nil {
+							return err
+						}
+						return matchPairs(map[string][]any{
+							"jwt_groups_enabled":   {false, valOr(settings.JwtGroupsEnabled, true)},
+							"metrics_push_enabled": {true, valOr(settings.MetricsPushEnabled, false)},
+							"auto_update_always":   {true, valOr(settings.AutoUpdateAlways, false)},
+						})
+					},
+				),
+			},
+			{
+				ResourceName:      rNameFull,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+// testAccountSettings reads the account's settings from the server, by ID.
+func testAccountSettings(accountID string) (api.AccountSettings, error) {
+	accounts, err := testClient().Accounts.List(context.Background())
+	if err != nil {
+		return api.AccountSettings{}, err
+	}
+	idx := slices.IndexFunc(accounts, func(a api.Account) bool { return a.Id == accountID })
+	if idx < 0 {
+		return api.AccountSettings{}, fmt.Errorf("account %s is not among the %d accounts on the management server", accountID, len(accounts))
+	}
+	return accounts[idx].Settings, nil
+}
+
+// setUnmodeledAccountSettings sets metrics_push_enabled and auto_update_always
+// through the API, keeping every other setting (see setAccountSettingsRaw).
+func setUnmodeledAccountSettings(accountID string, metricsPush, autoUpdateAlways *bool) error {
+	return setAccountSettingsRaw(accountID, api.AccountSettings{MetricsPushEnabled: metricsPush, AutoUpdateAlways: autoUpdateAlways})
+}
+
+// setAccountSettingsRaw sets the fields of change that are not nil, through the
+// same raw-JSON path the provider uses, so settings this client library does
+// not know keep their values on the server.
+func setAccountSettingsRaw(accountID string, change api.AccountSettings) error {
+	client := testClient()
+	accounts, err := listAccountsRaw(context.Background(), client)
+	if err != nil {
+		return err
+	}
+	current, err := selectAccount(accounts, accountID)
+	if err != nil {
+		return err
+	}
+	typed, err := json.Marshal(change)
+	if err != nil {
+		return err
+	}
+	var overlay map[string]json.RawMessage
+	if err := json.Unmarshal(typed, &overlay); err != nil {
+		return err
+	}
+	settings := maps.Clone(current.settings)
+	for _, k := range readOnlySettings {
+		delete(settings, k)
+	}
+	// Only the pointer fields set in change: the typed zero values of the
+	// non-pointer fields must not overwrite the account's.
+	for k, v := range overlay {
+		if _, isPointer := pointerSettings[k]; isPointer {
+			settings[k] = v
+		}
+	}
+	body, err := json.Marshal(map[string]any{"settings": settings})
+	if err != nil {
+		return err
+	}
+	resp, err := client.NewRequest(context.Background(), http.MethodPut, "/api/accounts/"+accountID, bytes.NewReader(body), nil)
+	if err != nil {
+		return err
+	}
+	_, err = readBody(resp)
+	return err
+}
+
+// pointerSettings are the optional settings setAccountSettingsRaw may change.
+var pointerSettings = map[string]struct{}{
+	"network_range_v6":     {},
+	"ipv6_enabled_groups":  {},
+	"metrics_push_enabled": {},
+	"auto_update_always":   {},
+}
+
 func testAccountResource(rName string) string {
 	return fmt.Sprintf(`resource "netbird_account_settings" "%s" {}`, rName)
+}
+
+func Test_Account_LocalMFA(t *testing.T) {
+	env := testE2E(t)
+	ctx := context.Background()
+	accounts, err := testClient().Accounts.List(ctx)
+	if err != nil {
+		t.Fatalf("list account settings: %v", err)
+	}
+	idx := slices.IndexFunc(accounts, func(a api.Account) bool { return a.Id == env.AccountID })
+	if idx < 0 {
+		t.Fatal("test account is missing")
+	}
+	initial := accounts[idx].Settings.LocalMfaEnabled
+	if !valOr(accounts[idx].Settings.EmbeddedIdpEnabled, false) {
+		t.Fatal("local MFA test requires the embedded identity provider")
+	}
+	t.Cleanup(func() {
+		accounts, err := testClient().Accounts.List(ctx)
+		if err != nil {
+			t.Errorf("list account settings for cleanup: %v", err)
+			return
+		}
+		idx := slices.IndexFunc(accounts, func(a api.Account) bool { return a.Id == env.AccountID })
+		if idx < 0 {
+			t.Error("test account is missing during cleanup")
+			return
+		}
+		settings := accounts[idx].Settings
+		settings.LocalMfaEnabled = initial
+		if _, err := testClient().Accounts.Update(ctx, env.AccountID, api.AccountRequest{Settings: settings}); err != nil {
+			t.Errorf("restore local MFA setting: %v", err)
+		}
+	})
+	rName := "acc" + acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum)
+	rNameFull := "netbird_account_settings." + rName
+	checkAPI := func(enabled bool) resource.TestCheckFunc {
+		return func(_ *terraform.State) error {
+			accounts, err := testClient().Accounts.List(ctx)
+			if err != nil {
+				return fmt.Errorf("list account settings: %w", err)
+			}
+			idx := slices.IndexFunc(accounts, func(a api.Account) bool { return a.Id == env.AccountID })
+			if idx < 0 {
+				return fmt.Errorf("test account is missing")
+			}
+			mfa := accounts[idx].Settings.LocalMfaEnabled
+			if mfa == nil || *mfa != enabled {
+				return fmt.Errorf("local MFA setting does not match %t", enabled)
+			}
+			return nil
+		}
+	}
+	config := func(enabled bool) string {
+		return fmt.Sprintf(`resource "netbird_account_settings" %q {
+  local_mfa_enabled = %t
+}
+data "netbird_account_settings" "test" {
+  depends_on = [netbird_account_settings.%s]
+}`, rName, enabled, rName)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		// Account settings are a singleton; destroying the resource must not delete the account
+		// or reset its settings. The cleanup above restores the shared fixture afterward.
+		CheckDestroy: checkAPI(false),
+		Steps: []resource.TestStep{
+			{
+				Config: config(true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "local_mfa_enabled", "true"),
+					resource.TestCheckResourceAttr("data.netbird_account_settings.test", "local_mfa_enabled", "true"),
+					checkAPI(true),
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				Config: testAccountResource(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "local_mfa_enabled", "true"),
+					checkAPI(true),
+				),
+			},
+			{
+				Config: config(false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "local_mfa_enabled", "false"),
+					resource.TestCheckResourceAttr("data.netbird_account_settings.test", "local_mfa_enabled", "false"),
+					checkAPI(false),
+				),
+			},
+		},
+	})
 }
 
 func testAccountResourceWithJWT(rName string, enabled bool) string {
 	return fmt.Sprintf(`resource "netbird_account_settings" "%s" {
 jwt_groups_enabled = %v
 }`, rName, enabled)
+}
+
+func Test_Account_IPv6(t *testing.T) {
+	env := testE2E(t)
+	rName := "acc" + acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum)
+	rNameFull := "netbird_account_settings." + rName
+	original, err := testAccountSettings(env.AccountID)
+	if err != nil {
+		t.Fatalf("could not read the account's settings: %v", err)
+	}
+	t.Cleanup(func() {
+		restore := api.AccountSettings{NetworkRangeV6: original.NetworkRangeV6, Ipv6EnabledGroups: original.Ipv6EnabledGroups}
+		if err := setAccountSettingsRaw(env.AccountID, restore); err != nil {
+			t.Errorf("could not restore the IPv6 settings: %v", err)
+		}
+	})
+	const v6Range = "fd00:1234:5678::/64"
+	config := func(groups string) string {
+		return fmt.Sprintf(`resource "netbird_group" "v6" {
+  name = %q
+}
+resource "netbird_account_settings" %q {
+  network_range_v6    = %q
+  ipv6_enabled_groups = %s
+}
+data "netbird_account_settings" "test" {
+  depends_on = [netbird_account_settings.%s]
+}`, rName+"-v6", rName, v6Range, groups, rName)
+	}
+	checkAPI := func(wantGroups int) resource.TestCheckFunc {
+		return func(s *terraform.State) error {
+			settings, err := testAccountSettings(env.AccountID)
+			if err != nil {
+				return err
+			}
+			if settings.NetworkRangeV6 == nil || *settings.NetworkRangeV6 != v6Range {
+				return fmt.Errorf("network_range_v6 on the server: expected %s, found %v", v6Range, settings.NetworkRangeV6)
+			}
+			if got := len(valOr(settings.Ipv6EnabledGroups, nil)); got != wantGroups {
+				return fmt.Errorf("ipv6_enabled_groups on the server: expected %d groups, found %d", wantGroups, got)
+			}
+			return nil
+		}
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config("[netbird_group.v6.id]"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "network_range_v6", v6Range),
+					resource.TestCheckResourceAttr(rNameFull, "ipv6_enabled_groups.#", "1"),
+					resource.TestCheckResourceAttrPair(rNameFull, "ipv6_enabled_groups.0", "netbird_group.v6", "id"),
+					resource.TestCheckResourceAttr("data.netbird_account_settings.test", "ipv6_enabled_groups.#", "1"),
+					checkAPI(1),
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				Config: config("[]"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "ipv6_enabled_groups.#", "0"),
+					checkAPI(0),
+				),
+			},
+		},
+	})
 }
