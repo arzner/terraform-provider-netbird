@@ -3,8 +3,8 @@
 # registry for the netbird version pinned in go.mod, and print digest-pinned
 # references as step outputs (combined, proxy, client).
 #
-# Only trusted runs publish (PUBLISH=true: pushes to main and runs dispatched
-# on main); everything else, pull requests included, only reads. An image is
+# Only trusted runs publish (PUBLISH=true, set by the main-only publish job);
+# every other run, pull requests included, only reads. An image is
 # built only when its tag is confirmed absent, from the module source and the
 # Dockerfile the e2e harness itself builds it from; a tag that exists, or whose
 # existence cannot be confirmed, is never pushed over. A replaced netbird
