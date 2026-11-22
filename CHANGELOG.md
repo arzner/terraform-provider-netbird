@@ -25,6 +25,8 @@ Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
   an empty or failed account list (#4; upstream #118, #277, fix #276 by Tim Rabl): a failed list
   is an error everywhere; an empty list is an error on create, update and in the data source,
   while refresh removes a resource whose account is no longer listed.
+  Importing `netbird_account_settings` therefore needs the real account ID; any other ID now
+  fails as a missing object instead of binding to the token's account.
 - Management API responses are bounded to 64 MiB, error responses included, and their
   connections are released.
 
