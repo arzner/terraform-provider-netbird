@@ -6,7 +6,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -107,6 +106,10 @@ func (d *AccountSettingsDataSource) Schema(ctx context.Context, req datasource.S
 				MarkdownDescription: "Enables or disables experimental lazy connection",
 				Computed:            true,
 			},
+			"local_mfa_enabled": schema.BoolAttribute{
+				MarkdownDescription: "Enables or disables TOTP multi-factor authentication for local users. Only applicable when the embedded identity provider is enabled.",
+				Computed:            true,
+			},
 			"user_approval_required": schema.BoolAttribute{
 				MarkdownDescription: "Enables manual approval for new users joining via domain matching. When enabled, users are blocked with pending approval status until explicitly approved by an admin.",
 				Computed:            true,
@@ -160,17 +163,15 @@ func (d *AccountSettingsDataSource) Read(ctx context.Context, req datasource.Rea
 	}
 
 	accounts, err := d.client.Accounts.List(ctx)
-	account := accounts[0]
-
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			resp.State.RemoveResource(ctx)
-			return
-		} else {
-			resp.Diagnostics.AddError("Error getting AccountSettings", err.Error())
-		}
+		resp.Diagnostics.AddError("Error getting AccountSettings", err.Error())
 		return
 	}
+	if len(accounts) == 0 {
+		resp.Diagnostics.AddError("Error getting AccountSettings", "the API returned no account")
+		return
+	}
+	account := accounts[0]
 
 	resp.Diagnostics.Append(accountAPIToTerraform(ctx, &account, &data)...)
 
