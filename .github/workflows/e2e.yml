@@ -42,12 +42,18 @@ jobs:
   # repository's container registry and hands the acceptance jobs digest-pinned
   # references. The images come from the same module source and Dockerfiles the
   # harness would build from, so the server under test is still the pinned one.
-  # Where pushing is not allowed (a pull request from a fork) or fails, the
-  # outputs stay empty and the harness builds the images itself as before.
+  # Only trusted runs on main publish; pull requests only read what main has
+  # published. Wherever an image is not available, its output stays empty and
+  # the harness builds it itself as before.
   images:
     name: Test images
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Publishers run one at a time, so two runs never both find a tag missing
+    # and push different builds; readers do not wait for each other.
+    concurrency:
+      group: ${{ (github.event_name != 'pull_request' && github.ref == 'refs/heads/main') && 'e2e-image-publish' || format('e2e-images-{0}', github.run_id) }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -65,15 +71,16 @@ jobs:
           cache: true
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to the container registry
+        # Without a login the images are not readable and the harness builds them.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
       - name: Build missing images and resolve digests
         id: images
         env:
-          # Pushing needs a token that may write packages; a fork's pull request
-          # does not get one, so it only reads.
-          PUSH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          # Only code already on main publishes to the shared image cache.
+          PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
         run: .github/scripts/e2e-images.sh
   acceptance:
     name: Acceptance tests
@@ -130,7 +137,7 @@ jobs:
       # is terraform-plugin-testing's own switch. Both are needed, and neither on
       # its own runs anything against a deployment.
       - name: Log in to the container registry
-        if: needs.images.outputs.combined != ''
+        if: needs.images.outputs.combined != '' || needs.images.outputs.proxy != '' || needs.images.outputs.client != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
