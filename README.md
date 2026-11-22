@@ -1,4 +1,25 @@
-# NetBird Terraform Provider
+# NetBird Terraform Provider (arzner fork)
+
+This is a maintained fork of [netbirdio/terraform-provider-netbird](https://github.com/netbirdio/terraform-provider-netbird),
+published on the Terraform and OpenTofu registries as `arzner/netbird`
+(from v0.1.0). It exists to ship fixes that upstream has not
+released yet, first of all that `netbird_account_settings` must not reset the
+settings it does not manage (local MFA among them). Every fix that applies
+upstream is offered back as a pull request there; upstream changes are merged in
+regularly. See [CHANGELOG.md](CHANGELOG.md) for what differs and which upstream
+commit each release is based on.
+
+## Fork maintenance
+
+- Upstream is merged in through a pull request (`git merge upstream/main`); history
+  on `main` is never rewritten.
+- A ported upstream pull request keeps its author and links the original.
+- Issues and pull requests here track what the fork changes; upstream issues are
+  linked from them.
+- Releases are tagged `vX.Y.Z` on `main` by the owner; the release workflow builds
+  and signs them with GoReleaser.
+
+## About
 
 A Terraform Provider for managing your [NetBird](https://netbird.io) Account and its resources.
 
