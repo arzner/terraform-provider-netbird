@@ -1,5 +1,40 @@
 # NetBird Terraform Provider
 
+A Terraform and OpenTofu provider for [NetBird](https://netbird.io), published as
+`arzner/netbird` (from v0.1.0). The goal is the most dependable way to manage
+NetBird as code.
+
+## Principles
+
+- **An apply changes only what you declare.** Settings, members and attachments
+  that are not in your configuration are left as they are, including ones this
+  provider does not know yet. No silent resets.
+- **Current with NetBird.** The provider is built and tested against the latest
+  NetBird server releases, and new server features are tracked as issues.
+- **Tested against real servers.** Every change runs the full acceptance suite
+  against a NetBird deployment built from the pinned server version.
+- **Plans you can trust.** No perpetual diffs, no inconsistent results after
+  apply, clear errors instead of crashes.
+- **Releases you can verify.** Semantic versions, a changelog for every release,
+  GPG-signed checksums, signed commits.
+- **Open to upstream.** This project started as a fork of
+  [netbirdio/terraform-provider-netbird](https://github.com/netbirdio/terraform-provider-netbird);
+  upstream changes are merged in regularly and fixes that apply there are offered
+  back. [CHANGELOG.md](CHANGELOG.md) names the upstream commit each release is
+  based on.
+
+## Maintenance
+
+- Upstream is merged in through a pull request (`git merge upstream/main`); history
+  on `main` is never rewritten.
+- A ported upstream pull request keeps its author and links the original.
+- Issues and pull requests here track what the fork changes; upstream issues are
+  linked from them.
+- Releases are tagged `vX.Y.Z` on `main` by the owner; the release workflow builds
+  and signs them with GoReleaser.
+
+## About
+
 A Terraform Provider for managing your [NetBird](https://netbird.io) Account and its resources.
 
 ## Requirements

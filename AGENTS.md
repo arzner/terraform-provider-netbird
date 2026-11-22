@@ -249,14 +249,12 @@ unit/integration tests) and `e2e.yml` (the acceptance suite against NetBird's ow
 e2e harness). `make generate` producing a diff is a red build, so regenerate docs
 and commit them whenever a schema description or example changes.
 
-**CodeRabbit** auto-reviews every non-draft PR and you can reach it with
-`@coderabbitai` in a comment. Read every finding and either act on it or reply
-with why it does not apply; do not bulk-resolve to clear the count. Bots are
-frequently wrong on this codebase's plan-modifier and mapping subtleties, so
-verify a claim against the code before changing anything, and never edit correct
-code just to silence a bot. Security findings get the opposite default: assume
-real until disproved, and surface them to the user. Never change a workflow,
-threshold, or lint exclusion to make a check pass.
+**Review** in this fork: every pull request gets an independent review before the
+owner merges it. Read every finding and either act on it or reply with why it does
+not apply. Verify a claim against the code before changing anything, and never
+edit correct code just to silence a reviewer. Security findings get the opposite
+default: assume real until disproved. Never change a workflow, threshold, or lint
+exclusion to make a check pass.
 
 ## Support
 
