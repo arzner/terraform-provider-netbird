@@ -10,6 +10,20 @@ it is based on.
 
 Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
 
+### Added
+
+- `netbird_account_settings`: `local_mfa_enabled` (upstream netbirdio/terraform-provider-netbird#227 by Nathan).
+
+### Fixed
+
+- `netbird_account_settings` no longer resets the settings it does not manage, such as local MFA,
+  IPv6 groups or metrics push (#2; upstream #243, #278). The update starts from the account's
+  current settings (upstream #244 by chad-loder) and, beyond that, sends back as they are the
+  settings the compiled client library does not know, so a management server newer than the
+  library keeps them too.
+- `netbird_account_settings` updates the account by its ID and returns an error instead of
+  panicking when the token sees no account.
+
 ### Removed
 
 - The upstream-only workflows `agent-acceptance-review.yml` and `pr-metadata.yml`
