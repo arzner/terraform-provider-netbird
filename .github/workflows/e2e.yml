@@ -82,6 +82,17 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: true
+      - name: Use the requested NetBird release
+        if: inputs.netbird_version != ''
+        env:
+          NB_VERSION: ${{ inputs.netbird_version }}
+        run: |
+          if ! [[ $NB_VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::netbird_version must look like v1.2.3, got: $NB_VERSION"
+            exit 1
+          fi
+          go get "github.com/netbirdio/netbird@$NB_VERSION"
+          go mod tidy
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to the container registry
         env:
