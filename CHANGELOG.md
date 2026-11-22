@@ -10,7 +10,7 @@ it is based on.
 
 ## [0.1.0] - 2026-11-23
 
-First release of the fork. Based on upstream `4aa1f36` (v0.0.11 plus [#263](https://github.com/netbirdio/terraform-provider-netbird/pull/263), [#222](https://github.com/netbirdio/terraform-provider-netbird/pull/222), [#224](https://github.com/netbirdio/terraform-provider-netbird/pull/224)),
+First release of the fork. Based on upstream `4aa1f36` (v0.0.11 plus [#263](https://github.com/netbirdio/terraform-provider-netbird/pull/263)),
 built against NetBird v0.83.2 and tested with Terraform 1.14 to 1.17 and OpenTofu 1.12
 to 1.13.
 

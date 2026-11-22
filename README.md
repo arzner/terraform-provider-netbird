@@ -93,9 +93,11 @@ Check usage in [docs](./docs/index.md).
 - **OpenTofu Registry:** `arzner/netbird` (listing in progress, #6).
 - **Terraform Registry:** not listed yet (#6). Until it is, install the provider
   from the signed [GitHub release](https://github.com/arzner/terraform-provider-netbird/releases)
-  through a filesystem mirror: unpack the archive for your platform into
-  `<mirror>/registry.terraform.io/arzner/netbird/<version>/<os>_<arch>/` and point
-  the CLI at it in `~/.terraformrc`:
+  through a filesystem mirror. Verify the release first (below), then put the
+  archive for your platform, unchanged, into
+  `<mirror>/registry.terraform.io/arzner/netbird/` (for example
+  `terraform-provider-netbird_0.1.0_linux_amd64.zip`) and point the CLI at it in
+  `~/.terraformrc`:
 
   ```hcl
   provider_installation {
@@ -109,8 +111,12 @@ Check usage in [docs](./docs/index.md).
   }
   ```
 
-  Verify the release first (below); `terraform providers lock` then records the
-  hashes in your lock file.
+  Record the hashes in the lock file from the mirror, since the registry does
+  not know the provider yet:
+
+  ```shell
+  terraform providers lock -fs-mirror=/path/to/mirror registry.terraform.io/arzner/netbird
+  ```
 
 ### Compatibility with NetBird
 
