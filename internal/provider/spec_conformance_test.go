@@ -41,6 +41,11 @@ func Test_SpecConformance(t *testing.T) {
 				t.Errorf("%s: schema %s is not in the spec", rm.typeName, sm.schema)
 				continue
 			}
+			for _, name := range sortedKeys(sm.flatten) {
+				if _, ok := props[name]; !ok {
+					t.Errorf("%s: flattened property %s.%s is not in the spec any more; update specResources", rm.typeName, sm.schema, name)
+				}
+			}
 			for _, name := range sortedKeys(props) {
 				prop := props[name]
 				key := sm.schema + "." + name
@@ -52,7 +57,16 @@ func Test_SpecConformance(t *testing.T) {
 					}
 					continue
 				}
-				if contains(sm.flatten, name) {
+				if child, flattened := sm.flatten[name]; flattened {
+					// The provider spreads this object's members over the
+					// resource; they are checked as the child schema, which must
+					// be what the property refers to and must itself be checked.
+					if prop.ref != child {
+						t.Errorf("%s: %s refers to schema %q, not the flattened %q; update specResources", rm.typeName, key, prop.ref, child)
+					}
+					if !rm.checks(child) {
+						t.Errorf("%s: flattened schema %s is not checked; add it to specResources", rm.typeName, child)
+					}
 					continue
 				}
 				a, modelled := attrs[attrName(key, name)]
@@ -71,7 +85,10 @@ func Test_SpecConformance(t *testing.T) {
 		}
 	}
 
-	for key := range specUnmodelled {
+	for key, reason := range specUnmodelled {
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("specUnmodelled lists %s without a reason", key)
+		}
 		if !seenAllowlist[key] {
 			t.Errorf("specUnmodelled lists %s, which no checked schema has any more; remove it", key)
 		}
@@ -92,15 +109,26 @@ type specResource struct {
 
 type specSchema struct {
 	schema string
-	// flatten names properties whose own schema is checked separately because
-	// the provider flattens its fields into the resource.
-	flatten []string
+	// flatten maps a property whose members the provider spreads over the
+	// resource to the schema it refers to; that schema is checked as its own
+	// specSchema entry.
+	flatten map[string]string
+}
+
+// checks reports whether the resource's schema list includes name.
+func (r specResource) checks(name string) bool {
+	for _, s := range r.schemas {
+		if s.schema == name {
+			return true
+		}
+	}
+	return false
 }
 
 var specResources = []specResource{
-	{"netbird_account_settings", NewAccountSettings, []specSchema{{schema: "AccountSettings", flatten: []string{"extra"}}, {schema: "AccountExtraSettings"}}},
-	{"netbird_agent_network_guardrail", NewAgentNetworkGuardrail, []specSchema{{schema: "AgentNetworkGuardrailRequest", flatten: []string{"checks"}}, {schema: "AgentNetworkGuardrailChecks"}}},
-	{"netbird_agent_network_policy", NewAgentNetworkPolicy, []specSchema{{schema: "AgentNetworkPolicyRequest", flatten: []string{"limits"}}, {schema: "AgentNetworkPolicyLimits"}}},
+	{"netbird_account_settings", NewAccountSettings, []specSchema{{schema: "AccountSettings", flatten: map[string]string{"extra": "AccountExtraSettings"}}, {schema: "AccountExtraSettings"}}},
+	{"netbird_agent_network_guardrail", NewAgentNetworkGuardrail, []specSchema{{schema: "AgentNetworkGuardrailRequest", flatten: map[string]string{"checks": "AgentNetworkGuardrailChecks"}}, {schema: "AgentNetworkGuardrailChecks"}}},
+	{"netbird_agent_network_policy", NewAgentNetworkPolicy, []specSchema{{schema: "AgentNetworkPolicyRequest", flatten: map[string]string{"limits": "AgentNetworkPolicyLimits"}}, {schema: "AgentNetworkPolicyLimits"}}},
 	{"netbird_agent_network_provider", NewAgentNetworkProvider, []specSchema{{schema: "AgentNetworkProviderRequest"}}},
 	{"netbird_agent_network_settings", NewAgentNetworkSettings, []specSchema{{schema: "AgentNetworkSettingsRequest"}, {schema: "AgentNetworkSettingsCreateRequest"}}},
 	{"netbird_dns_record", NewDNSRecord, []specSchema{{schema: "DNSRecordRequest"}}},
@@ -114,7 +142,7 @@ var specResources = []specResource{
 	{"netbird_network_router", NewNetworkRouter, []specSchema{{schema: "NetworkRouterRequest"}}},
 	{"netbird_peer", NewPeer, []specSchema{{schema: "PeerRequest"}}},
 	{"netbird_policy", NewPolicy, []specSchema{{schema: "PolicyUpdate"}}},
-	{"netbird_posture_check", NewPostureCheck, []specSchema{{schema: "PostureCheckUpdate", flatten: []string{"checks"}}, {schema: "Checks"}}},
+	{"netbird_posture_check", NewPostureCheck, []specSchema{{schema: "PostureCheckUpdate", flatten: map[string]string{"checks": "Checks"}}, {schema: "Checks"}}},
 	{"netbird_reverse_proxy_domain", NewReverseProxyDomain, []specSchema{{schema: "ReverseProxyDomainRequest"}}},
 	{"netbird_reverse_proxy_service", NewReverseProxyService, []specSchema{{schema: "ServiceRequest"}}},
 	{"netbird_route", NewRoute, []specSchema{{schema: "RouteRequest"}}},
@@ -156,7 +184,12 @@ func attrName(key, property string) string {
 	return property
 }
 
-type specProperty struct{ readOnly bool }
+// specProperty is a resolved request property: whether it is read-only and,
+// when it refers to a component schema, which one.
+type specProperty struct {
+	readOnly bool
+	ref      string
+}
 
 type openAPISpec struct {
 	version string
@@ -193,13 +226,43 @@ func loadSpec(t *testing.T) openAPISpec {
 }
 
 type schemaDoc struct {
-	Ref        string                 `yaml:"$ref"`
-	AllOf      []schemaDoc            `yaml:"allOf"`
-	Properties map[string]propertyDoc `yaml:"properties"`
+	Ref        string               `yaml:"$ref"`
+	AllOf      []schemaDoc          `yaml:"allOf"`
+	ReadOnly   bool                 `yaml:"readOnly"`
+	Properties map[string]schemaDoc `yaml:"properties"`
 }
 
-type propertyDoc struct {
-	ReadOnly bool `yaml:"readOnly"`
+func refName(ref string) string {
+	return strings.TrimPrefix(ref, "#/components/schemas/")
+}
+
+// property resolves a property's read-only flag through its own $ref and
+// allOf parts: it is read-only when any part says so. ref is the component it
+// refers to, directly or as its only allOf part.
+func (s openAPISpec) property(d schemaDoc, depth int) (specProperty, bool) {
+	if depth > 16 {
+		return specProperty{}, false
+	}
+	out := specProperty{readOnly: d.ReadOnly}
+	if d.Ref != "" {
+		inner, ok := s.schemas[refName(d.Ref)]
+		if !ok {
+			return specProperty{}, false
+		}
+		out.ref = refName(d.Ref)
+		out.readOnly = out.readOnly || inner.ReadOnly
+	}
+	for _, part := range d.AllOf {
+		p, ok := s.property(part, depth+1)
+		if !ok {
+			return specProperty{}, false
+		}
+		out.readOnly = out.readOnly || p.readOnly
+		if len(d.AllOf) == 1 && out.ref == "" {
+			out.ref = p.ref
+		}
+	}
+	return out, true
 }
 
 // properties resolves a component schema's properties through $ref and allOf.
@@ -215,7 +278,7 @@ func (s openAPISpec) properties(name string) (map[string]specProperty, bool) {
 			return false
 		}
 		if d.Ref != "" {
-			inner, ok := s.schemas[strings.TrimPrefix(d.Ref, "#/components/schemas/")]
+			inner, ok := s.schemas[refName(d.Ref)]
 			if !ok {
 				return false
 			}
@@ -227,7 +290,18 @@ func (s openAPISpec) properties(name string) (map[string]specProperty, bool) {
 			}
 		}
 		for p, v := range d.Properties {
-			out[p] = specProperty{readOnly: v.ReadOnly}
+			prop, ok := s.property(v, depth+1)
+			if !ok {
+				return false
+			}
+			// A property repeated across allOf parts keeps every restriction.
+			if prev, seen := out[p]; seen {
+				prop.readOnly = prop.readOnly || prev.readOnly
+				if prop.ref == "" {
+					prop.ref = prev.ref
+				}
+			}
+			out[p] = prop
 		}
 		return true
 	}
@@ -246,11 +320,67 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-func contains(list []string, v string) bool {
-	for _, x := range list {
-		if x == v {
-			return true
+// Test_specResolver pins the resolver's handling of references and
+// composition on small fixtures, independent of the real spec.
+func Test_specResolver(t *testing.T) {
+	var doc struct {
+		Schemas map[string]schemaDoc `yaml:"schemas"`
+	}
+	const fixture = `
+schemas:
+  Child:
+    type: object
+    properties:
+      a: {type: string}
+  ReadOnlyThing:
+    readOnly: true
+    type: string
+  Base:
+    type: object
+    properties:
+      shared: {type: string}
+  Request:
+    allOf:
+      - $ref: '#/components/schemas/Base'
+      - type: object
+        properties:
+          shared: {type: string, readOnly: true}
+          child: {$ref: '#/components/schemas/Child'}
+          wrapped:
+            allOf:
+              - $ref: '#/components/schemas/Child'
+          computed: {$ref: '#/components/schemas/ReadOnlyThing'}
+          composed:
+            allOf:
+              - {type: string}
+              - {readOnly: true}
+          plain: {type: string}
+`
+	if err := yaml.Unmarshal([]byte(fixture), &doc); err != nil {
+		t.Fatal(err)
+	}
+	s := openAPISpec{schemas: doc.Schemas}
+	props, ok := s.properties("Request")
+	if !ok {
+		t.Fatal("Request did not resolve")
+	}
+	want := map[string]specProperty{
+		"shared":   {readOnly: true},
+		"child":    {ref: "Child"},
+		"wrapped":  {ref: "Child"},
+		"computed": {readOnly: true, ref: "ReadOnlyThing"},
+		"composed": {readOnly: true},
+		"plain":    {},
+	}
+	for name, w := range want {
+		if got := props[name]; got != w {
+			t.Errorf("%s: expected %+v, found %+v", name, w, got)
 		}
 	}
-	return false
+	if len(props) != len(want) {
+		t.Errorf("expected %d properties, found %d: %v", len(want), len(props), props)
+	}
+	if _, ok := s.properties("Missing"); ok {
+		t.Error("an unknown schema must not resolve")
+	}
 }
