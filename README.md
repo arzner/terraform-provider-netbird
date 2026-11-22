@@ -30,8 +30,9 @@ NetBird as code.
 - A ported upstream pull request keeps its author and links the original.
 - Issues and pull requests here track what the fork changes; upstream issues are
   linked from them.
-- Releases are tagged `vX.Y.Z` on `main` by the owner; the release workflow builds
-  and signs them with GoReleaser.
+- Releases are tagged `vX.Y.Z` on `main` by the owner after the changelog section
+  `## [X.Y.Z] - date` is merged; the release workflow builds and signs them with
+  GoReleaser and uses that section as the release notes. A tag without notes fails.
 
 ## About
 
@@ -72,7 +73,34 @@ Then commit the changes to `go.mod` and `go.sum`.
 
 ## Using the provider
 
+```hcl
+terraform {
+  required_providers {
+    netbird = {
+      source  = "arzner/netbird"
+      version = "~> 0.1"
+    }
+  }
+}
+```
+
+The provider is published on the Terraform Registry and the OpenTofu Registry.
+Moving from `netbirdio/netbird` needs no change to resources or state beyond
+the address: `terraform state replace-provider netbirdio/netbird arzner/netbird`.
 Check usage in [docs](./docs/index.md).
+
+### Verifying a release
+
+Each release carries `SHA256SUMS` and its detached signature `SHA256SUMS.sig`,
+made with the release key in [`release-signing-key.asc`](release-signing-key.asc),
+fingerprint `8226 2D3B EABB 9D3A C767 76E2 3233 D05C BBF2 3D26`. Terraform and
+OpenTofu check the signature on install.
+
+```shell
+gpg --import release-signing-key.asc
+gpg --verify terraform-provider-netbird_X.Y.Z_SHA256SUMS.sig terraform-provider-netbird_X.Y.Z_SHA256SUMS
+sha256sum --ignore-missing -c terraform-provider-netbird_X.Y.Z_SHA256SUMS
+```
 
 ## Developing the Provider
 

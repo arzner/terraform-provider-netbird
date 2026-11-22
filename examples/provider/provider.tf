@@ -8,7 +8,7 @@ variable "netbird_token" {
 terraform {
   required_providers {
     netbird = {
-      source = "registry.terraform.io/netbirdio/netbird"
+      source = "registry.terraform.io/arzner/netbird"
     }
   }
 }

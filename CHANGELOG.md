@@ -15,9 +15,22 @@ Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
 - `netbird_account_settings`: `local_mfa_enabled` (upstream netbirdio/terraform-provider-netbird#227 by Nathan).
 - `netbird_account_settings`: `network_range_v6` and `ipv6_enabled_groups`, also in the data source
   (#3; upstream #272).
+
+### Changed
+
 - `netbird_account_settings`: `network_range` and `network_range_v6` must be written in canonical
   CIDR form (host bits zero, lower case, shortest IPv6 form), the way the server returns them;
   any other spelling used to fail the apply with an inconsistent result.
+- The provider address is `registry.terraform.io/arzner/netbird` (#6). Releases are signed
+  with the key in `release-signing-key.asc` and their notes come from this file.
+- Built against the NetBird client library v0.83.2 (was v0.81.0-canary.pr-7662.1); the acceptance
+  suite runs against a NetBird v0.83.2 server (#3; upstream #280 bumps to 0.83.1).
+
+### Removed
+
+- The upstream-only workflows `agent-acceptance-review.yml` and `pr-metadata.yml`
+  and the CodeRabbit configuration: they depend on NetBird's agent network and
+  review integrations, which this repository does not have.
 
 ### Fixed
 
@@ -37,9 +50,3 @@ Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
 - `netbird_group` with attached network resources can be updated again; a plan without
   `resources` keeps the attached ones instead of detaching them (#5; upstream #104, #150,
   fix #268 by Andreas Wapf).
-
-### Removed
-
-- The upstream-only workflows `agent-acceptance-review.yml` and `pr-metadata.yml`
-  and the CodeRabbit configuration: they depend on NetBird's agent network and
-  review integrations, which this repository does not have.
