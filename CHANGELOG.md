@@ -10,6 +10,12 @@ it is based on.
 
 Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
 
+### Fixed
+
+- `netbird_group` with attached network resources can be updated again; a plan without
+  `resources` keeps the attached ones instead of detaching them (#5; upstream #104, #150,
+  fix #268 by Andreas Wapf).
+
 ### Removed
 
 - The upstream-only workflows `agent-acceptance-review.yml` and `pr-metadata.yml`
