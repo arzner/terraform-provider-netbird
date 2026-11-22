@@ -29,7 +29,7 @@ func main() {
 	flag.Parse()
 
 	opts := providerserver.ServeOpts{
-		Address: "registry.terraform.io/netbirdio/netbird",
+		Address: "registry.terraform.io/arzner/netbird",
 		Debug:   debug,
 	}
 

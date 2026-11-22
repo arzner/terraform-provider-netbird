@@ -10,6 +10,11 @@ it is based on.
 
 Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
 
+### Changed
+
+- The provider address is `registry.terraform.io/arzner/netbird` (#6). Releases are signed
+  with the key in `release-signing-key.asc` and their notes come from this file.
+
 ### Removed
 
 - The upstream-only workflows `agent-acceptance-review.yml` and `pr-metadata.yml`
