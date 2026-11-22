@@ -36,9 +36,92 @@ permissions:
   contents: read
 
 jobs:
+  # Building the NetBird server, proxy and client images from source is most of
+  # an acceptance run, and the source only changes when go.mod moves the netbird
+  # version. This job builds each image once per version, pushes it to the
+  # repository's container registry and hands the acceptance jobs digest-pinned
+  # references. The images come from the same module source and Dockerfiles the
+  # harness would build from, so the server under test is still the pinned one.
+  # Only trusted runs on main publish; pull requests only read what main has
+  # published. Wherever an image is not available, its output stays empty and
+  # the harness builds it itself as before.
+  # Publishing runs only for code already on main, in its own job: it is the
+  # only job with package write access, and pull requests never run it.
+  publish-images:
+    name: Publish test images
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # One publisher at a time, so two runs never both find a tag missing and
+    # push different builds.
+    concurrency:
+      group: e2e-image-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to the container registry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Build and push missing images
+        env:
+          PUBLISH: 'true'
+        run: .github/scripts/e2e-images.sh
+
+  # Every run resolves the published images read-only and hands the acceptance
+  # jobs digest-pinned references; an image that is not published leaves its
+  # reference empty and the harness builds it.
+  images:
+    name: Test images
+    needs: publish-images
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      combined: ${{ steps.images.outputs.combined }}
+      proxy: ${{ steps.images.outputs.proxy }}
+      client: ${{ steps.images.outputs.client }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to the container registry
+        # Without a login nothing resolves and the harness builds the images.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Resolve published images
+        id: images
+        env:
+          PUBLISH: 'false'
+        run: .github/scripts/e2e-images.sh
   acceptance:
     name: Acceptance tests
+    needs: images
+    if: always() && needs.images.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     # Above the step budget below plus setup and a cold image build, so a job that
     # overruns fails on the step that overran rather than being cancelled, which
     # would take the diagnostics with it.
@@ -86,9 +169,22 @@ jobs:
       # -tags e2e is what compiles the harness and the acceptance tests in; TF_ACC
       # is terraform-plugin-testing's own switch. Both are needed, and neither on
       # its own runs anything against a deployment.
+      - name: Log in to the container registry
+        id: login
+        if: needs.images.outputs.combined != '' || needs.images.outputs.proxy != '' || needs.images.outputs.client != ''
+        # A failed login drops the references below, so the harness builds.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
       - env:
           TF_ACC: "1"
           NB_E2E_BUILDX_CACHE: /tmp/nb-buildx-cache
+          # Digest-pinned references from the images job; empty means the
+          # harness builds the image from the module source itself.
+          NB_E2E_COMBINED_IMAGE: ${{ steps.login.outcome == 'success' && needs.images.outputs.combined || '' }}
+          NB_E2E_PROXY_IMAGE: ${{ steps.login.outcome == 'success' && needs.images.outputs.proxy || '' }}
+          NB_E2E_CLIENT_IMAGE: ${{ steps.login.outcome == 'success' && needs.images.outputs.client || '' }}
         run: go test -v -tags e2e -timeout 35m -cover -coverprofile=coverage.out ./internal/provider/
         # Above the 35m the go test timeout allows, because that timeout only
         # starts once the tests are running: compiling the package and building
