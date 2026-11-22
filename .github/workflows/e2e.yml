@@ -91,7 +91,7 @@ jobs:
         env:
           NB_VERSION: ${{ inputs.netbird_version }}
         run: |
-          if ! printf '%s' "$NB_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+          if ! [[ $NB_VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::netbird_version must look like v1.2.3, got: $NB_VERSION"
             exit 1
           fi
@@ -148,7 +148,7 @@ jobs:
         env:
           NB_VERSION: ${{ inputs.netbird_version }}
         run: |
-          if ! printf '%s' "$NB_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+          if ! [[ $NB_VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::netbird_version must look like v1.2.3, got: $NB_VERSION"
             exit 1
           fi
