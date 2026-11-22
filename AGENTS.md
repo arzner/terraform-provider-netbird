@@ -193,6 +193,13 @@ through the shared harness in `e2e_harness_test.go`.
   against on a self-hosted deployment (e.g. `scim`), and it should say so.
 - **Reproduce a bug with a failing test before fixing it**, and watch it fail for
   the reason you expect.
+- **`Test_SpecConformance` compares the request schemas in NetBird's OpenAPI spec**
+  (the version `go.mod` pins) with each resource's attributes. When a dependency
+  bump or a new resource makes it fail, decide per property: model it, map it in
+  `specRenamed` when the attribute has another name, or list it in
+  `specUnmodelled` with a reason and an issue. Never add an entry without a
+  reason; stale entries fail the test too. A new resource gets an entry in
+  `specResources`.
 - **Geolocation stays enabled** in the harness so posture-check location rules
   are actually evaluated. The escape hatch is `NB_E2E_DISABLE_GEOLOCATION=1`; do
   not disable it to make a run pass.
