@@ -122,6 +122,8 @@ func Test_accountAPIToTerraform(t *testing.T) {
 				AutoUpdateVersion:                  types.StringNull(),
 				DnsDomain:                          types.StringNull(),
 				NetworkRange:                       types.StringNull(),
+				NetworkRangeV6:                     types.StringNull(),
+				Ipv6EnabledGroups:                  types.ListNull(types.StringType),
 				LazyConnectionEnabled:              types.BoolNull(),
 				UserApprovalRequired:               types.BoolValue(false),
 				NetworkTrafficLogsGroups:           types.ListNull(types.StringType),
@@ -136,6 +138,8 @@ func Test_accountAPIToTerraform(t *testing.T) {
 					AutoUpdateVersion:               valPtr("latest"),
 					DnsDomain:                       valPtr("custom.com"),
 					NetworkRange:                    valPtr("100.64.0.0/10"),
+					NetworkRangeV6:                  valPtr("fd00:1234::/64"),
+					Ipv6EnabledGroups:               &[]string{"g2", "g1"},
 					LazyConnectionEnabled:           valPtr(true),
 					LocalMfaEnabled:                 valPtr(true),
 					GroupsPropagationEnabled:        valPtr(true),
@@ -177,6 +181,8 @@ func Test_accountAPIToTerraform(t *testing.T) {
 				AutoUpdateVersion:                  types.StringValue("latest"),
 				DnsDomain:                          types.StringValue("custom.com"),
 				NetworkRange:                       types.StringValue("100.64.0.0/10"),
+				NetworkRangeV6:                     types.StringValue("fd00:1234::/64"),
+				Ipv6EnabledGroups:                  types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g1"), types.StringValue("g2")}),
 				LazyConnectionEnabled:              types.BoolValue(true),
 				LocalMfaEnabled:                    types.BoolValue(true),
 				UserApprovalRequired:               types.BoolValue(true),
@@ -433,4 +439,34 @@ func dashboardAgentNetwork(f *api.AccountDashboardFeatures) *bool {
 		return nil
 	}
 	return f.AgentNetwork
+}
+
+func Test_accountTerraformToAPI_ipv6(t *testing.T) {
+	v6 := "fd00:1234::/64"
+	current := &api.Account{Id: "a", Settings: api.AccountSettings{
+		NetworkRangeV6:    &v6,
+		Ipv6EnabledGroups: &[]string{"all"},
+		Extra:             &api.AccountExtraSettings{},
+	}}
+
+	kept := accountTerraformToAPI(context.Background(), current, AccountSettingsModel{
+		Id:                types.StringValue("a"),
+		NetworkRangeV6:    types.StringNull(),
+		Ipv6EnabledGroups: types.ListNull(types.StringType),
+	}).Settings
+	if kept.NetworkRangeV6 == nil || *kept.NetworkRangeV6 != v6 || kept.Ipv6EnabledGroups == nil || !reflect.DeepEqual(*kept.Ipv6EnabledGroups, []string{"all"}) {
+		t.Errorf("unset: expected the account's values, found %v and %v", kept.NetworkRangeV6, kept.Ipv6EnabledGroups)
+	}
+
+	set := accountTerraformToAPI(context.Background(), current, AccountSettingsModel{
+		Id:                types.StringValue("a"),
+		NetworkRangeV6:    types.StringValue("fd00:5678::/64"),
+		Ipv6EnabledGroups: types.ListValueMust(types.StringType, []attr.Value{}),
+	}).Settings
+	if set.NetworkRangeV6 == nil || *set.NetworkRangeV6 != "fd00:5678::/64" {
+		t.Errorf("network_range_v6: expected fd00:5678::/64, found %v", set.NetworkRangeV6)
+	}
+	if set.Ipv6EnabledGroups == nil || len(*set.Ipv6EnabledGroups) != 0 {
+		t.Errorf("ipv6_enabled_groups: expected an explicit empty list, found %v", set.Ipv6EnabledGroups)
+	}
 }

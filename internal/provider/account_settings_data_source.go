@@ -102,6 +102,15 @@ func (d *AccountSettingsDataSource) Schema(ctx context.Context, req datasource.S
 				MarkdownDescription: "Allows to define a custom network range for the account in CIDR format",
 				Computed:            true,
 			},
+			"network_range_v6": schema.StringAttribute{
+				MarkdownDescription: "Custom IPv6 overlay network range of the account in CIDR format",
+				Computed:            true,
+			},
+			"ipv6_enabled_groups": schema.ListAttribute{
+				MarkdownDescription: "List of group IDs whose peers receive IPv6 overlay addresses",
+				ElementType:         types.StringType,
+				Computed:            true,
+			},
 			"lazy_connection_enabled": schema.BoolAttribute{
 				MarkdownDescription: "Enables or disables experimental lazy connection",
 				Computed:            true,
