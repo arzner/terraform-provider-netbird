@@ -250,7 +250,12 @@ func (s openAPISpec) property(d schemaDoc, depth int) (specProperty, bool) {
 			return specProperty{}, false
 		}
 		out.ref = refName(d.Ref)
-		out.readOnly = out.readOnly || inner.ReadOnly
+		// The referenced schema may itself be a reference or a composition.
+		resolved, ok := s.property(inner, depth+1)
+		if !ok {
+			return specProperty{}, false
+		}
+		out.readOnly = out.readOnly || resolved.readOnly
 	}
 	for _, part := range d.AllOf {
 		p, ok := s.property(part, depth+1)
@@ -335,6 +340,11 @@ schemas:
   ReadOnlyThing:
     readOnly: true
     type: string
+  Alias:
+    allOf:
+      - $ref: '#/components/schemas/ReadOnlyThing'
+  AliasOfAlias:
+    $ref: '#/components/schemas/Alias'
   Base:
     type: object
     properties:
@@ -355,6 +365,10 @@ schemas:
               - {type: string}
               - {readOnly: true}
           plain: {type: string}
+          chained: {$ref: '#/components/schemas/Alias'}
+          chainedTwice:
+            allOf:
+              - $ref: '#/components/schemas/AliasOfAlias'
 `
 	if err := yaml.Unmarshal([]byte(fixture), &doc); err != nil {
 		t.Fatal(err)
@@ -365,12 +379,14 @@ schemas:
 		t.Fatal("Request did not resolve")
 	}
 	want := map[string]specProperty{
-		"shared":   {readOnly: true},
-		"child":    {ref: "Child"},
-		"wrapped":  {ref: "Child"},
-		"computed": {readOnly: true, ref: "ReadOnlyThing"},
-		"composed": {readOnly: true},
-		"plain":    {},
+		"shared":       {readOnly: true},
+		"child":        {ref: "Child"},
+		"wrapped":      {ref: "Child"},
+		"computed":     {readOnly: true, ref: "ReadOnlyThing"},
+		"composed":     {readOnly: true},
+		"plain":        {},
+		"chained":      {readOnly: true, ref: "Alias"},
+		"chainedTwice": {readOnly: true, ref: "AliasOfAlias"},
 	}
 	for name, w := range want {
 		if got := props[name]; got != w {
