@@ -8,13 +8,17 @@ it is based on.
 
 ## [Unreleased]
 
-Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
+## [0.1.0] - 2026-11-23
+
+First release of the fork. Based on upstream `4aa1f36` (v0.0.11 plus [#263](https://github.com/netbirdio/terraform-provider-netbird/pull/263), [#222](https://github.com/netbirdio/terraform-provider-netbird/pull/222), [#224](https://github.com/netbirdio/terraform-provider-netbird/pull/224)),
+built against NetBird v0.83.2 and tested with Terraform 1.14 to 1.17 and OpenTofu 1.12
+to 1.13.
 
 ### Added
 
-- `netbird_account_settings`: `local_mfa_enabled` (upstream netbirdio/terraform-provider-netbird#227 by Nathan).
+- `netbird_account_settings`: `local_mfa_enabled` (upstream [#227](https://github.com/netbirdio/terraform-provider-netbird/pull/227) by Nathan).
 - `netbird_account_settings`: `network_range_v6` and `ipv6_enabled_groups`, also in the data source
-  (#3; upstream #272).
+  (#3; upstream [#272](https://github.com/netbirdio/terraform-provider-netbird/issues/272)).
 
 ### Changed
 
@@ -29,7 +33,7 @@ Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
 - Compatibility policy with NetBird releases in the README, and a daily acceptance run against
   the newest NetBird release that opens an issue when it fails (#17).
 - Built against the NetBird client library v0.83.2 (was v0.81.0-canary.pr-7662.1); the acceptance
-  suite runs against a NetBird v0.83.2 server (#3; upstream #280 bumps to 0.83.1).
+  suite runs against a NetBird v0.83.2 server (#3; upstream [#280](https://github.com/netbirdio/terraform-provider-netbird/pull/280) bumps to 0.83.1).
 
 ### Removed
 
@@ -40,12 +44,12 @@ Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
 ### Fixed
 
 - `netbird_account_settings` no longer resets the settings it does not manage, such as local MFA,
-  IPv6 groups or metrics push (#2; upstream #243, #278). The update starts from the account's
-  current settings (upstream #244 by chad-loder) and, beyond that, sends back as they are the
+  IPv6 groups or metrics push (#2; upstream [#243](https://github.com/netbirdio/terraform-provider-netbird/issues/243), [#278](https://github.com/netbirdio/terraform-provider-netbird/issues/278)). The update starts from the account's
+  current settings (upstream [#244](https://github.com/netbirdio/terraform-provider-netbird/pull/244) by chad-loder) and, beyond that, sends back as they are the
   settings the compiled client library does not know, so a management server newer than the
   library keeps them too.
 - `netbird_account_settings` updates and refreshes the account by its ID and no longer panics on
-  an empty or failed account list (#4; upstream #118, #277, fix #276 by Tim Rabl): a failed list
+  an empty or failed account list (#4; upstream [#118](https://github.com/netbirdio/terraform-provider-netbird/issues/118), [#277](https://github.com/netbirdio/terraform-provider-netbird/issues/277), fix [#276](https://github.com/netbirdio/terraform-provider-netbird/pull/276) by Tim Rabl): a failed list
   is an error everywhere; an empty list is an error on create, update and in the data source,
   while refresh removes a resource whose account is no longer listed.
   Importing `netbird_account_settings` therefore needs the real account ID; any other ID now
@@ -53,5 +57,8 @@ Based on upstream `4aa1f36` (v0.0.11 plus #263, #222, #224).
 - Management API responses are bounded to 64 MiB, error responses included, and their
   connections are released.
 - `netbird_group` with attached network resources can be updated again; a plan without
-  `resources` keeps the attached ones instead of detaching them (#5; upstream #104, #150,
-  fix #268 by Andreas Wapf).
+  `resources` keeps the attached ones instead of detaching them (#5; upstream [#104](https://github.com/netbirdio/terraform-provider-netbird/issues/104), [#150](https://github.com/netbirdio/terraform-provider-netbird/issues/150),
+  fix [#268](https://github.com/netbirdio/terraform-provider-netbird/pull/268) by Andreas Wapf).
+
+[Unreleased]: https://github.com/arzner/terraform-provider-netbird/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/arzner/terraform-provider-netbird/releases/tag/v0.1.0

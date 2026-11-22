@@ -6,6 +6,7 @@ set -eu
 version="${1#v}"
 notes=$(awk -v v="$version" '
   /^## \[/ { if (found) exit; found = index($0, "## [" v "]") == 1; next }
+  /^\[[^]]+\]: / { if (found) exit; next }
   found { print }
 ' CHANGELOG.md)
 if [ -z "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then

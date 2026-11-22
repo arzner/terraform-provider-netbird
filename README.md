@@ -1,6 +1,6 @@
 # NetBird Terraform Provider
 
-A Terraform and OpenTofu provider for [NetBird](https://netbird.io), published as
+A Terraform and OpenTofu provider for [NetBird](https://netbird.io), released as
 `arzner/netbird` (from v0.1.0). The goal is the most dependable way to manage
 NetBird as code.
 
@@ -84,10 +84,33 @@ terraform {
 }
 ```
 
-The provider is published on the Terraform Registry and the OpenTofu Registry.
 Moving from `netbirdio/netbird` needs no change to resources or state beyond
 the address: `terraform state replace-provider netbirdio/netbird arzner/netbird`.
 Check usage in [docs](./docs/index.md).
+
+### Where to get it
+
+- **OpenTofu Registry:** `arzner/netbird` (listing in progress, #6).
+- **Terraform Registry:** not listed yet (#6). Until it is, install the provider
+  from the signed [GitHub release](https://github.com/arzner/terraform-provider-netbird/releases)
+  through a filesystem mirror: unpack the archive for your platform into
+  `<mirror>/registry.terraform.io/arzner/netbird/<version>/<os>_<arch>/` and point
+  the CLI at it in `~/.terraformrc`:
+
+  ```hcl
+  provider_installation {
+    filesystem_mirror {
+      path    = "/path/to/mirror"
+      include = ["registry.terraform.io/arzner/netbird"]
+    }
+    direct {
+      exclude = ["registry.terraform.io/arzner/netbird"]
+    }
+  }
+  ```
+
+  Verify the release first (below); `terraform providers lock` then records the
+  hashes in your lock file.
 
 ### Compatibility with NetBird
 
