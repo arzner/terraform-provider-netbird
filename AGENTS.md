@@ -29,6 +29,7 @@ where a general Go or process rule is not repeated here, that file applies.
 - [Error handling and comments](#error-handling-and-comments)
 - [Commits and pull requests](#commits-and-pull-requests)
 - [After you push: CI and review bots](#after-you-push-ci-and-review-bots)
+- [Review checklist](#review-checklist)
 - [Support](#support)
 
 ## Quick reference
@@ -262,6 +263,45 @@ not apply. Verify a claim against the code before changing anything, and never
 edit correct code just to silence a reviewer. Security findings get the opposite
 default: assume real until disproved. Never change a workflow, threshold, or lint
 exclusion to make a check pass.
+
+## Review checklist
+
+Every pull request is reviewed against this list, grounded in NetBird's OpenAPI
+spec at the version `go.mod` pins (`shared/management/http/api/openapi.yml` in
+the module; `Test_SpecConformance` checks part of it mechanically). Report every
+finding with `file:line`; do not stop at the first one.
+
+1. **Schema.** Each attribute maps to a property of the request or response
+   schema it is sent in or read from. Required/Optional/Computed agrees with the
+   spec's `required` and `readOnly`; defaults, validators and plan modifiers are
+   declared correctly.
+2. **Names.** tfsdk tags, model fields, and every API type or field a mapping
+   touches exist; resources and data sources are registered in `provider.go`;
+   `path.Root(...)` names exist.
+3. **Types.** Terraform types match the spec's types and formats (integer
+   formats, lists vs sets, element types); enums are validated; nullable and
+   pointer handling agree in both mapping directions.
+4. **Effects.** CRUD uses operations that exist; required request fields are
+   sent and read-only ones are not; nothing the configuration does not declare
+   is changed on the server (a full-replace update starts from the current
+   object); plan-modifier order, in-place vs replace, sensitivity and drift
+   behave as intended.
+5. **Contract.** The change is proven at the right level of test, judged by
+   the diff rather than the description:
+   - **Acceptance test required** for a new resource or data source; an added or
+     changed attribute (type, Required/Optional/Computed, default, Sensitive,
+     validators); a change to CRUD, mapping, plan modifiers or lifecycle. It
+     creates and, for a change, updates the object, checks the server through
+     `testClient()`, has `CheckDestroy` and an `ImportState` step, asserts
+     in-place vs replace where it matters, and exercises enums or bounds the
+     spec defines for a changed field. A data source change needs a read or
+     selector case.
+   - **Unit test enough** for REST client internals, error or response parsing,
+     and helpers whose behaviour a unit test fully exercises.
+   - **No test needed** for docs, examples, comments, CI or repository meta, a
+     dependency bump with no provider code change, and pure refactors.
+
+   A unit test alone is not enough when the change needs an acceptance test.
 
 ## Support
 
