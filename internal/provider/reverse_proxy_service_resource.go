@@ -303,7 +303,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseNonNullStateForUnknown()},
 			},
 			"access_groups": schema.ListAttribute{
-				MarkdownDescription: "Group IDs whose peers may reach the private service over the tunnel. Required when `private` is true; ignored otherwise. A proxy reuses a peer's granted access for up to five minutes by default (`NB_PROXY_TUNNEL_CACHE_TTL`), so removing a group, or turning a public service private, can take that long to reach a peer the proxy already admitted and that another policy still lets reach the proxy. IDs are not checked for existence: when a service turns private with the groups left out, it keeps the IDs it has, and an ID of a deleted group grants nothing.",
+				MarkdownDescription: "Group IDs whose peers may reach the private service over the tunnel. Required when `private` is true; ignored otherwise. A proxy reuses a peer's granted access for up to five minutes by default (`NB_PROXY_TUNNEL_CACHE_TTL`), so removing a group, or turning a public service private, can take that long to stop new requests from a peer the proxy already admitted and that another policy still lets reach the proxy; responses already in progress are not cut off. IDs are not checked for existence: when a service turns private with the groups left out, it keeps the IDs it has, and an ID of a deleted group grants nothing.",
 				ElementType:         types.StringType,
 				Optional:            true,
 				Computed:            true,
@@ -1193,7 +1193,7 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 	keepLiveUnknownAccess(&serviceReq, data, live)
-	if err := privateRequestProblem(serviceReq); err != nil {
+	if err := privateRequestProblem(serviceReq, live.Private != nil && *live.Private); err != nil {
 		resp.Diagnostics.AddError("Private service without usable access groups", err.Error())
 		return
 	}
@@ -1267,7 +1267,7 @@ func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.V
 	}
 	// A left-out list may be adopted from an existing service; ModifyPlan
 	// refuses it for a new one.
-	resp.Diagnostics.Append(privateServiceProblems(data.Mode, data.AccessGroups, data.Auth)...)
+	resp.Diagnostics.Append(privateServiceProblems(data.Mode, data.AccessGroups, data.Auth, true)...)
 }
 
 // ModifyPlan refuses a private service the server would reject when the
@@ -1301,7 +1301,12 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 				"A new service with private = true needs at least one group in access_groups.")
 			return
 		}
-	} else {
+	}
+	// Blank IDs are refused in a configured list and when a service turns
+	// private; an already-private service keeps a list that still works
+	// through its other IDs.
+	checkBlank := true
+	if !req.State.Raw.IsNull() {
 		if req.Plan.Raw.Equal(req.State.Raw) {
 			// Nothing is written, so values the server already holds are
 			// not this plan's problem.
@@ -1312,6 +1317,7 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 		if resp.Diagnostics.HasError() {
 			return
 		}
+		checkBlank = !config.AccessGroups.IsNull() || !state.Private.ValueBool()
 		switch {
 		case config.Mode.IsNull():
 			// A left-out mode is not sent and the server keeps the
@@ -1327,7 +1333,7 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	}
 	// A configuration error stops at ValidateConfig, so this reports only
 	// problems with values kept from state.
-	problems := privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth)
+	problems := privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth, checkBlank)
 	if config.Private.IsNull() && problems.HasError() {
 		problems.AddAttributeError(path.Root("private"), "Service is private from its state",
 			"private is left out, so the service stays private and the errors above apply. Set private = false to make it "+
@@ -1339,7 +1345,7 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 // privateRequestProblem checks the access groups the update would send for a
 // private service once the live values of unknown settings are merged in;
 // the plan could not see those.
-func privateRequestProblem(req api.ServiceRequest) error {
+func privateRequestProblem(req api.ServiceRequest, wasPrivate bool) error {
 	if req.Private == nil || !*req.Private {
 		return nil
 	}
@@ -1348,7 +1354,7 @@ func privateRequestProblem(req api.ServiceRequest) error {
 		return fmt.Errorf("the service would be private with no access groups. Nothing was changed; set access_groups")
 	}
 	for _, id := range *req.AccessGroups {
-		if strings.TrimSpace(id) == "" {
+		if !wasPrivate && strings.TrimSpace(id) == "" {
 			return fmt.Errorf("the service's access groups on the server include the blank ID %q, which no peer matches. Nothing was changed; set access_groups", id)
 		}
 	}
@@ -1385,7 +1391,7 @@ func keepLiveUnknownAccess(req *api.ServiceRequest, plan ReverseProxyServiceMode
 
 // privateServiceProblems returns the errors the server would give for a
 // private service with these values; unknown values are not checked.
-func privateServiceProblems(mode types.String, groups types.List, auth types.Object) diag.Diagnostics {
+func privateServiceProblems(mode types.String, groups types.List, auth types.Object, checkBlank bool) diag.Diagnostics {
 	var diags diag.Diagnostics
 	if !mode.IsNull() && !mode.IsUnknown() && mode.ValueString() != "http" {
 		diags.AddAttributeError(path.Root("mode"), "Private services are HTTP only",
@@ -1398,6 +1404,9 @@ func privateServiceProblems(mode types.String, groups types.List, auth types.Obj
 				"private = true requires at least one group in access_groups.")
 		}
 		for i, v := range groups.Elements() {
+			if !checkBlank {
+				break
+			}
 			if id, ok := v.(types.String); ok && !id.IsNull() && !id.IsUnknown() && strings.TrimSpace(id.ValueString()) == "" {
 				diags.AddAttributeError(path.Root("access_groups").AtListIndex(i), "Blank group ID",
 					fmt.Sprintf("private = true needs real group IDs in access_groups, got %q; no peer would match it.", id.ValueString()))

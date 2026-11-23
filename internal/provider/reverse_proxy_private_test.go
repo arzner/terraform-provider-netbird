@@ -209,6 +209,7 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 	}
 	groups := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{tftypes.NewValue(tftypes.String, "g1")})
 	noGroups := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{})
+	mixedGroups := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{tftypes.NewValue(tftypes.String, "g1"), tftypes.NewValue(tftypes.String, " ")})
 	blankGroup := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{tftypes.NewValue(tftypes.String, " ")})
 	type vals map[string]tftypes.Value
 	object := func(v vals) tftypes.Value {
@@ -271,6 +272,16 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 		"no-op with an adopted blank group": {
 			state:  vals{"private": on, "mode": http, "access_groups": blankGroup},
 			config: vals{}, plan: vals{"private": on, "mode": http, "access_groups": blankGroup},
+		},
+		"already private, rename keeps a blank group": {
+			state:  vals{"private": on, "mode": http, "access_groups": mixedGroups},
+			config: vals{"name": tftypes.NewValue(tftypes.String, "new")},
+			plan:   vals{"private": on, "mode": http, "access_groups": mixedGroups, "name": tftypes.NewValue(tftypes.String, "new")},
+		},
+		"already private, configured blank group": {
+			state:  vals{"private": on, "mode": http, "access_groups": groups},
+			config: vals{"access_groups": mixedGroups},
+			plan:   vals{"private": on, "mode": http, "access_groups": mixedGroups}, wantError: true,
 		},
 		"made private, adopted blank group": {
 			state:  vals{"private": tftypes.NewValue(tftypes.Bool, false), "access_groups": blankGroup},
@@ -339,17 +350,19 @@ func Test_notBlank(t *testing.T) {
 func Test_privateRequestProblem(t *testing.T) {
 	on, off := true, false
 	for name, tc := range map[string]struct {
-		req       api.ServiceRequest
-		wantError bool
+		req        api.ServiceRequest
+		wasPrivate bool
+		wantError  bool
 	}{
-		"private with a group":                  {api.ServiceRequest{Private: &on, AccessGroups: &[]string{"g1"}}, false},
-		"private, blank live ID":                {api.ServiceRequest{Private: &on, AccessGroups: &[]string{"g1", " "}}, true},
-		"private, no live groups":               {api.ServiceRequest{Private: &on, AccessGroups: &[]string{}}, true},
-		"private, groups omitted by the server": {api.ServiceRequest{Private: &on}, true},
-		"public, blank ID":                      {api.ServiceRequest{Private: &off, AccessGroups: &[]string{" "}}, false},
-		"private left out":                      {api.ServiceRequest{AccessGroups: &[]string{" "}}, false},
+		"private with a group":                  {api.ServiceRequest{Private: &on, AccessGroups: &[]string{"g1"}}, false, false},
+		"private, blank live ID":                {api.ServiceRequest{Private: &on, AccessGroups: &[]string{"g1", " "}}, false, true},
+		"private, no live groups":               {api.ServiceRequest{Private: &on, AccessGroups: &[]string{}}, false, true},
+		"private, groups omitted by the server": {api.ServiceRequest{Private: &on}, false, true},
+		"public, blank ID":                      {api.ServiceRequest{Private: &off, AccessGroups: &[]string{" "}}, false, false},
+		"already private, blank kept":           {api.ServiceRequest{Private: &on, AccessGroups: &[]string{"g1", " "}}, true, false},
+		"private left out":                      {api.ServiceRequest{AccessGroups: &[]string{" "}}, false, false},
 	} {
-		if err := privateRequestProblem(tc.req); (err != nil) != tc.wantError {
+		if err := privateRequestProblem(tc.req, tc.wasPrivate); (err != nil) != tc.wantError {
 			t.Errorf("%s: expected error %v, found %v", name, tc.wantError, err)
 		}
 	}

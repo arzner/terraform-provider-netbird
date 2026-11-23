@@ -1161,6 +1161,21 @@ resource "netbird_reverse_proxy_service" "other" {
 					onServer(true, []string{groupID}, 8081),
 				),
 			},
+			{
+				// A group created in the same apply: its ID is unknown at
+				// plan time and reaches state and the server once known.
+				Config: config(svc{private: "true", groups: "[netbird_group.allowed.id]", port: 8081, extra: fmt.Sprintf(`
+resource "netbird_group" "allowed" {
+  name = "%s-allowed"
+}`, rName)}),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPair(rNameFull, "access_groups.0", "netbird_group.allowed", "id"),
+					resource.TestCheckResourceAttr(rNameFull, "access_groups.#", "1"),
+					func(s *terraform.State) error {
+						return onServer(true, []string{s.RootModule().Resources["netbird_group.allowed"].Primary.ID}, 8081)(s)
+					},
+				),
+			},
 		},
 	})
 }
