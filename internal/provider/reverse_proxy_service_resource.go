@@ -940,7 +940,9 @@ func preserveTargetPlanValues(ctx context.Context, planTargets, apiTargets types
 // and effective path (a left-out path is the server's "/"), and port and
 // protocol decide between targets that share both. A planned target whose path
 // is not known yet pairs on ID, port and protocol, or with the one remaining
-// API target of its ID. An API target left unpaired keeps its server values,
+// API target of its ID. A known planned host decides between targets of one
+// subnet resource that share all of that. An API target left unpaired keeps
+// its server values,
 // so a change made outside Terraform (a moved path, a removed target) shows
 // in the next plan.
 func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]ReverseProxyServiceTargetModel {
@@ -956,6 +958,12 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 	unknownPath := func(p, _ ReverseProxyServiceTargetModel) bool { return p.Path.IsUnknown() }
 	sameEndpoint := func(p, l ReverseProxyServiceTargetModel) bool {
 		return p.Port.Equal(l.Port) && p.Protocol.Equal(l.Protocol)
+	}
+	// A known planned host tells apart targets of one subnet resource; for a
+	// peer target the server reports the peer's address instead, so this only
+	// narrows, never decides alone.
+	sameHost := func(p, l ReverseProxyServiceTargetModel) bool {
+		return !p.Host.IsNull() && !p.Host.IsUnknown() && p.Host.Equal(l.Host)
 	}
 	out := map[int]ReverseProxyServiceTargetModel{}
 	used := make([]bool, len(planned))
@@ -977,8 +985,14 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 			}
 		}
 	}
-	pair(func(p, l ReverseProxyServiceTargetModel) bool { return samePath(p, l) && sameEndpoint(p, l) }, false)
+	pair(func(p, l ReverseProxyServiceTargetModel) bool {
+		return samePath(p, l) && sameEndpoint(p, l) && sameHost(p, l)
+	}, false)
+	pair(func(p, l ReverseProxyServiceTargetModel) bool { return samePath(p, l) && sameEndpoint(p, l) }, true)
 	pair(samePath, true)
+	pair(func(p, l ReverseProxyServiceTargetModel) bool {
+		return unknownPath(p, l) && sameEndpoint(p, l) && sameHost(p, l)
+	}, true)
 	pair(func(p, l ReverseProxyServiceTargetModel) bool { return unknownPath(p, l) && sameEndpoint(p, l) }, true)
 	pair(unknownPath, true)
 	return out

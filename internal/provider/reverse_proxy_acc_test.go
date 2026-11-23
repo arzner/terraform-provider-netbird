@@ -1164,8 +1164,14 @@ resource "netbird_reverse_proxy_service" %q {
 			{
 				// A private service refuses bypass; block with a direct upstream
 				// target is fine on the harness cluster (private mode).
-				Config: config(`access_action = "block"`, 8082, true),
+				Config: config(`access_action = "block"`, 8082, true) + fmt.Sprintf(`
+data "netbird_reverse_proxy_service" "test" {
+  id = netbird_reverse_proxy_service.%s.id
+}`, rName),
 				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("data.netbird_reverse_proxy_service.test", "targets.0.options.direct_upstream", "true"),
+					resource.TestCheckResourceAttr("data.netbird_reverse_proxy_service.test", "targets.1.access_action", "block"),
+					resource.TestCheckResourceAttr("data.netbird_reverse_proxy_service.test", "access_restrictions.crowdsec_mode", crowdsec),
 					resource.TestCheckResourceAttr(rNameFull, "targets.0.options.direct_upstream", "true"),
 					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "block"),
 					onServer("block", true),

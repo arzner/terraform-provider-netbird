@@ -1603,3 +1603,27 @@ func Test_matchPlanTargets_portDecides(t *testing.T) {
 		t.Errorf("refresh: the survivor must pair with its own prior target, found %v", got)
 	}
 }
+
+// Targets of one subnet resource that share path, port and protocol pair on
+// their host.
+func Test_matchPlanTargets_hostDecides(t *testing.T) {
+	target := func(path types.String, host string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("subnet"), Port: types.Int64Value(80), Protocol: types.StringValue("http"),
+			Path: path, Host: types.StringValue(host), TargetType: types.StringValue("subnet"),
+		}
+	}
+	unknown, root := types.StringUnknown(), types.StringValue("/")
+	got := matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target(root, "10.0.0.1"), target(root, "10.0.0.2")},
+		[]ReverseProxyServiceTargetModel{target(root, "10.0.0.2")})
+	if len(got) != 1 || got[0].Host.ValueString() != "10.0.0.2" {
+		t.Errorf("refresh: the survivor must pair with its own prior target, found %v", got)
+	}
+	got = matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target(unknown, "10.0.0.1"), target(unknown, "10.0.0.2")},
+		[]ReverseProxyServiceTargetModel{target(root, "10.0.0.2"), target(root, "10.0.0.1")})
+	if len(got) != 2 || got[0].Host.ValueString() != "10.0.0.2" || got[1].Host.ValueString() != "10.0.0.1" {
+		t.Errorf("create: expected pairs by host, found %v", got)
+	}
+}
