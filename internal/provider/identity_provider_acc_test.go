@@ -165,6 +165,11 @@ func Test_IdentityProvider_TypeChangeReplaces(t *testing.T) {
 				ExpectError: regexp.MustCompile(`Issuer required`),
 			},
 			{
+				// And an empty client ID, which the server refuses on create.
+				Config:      testIdentityProviderResource(rName, "migrated", "keycloak", "", "client-secret", "https://oauth.id.jumpcloud.com/"),
+				ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Length.*client_id`),
+			},
+			{
 				// So does an issuer the server refuses (http).
 				Config:      testIdentityProviderResource(rName, "migrated", "keycloak", "client-id", "client-secret", "http://sso.example.test/realms/main"),
 				ExpectError: regexp.MustCompile(`(?s)Invalid issuer.*https`),

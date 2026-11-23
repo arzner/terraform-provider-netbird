@@ -211,7 +211,10 @@ func isValidCases(t *testing.T, d *ast.FuncDecl) []string {
 		t.Fatal("IsValid is not a switch followed by return false; update this test")
 	}
 	sw, ok := d.Body.List[0].(*ast.SwitchStmt)
-	if tag, isIdent := sw.Tag.(*ast.Ident); !ok || sw.Init != nil || !isIdent || tag.Name != recv[0].Name {
+	if !ok {
+		t.Fatal("IsValid does not start with a switch; update this test")
+	}
+	if tag, isIdent := sw.Tag.(*ast.Ident); sw.Init != nil || !isIdent || tag.Name != recv[0].Name {
 		t.Fatal("IsValid does not switch on its receiver; update this test")
 	}
 	var names []string
@@ -298,6 +301,7 @@ func Test_identityProviderValidateConfig(t *testing.T) {
 		"keycloak with an issuer":            {idpType: "keycloak", issuer: "https://id.example.com/realms/x"},
 		"issuer not known yet":               {idpType: "keycloak", issuer: tftypes.UnknownValue},
 		"http issuer":                        {idpType: "keycloak", issuer: "http://sso.example.test/realms/main", wantError: true},
+		"http issuer, type not known yet":    {idpType: tftypes.UnknownValue, issuer: "http://sso.example.test", wantError: true},
 		"issuer without a host":              {idpType: "oidc", issuer: "https:///realms/main", wantError: true},
 		"issuer with user info":              {idpType: "oidc", issuer: "https://u:p@sso.example.test/", wantError: true},
 		"issuer with a query":                {idpType: "oidc", issuer: "https://sso.example.test/?a=b", wantError: true},

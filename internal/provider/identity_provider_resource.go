@@ -64,9 +64,10 @@ func (r *IdentityProvider) Schema(ctx context.Context, req resource.SchemaReques
 			"name": schema.StringAttribute{
 				MarkdownDescription: "Human-readable name for the identity provider",
 				Required:            true,
+				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"type": schema.StringAttribute{
-				MarkdownDescription: "Type of identity provider (adfs, authentik, entra, google, keycloak, microsoft, oidc, okta, pocketid, zitadel). google and microsoft have a built-in issuer, used with `issuer = \"\"`; the others need an issuer URL. The server does not change the type of an existing provider, so a new type replaces it.",
+				MarkdownDescription: "Type of identity provider (adfs, authentik, entra, google, keycloak, microsoft, oidc, okta, pocketid, zitadel). google and microsoft have a built-in issuer, used with `issuer = \"\"`; the others need an issuer URL. The server does not change the type of an existing provider, so a new type replaces it: the old provider is deleted first, unless `lifecycle { create_before_destroy = true }` is set, which keeps the login available if the new provider fails to create (the server checks that the issuer answers only then).",
 				Required:            true,
 				Validators:          []validator.String{stringvalidator.OneOf(identityProviderTypes...)},
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
@@ -74,6 +75,7 @@ func (r *IdentityProvider) Schema(ctx context.Context, req resource.SchemaReques
 			"client_id": schema.StringAttribute{
 				MarkdownDescription: "OAuth2 client ID",
 				Required:            true,
+				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"client_secret": schema.StringAttribute{
 				MarkdownDescription: "OAuth2 client secret",
@@ -227,15 +229,19 @@ func (r *IdentityProvider) ValidateConfig(ctx context.Context, req resource.Vali
 	var idpType, issuer types.String
 	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("type"), &idpType)...)
 	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("issuer"), &issuer)...)
-	if resp.Diagnostics.HasError() || idpType.IsNull() || idpType.IsUnknown() || issuer.IsNull() || issuer.IsUnknown() {
+	if resp.Diagnostics.HasError() || issuer.IsNull() || issuer.IsUnknown() {
+		return
+	}
+	// The syntax rules hold for every type.
+	if problem := issuerProblem(issuer.ValueString()); problem != "" {
+		resp.Diagnostics.AddAttributeError(path.Root("issuer"), "Invalid issuer", problem)
+	}
+	if idpType.IsNull() || idpType.IsUnknown() {
 		return
 	}
 	if issuer.ValueString() == "" && !builtInIssuer[idpType.ValueString()] {
 		resp.Diagnostics.AddAttributeError(path.Root("issuer"), "Issuer required",
 			fmt.Sprintf("type %q has no built-in issuer; set issuer to the provider's issuer URL. Only google and microsoft work with issuer = \"\".", idpType.ValueString()))
-	}
-	if problem := issuerProblem(issuer.ValueString()); problem != "" {
-		resp.Diagnostics.AddAttributeError(path.Root("issuer"), "Invalid issuer", problem)
 	}
 }
 
