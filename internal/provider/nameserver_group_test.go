@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -190,9 +191,20 @@ func Test_nameserverDomainProblem(t *testing.T) {
 		"":                                                    false,
 		"-bad.example":                                        false,
 		"a..b":                                                false,
+		// Labels are limited to 63 characters, the whole name only by the
+		// API's 255.
+		strings.Repeat("a", 64) + ".example": false,
+		strings.Repeat("a", 63) + ".example": true,
+		longDomain():                         true,
 	} {
 		if got := nameserverDomainProblem(d) == ""; got != ok {
 			t.Errorf("%q: expected valid %v, found %v (%s)", d, ok, got, nameserverDomainProblem(d))
 		}
 	}
+}
+
+// longDomain is a valid 255-character match domain of 63-character labels.
+func longDomain() string {
+	label := strings.Repeat("a", 63)
+	return label + "." + label + "." + label + "." + strings.Repeat("b", 61) + ".c"
 }

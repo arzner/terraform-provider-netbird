@@ -184,13 +184,14 @@ func Test_NameserverGroup_SingleLabelDomain(t *testing.T) {
 				ExpectError: regexp.MustCompile(`(?s)Invalid domain name.*Wildcards are not allowed`),
 			},
 			{
-				// Updated in place; listed in the order an import reads them.
-				Config:           config(`["consul.", "lan"]`),
+				// Updated in place, with a 255-character name too; listed in
+				// the order an import reads them.
+				Config:           config(fmt.Sprintf(`[%q, "consul.", "lan"]`, longDomain())),
 				ConfigPlanChecks: updatesInPlace(rNameFull),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttrPtr(rNameFull, "id", &createdID),
-					resource.TestCheckResourceAttr(rNameFull, "domains.#", "2"),
-					domainsOnServer(&createdID, "consul.", "lan"),
+					resource.TestCheckResourceAttr(rNameFull, "domains.#", "3"),
+					domainsOnServer(&createdID, longDomain(), "consul.", "lan"),
 				),
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
