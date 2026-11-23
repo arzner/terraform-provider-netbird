@@ -160,7 +160,7 @@ resource "netbird_reverse_proxy_service" "tls_backend" {
 - `listen_port` (Number) Port the proxy listens on (L4/TLS only). Set to 0 for auto-assignment.
 - `mode` (String) Service mode: "http" for L7 reverse proxy, "tcp"/"udp"/"tls" for L4 passthrough
 - `pass_host_header` (Boolean) When true, the original client Host header is passed through to the backend
-- `private` (Boolean) When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity (no OIDC) and the server generates an access policy from `access_groups` to the cluster's proxy peers. Requires `mode = "http"`, at least one access group and no bearer auth.
+- `private` (Boolean) When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity (no OIDC) and the server generates an access policy from `access_groups` to the cluster's proxy peers. Requires `mode = "http"`, at least one access group and no bearer auth. Left out, a new service is public and an existing one keeps its setting.
 - `rewrite_redirects` (Boolean) When true, Location headers in backend responses are rewritten to replace the backend address with the public-facing domain
 
 ### Read-Only

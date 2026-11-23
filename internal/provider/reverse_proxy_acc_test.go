@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -949,7 +950,8 @@ func Test_ReverseProxyService_Private(t *testing.T) {
 	peerID := testPeerID(t, "peer1")
 	groupID := e2eGroupAllID()
 	config := func(private bool, bearer bool) string {
-		auth := ""
+		auth := `
+  auth = {}`
 		if bearer {
 			auth = fmt.Sprintf(`
   auth = {
@@ -1013,6 +1015,17 @@ resource "netbird_reverse_proxy_service" %q {
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(rNameFull, "private", "false"),
 					onServer(false),
+				),
+			},
+			{
+				// A public service with no access groups: the empty list stays empty.
+				Config: strings.Replace(config(false, false), fmt.Sprintf("access_groups = [%q]", groupID), "access_groups = []", 1) + fmt.Sprintf(`
+data "netbird_reverse_proxy_service" "test" {
+  id = netbird_reverse_proxy_service.%s.id
+}`, rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "access_groups.#", "0"),
+					resource.TestCheckResourceAttr("data.netbird_reverse_proxy_service.test", "private", "false"),
 				),
 			},
 		},

@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -295,10 +296,10 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Computed:            true,
 			},
 			"private": schema.BoolAttribute{
-				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity (no OIDC) and the server generates an access policy from `access_groups` to the cluster's proxy peers. Requires `mode = \"http\"`, at least one access group and no bearer auth.",
+				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity (no OIDC) and the server generates an access policy from `access_groups` to the cluster's proxy peers. Requires `mode = \"http\"`, at least one access group and no bearer auth. Left out, a new service is public and an existing one keeps its setting.",
 				Optional:            true,
 				Computed:            true,
-				Default:             booldefault.StaticBool(false),
+				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"access_groups": schema.ListAttribute{
 				MarkdownDescription: "Group IDs whose peers may reach the private service over the tunnel. Required when `private` is true; ignored otherwise.",
@@ -643,9 +644,14 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 
 	data.ProxyCluster = types.StringPointerValue(svc.ProxyCluster)
 	data.Private = types.BoolValue(svc.Private != nil && *svc.Private)
-	accessGroups, agDiags := sortedStringListPointer(ctx, data.AccessGroups, svc.AccessGroups)
-	ret.Append(agDiags...)
-	data.AccessGroups = accessGroups
+	if svc.AccessGroups == nil && !data.AccessGroups.IsNull() && !data.AccessGroups.IsUnknown() && len(data.AccessGroups.Elements()) == 0 {
+		// The server omits an empty list; keep the configured empty list.
+		data.AccessGroups = types.ListValueMust(types.StringType, []attr.Value{})
+	} else {
+		accessGroups, agDiags := sortedStringListPointer(ctx, data.AccessGroups, svc.AccessGroups)
+		ret.Append(agDiags...)
+		data.AccessGroups = accessGroups
+	}
 
 	var targets []ReverseProxyServiceTargetModel
 	for _, t := range svc.Targets {
@@ -1227,7 +1233,9 @@ func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.V
 		resp.Diagnostics.AddAttributeError(path.Root("mode"), "Private services are HTTP only",
 			fmt.Sprintf("private = true requires mode = \"http\", got %q.", data.Mode.ValueString()))
 	}
-	if data.AccessGroups.IsNull() || (!data.AccessGroups.IsUnknown() && len(data.AccessGroups.Elements()) == 0) {
+	// A left-out list may be adopted from an existing service; only an
+	// explicitly empty one is certainly refused by the server.
+	if !data.AccessGroups.IsNull() && !data.AccessGroups.IsUnknown() && len(data.AccessGroups.Elements()) == 0 {
 		resp.Diagnostics.AddAttributeError(path.Root("access_groups"), "Access groups required",
 			"private = true requires at least one group in access_groups.")
 	}

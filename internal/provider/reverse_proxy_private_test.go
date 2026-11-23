@@ -4,6 +4,7 @@ package provider
 
 import (
 	"context"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"reflect"
 	"testing"
 
@@ -80,7 +81,7 @@ func Test_reverseProxyService_validatePrivate(t *testing.T) {
 		"private with group":     {private: valPtr(true), groups: &groups},
 		"private http":           {private: valPtr(true), mode: "http", groups: &groups},
 		"private tcp":            {private: valPtr(true), mode: "tcp", groups: &groups, wantError: true},
-		"private without groups": {private: valPtr(true), wantError: true},
+		"private without groups": {private: valPtr(true)},
 		"private empty groups":   {private: valPtr(true), groups: &noGroups, wantError: true},
 		"private with bearer":    {private: valPtr(true), groups: &groups, bearer: true, wantError: true},
 		"public with bearer":     {private: valPtr(false), bearer: true},
@@ -133,4 +134,22 @@ func authWithBearer(t *testing.T, authType tftypes.Type) tftypes.Value {
 	bearer["enabled"] = tftypes.NewValue(tftypes.Bool, true)
 	values["bearer_auth"] = tftypes.NewValue(bearerType, bearer)
 	return tftypes.NewValue(obj, values)
+}
+
+func Test_reverseProxyService_emptyAccessGroupsKept(t *testing.T) {
+	ctx := context.Background()
+	data := ReverseProxyServiceModel{AccessGroups: types.ListValueMust(types.StringType, []attr.Value{})}
+	if d := reverseProxyServiceAPIToTerraform(ctx, &api.Service{Id: "s"}, &data); d.HasError() {
+		t.Fatal(d)
+	}
+	if data.AccessGroups.IsNull() || len(data.AccessGroups.Elements()) != 0 {
+		t.Errorf("a configured empty list must stay empty when the server omits it, found %v", data.AccessGroups)
+	}
+	var fresh ReverseProxyServiceModel
+	if d := reverseProxyServiceAPIToTerraform(ctx, &api.Service{Id: "s"}, &fresh); d.HasError() {
+		t.Fatal(d)
+	}
+	if !fresh.AccessGroups.IsNull() {
+		t.Errorf("an unset list must read as null, found %v", fresh.AccessGroups)
+	}
 }
