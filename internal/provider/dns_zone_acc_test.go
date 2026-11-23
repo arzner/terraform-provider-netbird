@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -132,8 +133,40 @@ func Test_DNSZone_DomainReplaces(t *testing.T) {
 				ExpectError: regexp.MustCompile(`Invalid zone domain`),
 			},
 			{
+				// So do no groups, an empty set, a null group and a name the
+				// server refuses, on a replacement.
+				Config:      strings.Replace(testDNSRecordResource(zoneName, "after.local", rName, "www", "A", "192.168.1.1", 300), fmt.Sprintf("distribution_groups = [%q]", e2eGroupAllID()), "", 1),
+				ExpectError: regexp.MustCompile(`Distribution groups required`),
+			},
+			{
+				Config:      strings.Replace(testDNSRecordResource(zoneName, "after.local", rName, "www", "A", "192.168.1.1", 300), fmt.Sprintf("distribution_groups = [%q]", e2eGroupAllID()), "distribution_groups = []", 1),
+				ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value.*distribution_groups`),
+			},
+			{
+				Config:      strings.Replace(testDNSRecordResource(zoneName, "after.local", rName, "www", "A", "192.168.1.1", 300), fmt.Sprintf("distribution_groups = [%q]", e2eGroupAllID()), "distribution_groups = [null]", 1),
+				ExpectError: regexp.MustCompile(`Null Set Value|null`),
+			},
+			{
+				Config:      strings.Replace(testDNSRecordResource(zoneName, "after.local", rName, "www", "A", "192.168.1.1", 300), fmt.Sprintf("name                = %q", zoneName), fmt.Sprintf("name                = %q", strings.Repeat("n", 256)), 1),
+				ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Length.*name`),
+			},
+			{
+				// Left out on an in-place change, the groups are kept.
 				Config:   testDNSRecordResource(zoneName, "before.local", rName, "www", "A", "192.168.1.1", 300),
 				PlanOnly: true,
+			},
+			{
+				Config: strings.Replace(testDNSRecordResource(zoneName, "before.local", rName, "www", "A", "192.168.1.1", 300), fmt.Sprintf("distribution_groups = [%q]", e2eGroupAllID()), "enable_search_domain = true", 1),
+				Check: func(*terraform.State) error {
+					zone, err := testClient().DNSZones.GetZone(context.Background(), firstZone)
+					if err != nil {
+						return err
+					}
+					if !zone.EnableSearchDomain || len(zone.DistributionGroups) != 1 || zone.DistributionGroups[0] != e2eGroupAllID() {
+						return fmt.Errorf("expected search domain on and the group kept, found %v %v", zone.EnableSearchDomain, zone.DistributionGroups)
+					}
+					return nil
+				},
 			},
 			{
 				Config: testDNSRecordResource(zoneName, "after.local", rName, "www", "A", "192.168.1.1", 300),

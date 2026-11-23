@@ -72,7 +72,7 @@ func (r *DNSZone) Schema(ctx context.Context, req resource.SchemaRequest, resp *
 				Validators:          []validator.String{stringvalidator.LengthBetween(1, 255)},
 			},
 			"domain": schema.StringAttribute{
-				MarkdownDescription: "Zone domain (FQDN, no wildcard, no trailing dot; checked at plan time the way the server does). The server does not change the domain of a zone, so a new domain replaces the zone. The server deletes the old zone with all its records: records managed by `netbird_dns_record` are created again in the new zone (their names have to move to the new domain too), records added outside Terraform are lost.",
+				MarkdownDescription: "Zone domain (FQDN, no wildcard, no trailing dot; checked at plan time the way the server does). The server does not change the domain of a zone, so a new domain replaces the zone. The server deletes the old zone with all its records. A `netbird_dns_record` in the same configuration whose `zone_id` refers to this zone is created again in the new zone (its name has to move to the new domain too); any other record, added outside Terraform, with a literal zone ID or in another state, is lost. The plan does not check that the new domain is free: one used by another zone or by the peer DNS domain fails after the old zone is deleted, unless `lifecycle { create_before_destroy = true }` is set.",
 				Required:            true,
 				Validators:          []validator.String{zoneDomain{}},
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
@@ -93,7 +93,7 @@ func (r *DNSZone) Schema(ctx context.Context, req resource.SchemaRequest, resp *
 			},
 			"distribution_groups": schema.SetAttribute{
 				MarkdownDescription: "Group IDs that define groups of peers that will resolve this zone. Needed to create the zone, also when a new domain replaces it; left out on an existing zone, its groups are kept.",
-				Validators:          []validator.Set{setvalidator.SizeAtLeast(1), setvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1))},
+				Validators:          []validator.Set{setvalidator.SizeAtLeast(1), setvalidator.NoNullValues(), setvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1))},
 				ElementType:         types.StringType,
 				Optional:            true,
 				Computed:            true,
