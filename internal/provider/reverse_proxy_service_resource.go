@@ -26,6 +26,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
 	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
 	"github.com/netbirdio/netbird/shared/management/http/api"
@@ -1527,12 +1528,18 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 		// would otherwise pass for one that works.
 		resp.Diagnostics.Append(directUpstreamWarnings(config.Targets, plan.Mode.ValueString())...)
 	}
+	// writes is false when the plan differs from state only by values not
+	// known yet: the service may not be written at all, and what it holds
+	// was accepted by the server, so the target checks wait for the final
+	// plan.
+	writes := true
 	if !create {
 		if req.Plan.Raw.Equal(req.State.Raw) {
 			// Nothing is written, so values the server already holds are
 			// not this plan's problem.
 			return
 		}
+		writes = !onlyUnknownDifferences(req.Plan.Raw, req.State.Raw)
 		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	}
 	if resp.Diagnostics.HasError() {
@@ -1559,13 +1566,17 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 			return
 		}
 	}
-	actions := targetActions(config.Targets, existing, true)
-	if !create {
+	// A left-out path is "/" only on a write; otherwise it may be kept.
+	actions := targetActions(config.Targets, existing, writes)
+	if !create && writes {
 		resp.Diagnostics.Append(actions.keptProblems()...)
 	}
-	resp.Diagnostics.Append(planOmittedPaths(ctx, config.Targets, plan.Targets, resp)...)
-	targetProblems := actions.problems(private, modeKnown)
-	resp.Diagnostics.Append(targetHostProblems(config.Targets, modeKnown)...)
+	var targetProblems diag.Diagnostics
+	if writes {
+		resp.Diagnostics.Append(planOmittedPaths(ctx, config.Targets, plan.Targets, resp)...)
+		targetProblems = actions.problems(private, modeKnown)
+		resp.Diagnostics.Append(targetHostProblems(config.Targets, modeKnown)...)
+	}
 	if !private {
 		resp.Diagnostics.Append(targetProblems...)
 		return
@@ -1873,14 +1884,13 @@ func accessActionPathProblem(p string) string {
 	return ""
 }
 
-// targetHostProblems refuses a configured host the server rejects, or one it
-// accepts but the proxy cannot dial, for the service's mode (v0.83, v0.82:
-// validateDirectUpstreamHost, validateSubnetTarget, validateL4Target). The
-// server checks a trimmed copy but dials the host as written, so whitespace
-// anywhere is refused where the host is dialled: with direct_upstream, and
-// always for subnet targets. Peer, host and domain targets without
-// direct_upstream get the looked-up address, so their host is not checked.
-// mode is "" when not known, and then nothing is checked.
+// targetHostProblems refuses a configured host the server rejects for the
+// service's mode and the target's type (v0.83, v0.82:
+// validateDirectUpstreamHost, validateSubnetTarget, validateL4Target). A
+// left-out host is not sent, so it counts as empty. Checks that depend on a
+// value not known at plan time wait for it; mode "" means not known. The
+// host itself is not repeated in the diagnostic, since a mistaken value may
+// carry credentials.
 func targetHostProblems(configured types.List, mode string) diag.Diagnostics {
 	var diags diag.Diagnostics
 	if mode == "" || configured.IsNull() || configured.IsUnknown() {
@@ -1897,79 +1907,118 @@ func targetHostProblems(configured types.List, mode string) diag.Diagnostics {
 		if targetType.IsUnknown() || targetType.IsNull() || host.IsUnknown() {
 			continue
 		}
-		// A left-out host is not sent: peer, host and domain targets get the
-		// looked-up address, a subnet target gets none.
-		direct := false
-		if opts, ok := attrs["options"].(types.Object); ok && !opts.IsNull() && !opts.IsUnknown() {
-			v, ok := opts.Attributes()["direct_upstream"].(types.Bool)
-			if ok && v.IsUnknown() {
-				continue
+		direct := 0
+		if opts, ok := attrs["options"].(types.Object); ok && opts.IsUnknown() {
+			direct = -1
+		} else if ok && !opts.IsNull() {
+			if v, ok := opts.Attributes()["direct_upstream"].(types.Bool); ok && v.IsUnknown() {
+				direct = -1
+			} else if ok && v.ValueBool() {
+				direct = 1
 			}
-			direct = ok && v.ValueBool()
 		}
 		if problem := hostProblem(mode, targetType.ValueString(), host.ValueString(), direct); problem != "" {
-			detail := fmt.Sprintf("The server refuses or cannot dial host %q for this target: %s.", host.ValueString(), problem)
-			if host.IsNull() {
-				detail = fmt.Sprintf("host is left out: %s.", problem)
-			}
-			diags.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("host"), "Host not usable", detail)
+			diags.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("host"), "Host not usable",
+				fmt.Sprintf("The server refuses this target's host: %s.", problem))
 		}
 	}
 	return diags
 }
 
-// notHostNameRune reports a rune outside a host name's letters, digits,
-// '-', '.' and '_'.
-func notHostNameRune(r rune) bool {
-	switch {
-	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.', r == '_':
-		return false
-	}
-	return true
-}
-
-// hostProblem returns why host does not work for a target, or "".
-func hostProblem(mode, targetType, host string, direct bool) string {
-	subnet := targetType == "subnet"
-	if !subnet && !direct {
-		return ""
-	}
+// hostProblem returns why the server refuses host for a target, or "".
+// direct is 1 with direct_upstream, 0 without, -1 when not known.
+func hostProblem(mode, targetType, host string, direct int) string {
 	trimmed := strings.TrimSpace(host)
-	if subnet && trimmed == "" {
-		return "a subnet target needs a host"
+	if targetType != "subnet" {
+		return directHostProblem(trimmed, direct)
 	}
-	if trimmed == "" {
-		return "" // the server fills in the looked-up address
-	}
-	if strings.IndexFunc(host, unicode.IsSpace) >= 0 {
-		return "it contains whitespace"
-	}
-	if subnet && mode != "http" {
-		return "" // L4 subnet targets need only a host
-	}
-	if strings.Contains(host, "/") {
-		return "it contains a slash"
-	}
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return "it includes a port (set port instead)"
-	}
-	ip, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"))
-	if err != nil {
-		// The server writes the host into the target URL as is; anything
-		// but a host name's letters, digits, '-', '.' and '_' is escaped
-		// there and the proxy refuses the mapping.
-		if strings.IndexFunc(host, notHostNameRune) >= 0 {
-			return "it is not a host name or IP address"
+	if mode != "http" {
+		if host == "" {
+			return "a subnet target needs a host"
 		}
 		return ""
 	}
-	if ip.Zone() != "" {
-		return "IPv6 zones are refused"
+	if trimmed == "" {
+		return "a subnet target needs a host"
 	}
-	if direct && (ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast()) {
+	if problem := hostSyntaxProblem(trimmed); problem != "" {
+		return problem
+	}
+	ip, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]"))
+	switch {
+	case err != nil:
+		return ""
+	case ip.Zone() != "":
+		return "IPv6 zones are refused"
+	case direct == 1 && (ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast()):
 		return "with direct_upstream, loopback, multicast and link-local addresses are refused"
 	}
 	return ""
+}
+
+// directHostProblem checks a peer, host or domain target's host, which the
+// server validates only with direct_upstream; an empty one is replaced by
+// the looked-up address.
+func directHostProblem(trimmed string, direct int) string {
+	if direct != 1 || trimmed == "" {
+		return ""
+	}
+	if problem := hostSyntaxProblem(trimmed); problem != "" {
+		return problem
+	}
+	ip, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]"))
+	if err == nil && (ip.Zone() != "" || ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast()) {
+		return "with direct_upstream, loopback, multicast, link-local and zoned addresses are refused"
+	}
+	return ""
+}
+
+// hostSyntaxProblem returns the server's syntax objection to a trimmed host.
+func hostSyntaxProblem(trimmed string) string {
+	if strings.ContainsAny(trimmed, " \t/") {
+		return "it contains a space, tab or slash"
+	}
+	if _, _, err := net.SplitHostPort(trimmed); err == nil {
+		return "it includes a port (set port instead)"
+	}
+	return ""
+}
+
+// onlyUnknownDifferences reports whether every known value of plan equals
+// the one in state, so the plan changes nothing unless a value not known yet
+// turns out different.
+func onlyUnknownDifferences(plan, state tftypes.Value) bool {
+	if !plan.IsKnown() {
+		return true
+	}
+	if plan.IsNull() || state.IsNull() || !state.IsKnown() || !plan.Type().Equal(state.Type()) {
+		return plan.Equal(state)
+	}
+	switch plan.Type().(type) {
+	case tftypes.Object, tftypes.Map:
+		var p, s map[string]tftypes.Value
+		if plan.As(&p) != nil || state.As(&s) != nil || len(p) != len(s) {
+			return false
+		}
+		for k, v := range p {
+			if sv, ok := s[k]; !ok || !onlyUnknownDifferences(v, sv) {
+				return false
+			}
+		}
+		return true
+	case tftypes.List, tftypes.Tuple:
+		var p, s []tftypes.Value
+		if plan.As(&p) != nil || state.As(&s) != nil || len(p) != len(s) {
+			return false
+		}
+		for i := range p {
+			if !onlyUnknownDifferences(p[i], s[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return plan.Equal(state)
 }
 
 // directUpstreamWarnings flags direct_upstream on an L4 service: NetBird

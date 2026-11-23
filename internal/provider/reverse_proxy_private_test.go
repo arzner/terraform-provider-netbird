@@ -570,8 +570,8 @@ func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
 		},
 		"several current targets at one path, a path not known yet": {
 			state:     vals{"private": off, "mode": http, "targets": targets(target("", "inherit"), target("", "inherit"), target("/admin", "block"))},
-			config:    vals{"targets": targets(target(unknownPath, nil), target("", nil), target("/admin", nil))},
-			plan:      vals{"private": off, "mode": http, "targets": targets(target(unknownPath, unknown), target("", unknown), target("/admin", unknown))},
+			config:    vals{"name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target(unknownPath, nil), target("", nil), target("/admin", nil))},
+			plan:      vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target(unknownPath, unknown), target("", unknown), target("/admin", unknown))},
 			wantError: "Access action needed on every target",
 		},
 		"two enabled targets at one controlled path": {
@@ -603,6 +603,11 @@ func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
 			config:    vals{"name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target("", "inherit"), target("", "block"))},
 			plan:      vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target(unknownPath, "inherit"), target(unknownPath, "block"))},
 			wantError: "targets[1].path",
+		},
+		"a path left out while only a name not known yet may change": {
+			state:  vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "a"), "targets": targets(target("/", "inherit"), target("/admin", "block"))},
+			config: vals{"name": tftypes.NewValue(tftypes.String, unknown), "targets": targets(target("", "inherit"), target("", "block"))},
+			plan:   vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, unknown), "targets": targets(target(unknownPath, "inherit"), target(unknownPath, "block"))},
 		},
 		"block on a relative path": {
 			config:    vals{"targets": targets(target("admin", "block"))},
@@ -737,46 +742,61 @@ func directTarget(host string, direct attr.Value) attr.Value {
 		attrs[n] = nullOf(at.ValueType(ctx))
 	}
 	attrs["host"] = types.StringValue(host)
+	attrs["target_type"] = types.StringValue("peer")
 	attrs["options"] = types.ObjectValueMust(optsType.AttrTypes, opts)
 	return types.ObjectValueMust(targetType.AttrTypes, attrs)
 }
 
 func Test_hostProblem(t *testing.T) {
+	const on, off, unknown = 1, 0, -1
 	for _, tc := range []struct {
 		mode, targetType, host string
-		direct, want           bool
+		direct                 int
+		want                   bool
 	}{
-		{"http", "peer", "127.0.0.1", true, true},
-		{"http", "peer", "[::1]", true, true},
-		{"http", "host", "224.0.0.1", true, true},
-		{"http", "domain", "169.254.1.1", true, true},
-		{"http", "peer", "fe80::1%eth0", true, true},
-		{"http", "peer", "10.0.0.5:80", true, true},
-		{"http", "peer", "a b", true, true},
-		{"http", "peer", "backend.lan ", true, true},
-		{"http", "peer", "a/b", true, true},
-		{"http", "peer", "10.0.0.5", true, false},
-		{"http", "peer", "backend.lan", true, false},
-		{"http", "peer", "2001:db8::1", true, false},
-		{"http", "peer", "", true, false},
-		{"http", "peer", "127.0.0.1", false, false}, // replaced by the looked-up address
-		{"http", "subnet", "", false, true},
-		{"http", "subnet", "backend.lan ", false, true},
-		{"http", "subnet", "fe80::1%eth0", false, true},
-		{"http", "subnet", "169.254.1.1", false, false},
-		{"http", "subnet", "169.254.1.1", true, true},
-		{"tcp", "subnet", "169.254.1.1", true, false}, // L4 subnet targets need only a host
-		{"tcp", "subnet", "", true, true},
-		{"tcp", "subnet", "backend.lan ", false, true},
-		{"tcp", "peer", "127.0.0.1", true, true},
-		{"http", "subnet", "backend.lan#fragment", false, true},
-		{"http", "subnet", "user@backend.lan", false, true},
-		{"http", "subnet", "back_end-1.lan", false, false},
-		{"http", "peer", "backend.lan?x", true, true},
+		{"http", "peer", "127.0.0.1", on, true},
+		{"http", "peer", "[::1]", on, true},
+		{"http", "host", "224.0.0.1", on, true},
+		{"http", "domain", "169.254.1.1", on, true},
+		{"http", "peer", "fe80::1%eth0", on, true},
+		{"http", "peer", "10.0.0.5:80", on, true},
+		{"http", "peer", "a b", on, true},
+		{"http", "peer", "a/b", on, true},
+		{"http", "peer", "10.0.0.5", on, false},
+		{"http", "peer", "backend.lan", on, false},
+		{"http", "peer", "bücher.example", on, false},
+		{"http", "peer", "2001:db8::1", on, false},
+		{"http", "peer", "", on, false},  // the looked-up address
+		{"http", "peer", " ", on, false}, // trimmed empty, as the server reads it
+		{"http", "peer", "127.0.0.1", off, false},
+		{"http", "peer", "127.0.0.1", unknown, false},
+		{"tcp", "peer", "127.0.0.1", on, true},
+		{"http", "subnet", "", off, true},
+		{"http", "subnet", "", unknown, true},
+		{"http", "subnet", " ", off, true},
+		{"http", "subnet", "fe80::1%eth0", off, true},
+		{"http", "subnet", "10.0.0.5:80", unknown, true},
+		{"http", "subnet", "169.254.1.1", off, false},
+		{"http", "subnet", "169.254.1.1", unknown, false},
+		{"http", "subnet", "169.254.1.1", on, true},
+		{"http", "subnet", "bücher.example", on, false},
+		{"tcp", "subnet", "169.254.1.1", on, false}, // L4 subnet targets need only a host
+		{"tcp", "subnet", "", on, true},
+		{"udp", "subnet", " ", off, false},
 	} {
 		if got := hostProblem(tc.mode, tc.targetType, tc.host, tc.direct) != ""; got != tc.want {
-			t.Errorf("%s %s %q direct=%t: expected a problem %v, found %v", tc.mode, tc.targetType, tc.host, tc.direct, tc.want, got)
+			t.Errorf("%s %s %q direct=%d: expected a problem %v, found %v", tc.mode, tc.targetType, tc.host, tc.direct, tc.want, got)
 		}
+	}
+	// The diagnostic names the reason, not the value.
+	list := types.ListValueMust(ReverseProxyServiceTargetModel{}.TFType(), []attr.Value{directTarget("https://user:secret@db.lan:5432", types.BoolValue(true))})
+	for _, d := range targetHostProblems(list, "http") {
+		if strings.Contains(d.Detail(), "secret") || strings.Contains(d.Summary(), "secret") {
+			t.Errorf("the rejected host must not be repeated: %s", d.Detail())
+		}
+	}
+	if !targetHostProblems(list, "http").HasError() {
+		t.Error("a URL as host must be refused")
 	}
 }
 
@@ -938,6 +958,29 @@ func Test_reverseProxyService_planOmittedTargetValues(t *testing.T) {
 			t.Errorf("expected path null (the server's \"/\") in the plan, found %v", p)
 		}
 	})
+	t.Run("a path stays unknown while only unknown values differ", func(t *testing.T) {
+		state := object("a", target("peer", "10.0.0.1", "/public", "bypass"))
+		config := object("a", target("peer", nil, nil, "bypass"))
+		plan := object("a", target("peer", unknown, unknown, "bypass"))
+		config, plan = withName(t, config, unknown), withName(t, plan, unknown)
+		req := resource.ModifyPlanRequest{
+			Config: tfsdk.Config{Schema: sch.Schema, Raw: config},
+			Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
+			State:  tfsdk.State{Schema: sch.Schema, Raw: state},
+		}
+		resp := resource.ModifyPlanResponse{Plan: req.Plan}
+		r.ModifyPlan(ctx, req, &resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatal(resp.Diagnostics)
+		}
+		var p types.String
+		if d := resp.Plan.GetAttribute(ctx, path.Root("targets").AtListIndex(0).AtName("path"), &p); d.HasError() {
+			t.Fatal(d)
+		}
+		if !p.IsUnknown() {
+			t.Errorf("the final plan may keep /public, so the path must stay unknown, found %v", p)
+		}
+	})
 	t.Run("a subnet target without a host", func(t *testing.T) {
 		config := object("a", target("subnet", nil, "/", nil))
 		plan := object("a", target("subnet", unknown, "/", unknown))
@@ -952,4 +995,15 @@ func Test_reverseProxyService_planOmittedTargetValues(t *testing.T) {
 			t.Error("a subnet target needs a host")
 		}
 	})
+}
+
+// withName returns obj with its name set to v.
+func withName(t *testing.T, obj tftypes.Value, v any) tftypes.Value {
+	t.Helper()
+	var m map[string]tftypes.Value
+	if err := obj.As(&m); err != nil {
+		t.Fatal(err)
+	}
+	m["name"] = tftypes.NewValue(tftypes.String, v)
+	return tftypes.NewValue(obj.Type(), m)
 }
