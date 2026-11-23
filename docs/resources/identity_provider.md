@@ -29,7 +29,7 @@ resource "netbird_identity_provider" "example" {
 
 - `client_id` (String) OAuth2 client ID
 - `client_secret` (String, Sensitive) OAuth2 client secret
-- `issuer` (String) OIDC issuer URL: https, with a host and without user info, query or fragment; checked at plan time. google and microsoft need `""` (their built-in issuer); the other types need a URL. The server also checks at apply time, on create and update, that the issuer answers.
+- `issuer` (String) OIDC issuer URL: https, with a host and without user info, query or fragment; checked at plan time. `""` uses the built-in issuer of google and microsoft; the other types need a URL. The server also checks at apply time, on create and update, that the issuer answers.
 - `name` (String) Human-readable name for the identity provider
 - `type` (String) Type of identity provider (adfs, authentik, entra, google, keycloak, microsoft, oidc, okta, pocketid, zitadel). google and microsoft have a built-in issuer, used with `issuer = ""`; the others need an issuer URL. The server does not change the type of an existing provider, so a new type replaces it. The new provider has a new ID, which is part of each user's NetBird identity, so users who sign in through it are new users, without their old roles and groups. The old provider is deleted first, unless `lifecycle { create_before_destroy = true }` is set, which keeps the login available if the new provider fails to create.
 

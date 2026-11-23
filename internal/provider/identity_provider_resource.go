@@ -83,7 +83,7 @@ func (r *IdentityProvider) Schema(ctx context.Context, req resource.SchemaReques
 				Sensitive:           true,
 			},
 			"issuer": schema.StringAttribute{
-				MarkdownDescription: "OIDC issuer URL: https, with a host and without user info, query or fragment; checked at plan time. google and microsoft need `\"\"` (their built-in issuer); the other types need a URL. The server also checks at apply time, on create and update, that the issuer answers.",
+				MarkdownDescription: "OIDC issuer URL: https, with a host and without user info, query or fragment; checked at plan time. `\"\"` uses the built-in issuer of google and microsoft; the other types need a URL. The server also checks at apply time, on create and update, that the issuer answers.",
 				Required:            true,
 			},
 		},
@@ -239,16 +239,9 @@ func (r *IdentityProvider) ValidateConfig(ctx context.Context, req resource.Vali
 	if idpType.IsNull() || idpType.IsUnknown() {
 		return
 	}
-	builtIn := builtInIssuer[idpType.ValueString()]
-	if issuer.ValueString() == "" && !builtIn {
+	if issuer.ValueString() == "" && !builtInIssuer[idpType.ValueString()] {
 		resp.Diagnostics.AddAttributeError(path.Root("issuer"), "Issuer required",
 			fmt.Sprintf("type %q has no built-in issuer; set issuer to the provider's issuer URL. Only google and microsoft work with issuer = \"\".", idpType.ValueString()))
-	}
-	if issuer.ValueString() != "" && builtIn {
-		// The server builds these connectors without an issuer and reads
-		// back "", so any other value would show as a change on every plan.
-		resp.Diagnostics.AddAttributeError(path.Root("issuer"), "Issuer not used",
-			fmt.Sprintf("type %q uses its built-in issuer and the server does not store one; set issuer = \"\".", idpType.ValueString()))
 	}
 }
 

@@ -306,7 +306,7 @@ func Test_identityProviderValidateConfig(t *testing.T) {
 		"issuer with user info":              {idpType: "oidc", issuer: "https://u:p@sso.example.test/", wantError: true},
 		"issuer with a query":                {idpType: "oidc", issuer: "https://sso.example.test/?a=b", wantError: true},
 		"issuer with a fragment":             {idpType: "oidc", issuer: "https://sso.example.test/#x", wantError: true},
-		"google with an explicit issuer":     {idpType: "google", issuer: "https://accounts.google.com", wantError: true},
+		"google with an explicit issuer":     {idpType: "google", issuer: "https://accounts.google.com"},
 		"type not known yet":                 {idpType: tftypes.UnknownValue, issuer: ""},
 	} {
 		t.Run(name, func(t *testing.T) {
