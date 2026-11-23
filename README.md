@@ -25,7 +25,10 @@ NetBird as code.
 
 ## Maintenance
 
-- Upstream is merged in through a pull request (`git merge upstream/main`); history
+How to contribute, the review and release process, roles and labels are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+- Upstream is merged in through a pull request (`git merge -S upstream/main`); history
   on `main` is never rewritten.
 - A ported upstream pull request keeps its author and links the original.
 - Issues and pull requests here track what the fork changes; upstream issues are
