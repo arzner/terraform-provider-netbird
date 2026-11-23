@@ -198,9 +198,16 @@ through the shared harness in `e2e_harness_test.go`.
   (the version `go.mod` pins) with each resource's attributes. When a dependency
   bump or a new resource makes it fail, decide per property: model it, map it in
   `specRenamed` when the attribute has another name, or list it in
-  `specUnmodelled` with a reason and an issue. Never add an entry without a
-  reason; stale entries fail the test too. A new resource gets an entry in
-  `specResources`.
+  `specUnmodelled` with a reason and an issue. Nested objects and arrays of
+  objects that a nested attribute or block models are compared recursively;
+  when the provider spreads an array's item members over the parent block,
+  list it in `specNestedFlattened`; when it models an object as one value (an
+  ID, a version string), name the member that value holds in `specProjected`.
+  Nested keys are `Component.property`, so every use of a shared component
+  maps the same way; members of a projected value are keyed under the
+  projection (`Schema.property.member`). Two properties may not map to one
+  attribute, and a rename counts only when its attribute exists. Never add an entry without a reason; stale entries fail the test
+  too. A new resource gets an entry in `specResources`.
 - **Geolocation stays enabled** in the harness so posture-check location rules
   are actually evaluated. The escape hatch is `NB_E2E_DISABLE_GEOLOCATION=1`; do
   not disable it to make a run pass.
