@@ -1165,6 +1165,24 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 
+	// The update replaces the whole service. private and access_groups left
+	// out of the configuration are sent as the live service has them, not as
+	// planned from prior state: an operator may have closed the service or
+	// revoked a group since the plan.
+	var config ReverseProxyServiceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if config.Private.IsNull() || config.AccessGroups.IsNull() {
+		live, err := r.client.ReverseProxyServices.Get(ctx, data.Id.ValueString())
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading reverse proxy service", err.Error())
+			return
+		}
+		keepLivePrivateFields(&serviceReq, live, config.Private.IsNull(), config.AccessGroups.IsNull())
+	}
+
 	svc, err := r.client.ReverseProxyServices.Update(ctx, data.Id.ValueString(), serviceReq)
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating reverse proxy service", err.Error())
@@ -1249,5 +1267,17 @@ func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.V
 	if enabled, ok := bearer.Attributes()["enabled"].(types.Bool); ok && !enabled.IsUnknown() && enabled.ValueBool() {
 		resp.Diagnostics.AddAttributeError(path.Root("auth").AtName("bearer_auth"), "Bearer auth not allowed",
 			"private = true is NetBird-only access and cannot be combined with bearer auth (SSO).")
+	}
+}
+
+// keepLivePrivateFields copies private and access_groups from the live service
+// into the request for the fields the configuration leaves out.
+func keepLivePrivateFields(req *api.ServiceRequest, live *api.Service, private, groups bool) {
+	if private {
+		v := live.Private != nil && *live.Private
+		req.Private = &v
+	}
+	if groups {
+		req.AccessGroups = live.AccessGroups
 	}
 }

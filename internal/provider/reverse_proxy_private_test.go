@@ -153,3 +153,27 @@ func Test_reverseProxyService_emptyAccessGroupsKept(t *testing.T) {
 		t.Errorf("an unset list must read as null, found %v", fresh.AccessGroups)
 	}
 }
+
+func Test_keepLivePrivateFields(t *testing.T) {
+	on, off := true, false
+	live := &api.Service{Private: &on, AccessGroups: &[]string{"g-live"}}
+	planned := api.ServiceRequest{Private: &off, AccessGroups: &[]string{"g-old"}}
+
+	req := planned
+	keepLivePrivateFields(&req, live, true, true)
+	if req.Private == nil || !*req.Private || req.AccessGroups == nil || !reflect.DeepEqual(*req.AccessGroups, []string{"g-live"}) {
+		t.Errorf("left out: expected the live values, found %v %v", req.Private, req.AccessGroups)
+	}
+
+	req = planned
+	keepLivePrivateFields(&req, live, false, false)
+	if *req.Private || !reflect.DeepEqual(*req.AccessGroups, []string{"g-old"}) {
+		t.Errorf("configured: expected the planned values, found %v %v", *req.Private, *req.AccessGroups)
+	}
+
+	req = planned
+	keepLivePrivateFields(&req, &api.Service{}, true, true)
+	if req.Private == nil || *req.Private || req.AccessGroups != nil {
+		t.Errorf("a live service without the fields is public with no groups, found %v %v", req.Private, req.AccessGroups)
+	}
+}
