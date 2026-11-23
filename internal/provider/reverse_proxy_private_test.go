@@ -4,10 +4,11 @@ package provider
 
 import (
 	"context"
-	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -33,8 +34,8 @@ func Test_reverseProxyService_privateMapping(t *testing.T) {
 	if d := reverseProxyServiceAPIToTerraform(ctx, &api.Service{Id: "s2"}, &plain); d.HasError() {
 		t.Fatal(d)
 	}
-	if plain.Private.ValueBool() || !plain.AccessGroups.IsNull() {
-		t.Errorf("read: a service without private fields must be public with null groups, found %v %v", plain.Private, plain.AccessGroups)
+	if plain.Private.ValueBool() || plain.AccessGroups.IsNull() || len(plain.AccessGroups.Elements()) != 0 {
+		t.Errorf("read: a service without private fields must be public with no groups, found %v %v", plain.Private, plain.AccessGroups)
 	}
 
 	data.Targets = types.ListNull(ReverseProxyServiceTargetModel{}.TFType())
@@ -149,31 +150,106 @@ func Test_reverseProxyService_emptyAccessGroupsKept(t *testing.T) {
 	if d := reverseProxyServiceAPIToTerraform(ctx, &api.Service{Id: "s"}, &fresh); d.HasError() {
 		t.Fatal(d)
 	}
-	if !fresh.AccessGroups.IsNull() {
-		t.Errorf("an unset list must read as null, found %v", fresh.AccessGroups)
+	if fresh.AccessGroups.IsNull() || len(fresh.AccessGroups.Elements()) != 0 {
+		t.Errorf("an absent list must read as empty, as an applied empty list does, found %v", fresh.AccessGroups)
 	}
 }
 
-func Test_keepLivePrivateFields(t *testing.T) {
+func Test_serviceAccessChangedSincePlan(t *testing.T) {
 	on, off := true, false
-	live := &api.Service{Private: &on, AccessGroups: &[]string{"g-live"}}
-	planned := api.ServiceRequest{Private: &off, AccessGroups: &[]string{"g-old"}}
-
-	req := planned
-	keepLivePrivateFields(&req, live, true, true)
-	if req.Private == nil || !*req.Private || req.AccessGroups == nil || !reflect.DeepEqual(*req.AccessGroups, []string{"g-live"}) {
-		t.Errorf("left out: expected the live values, found %v %v", req.Private, req.AccessGroups)
+	list := func(v ...string) types.List {
+		elems := []attr.Value{}
+		for _, e := range v {
+			elems = append(elems, types.StringValue(e))
+		}
+		return types.ListValueMust(types.StringType, elems)
 	}
-
-	req = planned
-	keepLivePrivateFields(&req, live, false, false)
-	if *req.Private || !reflect.DeepEqual(*req.AccessGroups, []string{"g-old"}) {
-		t.Errorf("configured: expected the planned values, found %v %v", *req.Private, *req.AccessGroups)
+	model := func(private bool, groups ...string) ReverseProxyServiceModel {
+		return ReverseProxyServiceModel{Private: types.BoolValue(private), AccessGroups: list(groups...)}
 	}
+	for name, tc := range map[string]struct {
+		prior, plan ReverseProxyServiceModel
+		live        *api.Service
+		want        []string
+	}{
+		"nothing changed":       {model(true, "g1", "g2"), model(true, "g1", "g2"), &api.Service{Private: &on, AccessGroups: &[]string{"g2", "g1"}}, nil},
+		"closed outside":        {model(false), model(false), &api.Service{Private: &on, AccessGroups: &[]string{"g1"}}, []string{"private", "access_groups"}},
+		"opened outside":        {model(true, "g1"), model(true, "g1"), &api.Service{Private: &off, AccessGroups: &[]string{"g1"}}, []string{"private"}},
+		"group revoked":         {model(true, "g1", "g2"), model(true, "g2", "g1"), &api.Service{Private: &on, AccessGroups: &[]string{"g1"}}, []string{"access_groups"}},
+		"all groups removed":    {model(false, "g1"), model(false, "g1"), &api.Service{}, []string{"access_groups"}},
+		"no groups, nil live":   {model(false), model(false), &api.Service{}, nil},
+		"planned change wins":   {model(true, "g1"), model(false, "g3"), &api.Service{Private: &on, AccessGroups: &[]string{"g2"}}, nil},
+		"unknown is no promise": {model(true, "g1"), ReverseProxyServiceModel{Private: types.BoolUnknown(), AccessGroups: types.ListUnknown(types.StringType)}, &api.Service{Private: &off}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := serviceAccessChangedSincePlan(tc.prior, tc.plan, tc.live)
+			if len(got) != len(tc.want) {
+				t.Fatalf("expected %v, found %v", tc.want, got)
+			}
+			for i, w := range tc.want {
+				if !strings.HasPrefix(got[i], "- "+w+":") {
+					t.Errorf("expected %s at %d, found %q", w, i, got[i])
+				}
+			}
+		})
+	}
+}
 
-	req = planned
-	keepLivePrivateFields(&req, &api.Service{}, true, true)
-	if req.Private == nil || *req.Private || req.AccessGroups != nil {
-		t.Errorf("a live service without the fields is public with no groups, found %v %v", req.Private, req.AccessGroups)
+func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
+	ctx := context.Background()
+	r := &ReverseProxyService{}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	groups := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{tftypes.NewValue(tftypes.String, "g1")})
+	noGroups := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{})
+	type vals map[string]tftypes.Value
+	object := func(v vals) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		for n, x := range v {
+			values[n] = x
+		}
+		return tftypes.NewValue(typ, values)
+	}
+	on := tftypes.NewValue(tftypes.Bool, true)
+	http := tftypes.NewValue(tftypes.String, "http")
+	tcp := tftypes.NewValue(tftypes.String, "tcp")
+	bearer := authWithBearer(t, typ.AttributeTypes["auth"])
+	for name, tc := range map[string]struct {
+		create       bool
+		config, plan vals
+		wantError    bool
+	}{
+		"new without groups":     {create: true, config: vals{"private": on}, plan: vals{"private": on, "access_groups": tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, tftypes.UnknownValue)}, wantError: true},
+		"new with groups":        {create: true, config: vals{"private": on, "access_groups": groups}, plan: vals{"private": on, "access_groups": groups}},
+		"kept private, tcp":      {config: vals{"mode": tcp}, plan: vals{"private": on, "mode": tcp, "access_groups": groups}, wantError: true},
+		"kept private, bearer":   {config: vals{"auth": bearer}, plan: vals{"private": on, "mode": http, "access_groups": groups, "auth": bearer}, wantError: true},
+		"kept private, no group": {config: vals{"access_groups": noGroups}, plan: vals{"private": on, "access_groups": noGroups}, wantError: true},
+		"kept private, fine":     {config: vals{}, plan: vals{"private": on, "mode": http, "access_groups": groups}},
+		"kept groups":            {config: vals{"private": on}, plan: vals{"private": on, "access_groups": groups}},
+		"public":                 {config: vals{"auth": bearer}, plan: vals{"private": tftypes.NewValue(tftypes.Bool, false), "auth": bearer}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := tftypes.NewValue(typ, nil)
+			if !tc.create {
+				state = object(vals{"private": on, "access_groups": groups})
+			}
+			req := resource.ModifyPlanRequest{
+				Config: tfsdk.Config{Schema: sch.Schema, Raw: object(tc.config)},
+				Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: object(tc.plan)},
+				State:  tfsdk.State{Schema: sch.Schema, Raw: state},
+			}
+			resp := resource.ModifyPlanResponse{Plan: req.Plan}
+			r.ModifyPlan(ctx, req, &resp)
+			if resp.Diagnostics.HasError() != tc.wantError {
+				t.Fatalf("expected error %v, found %v", tc.wantError, resp.Diagnostics)
+			}
+		})
 	}
 }

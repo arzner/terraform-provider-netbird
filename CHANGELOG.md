@@ -27,8 +27,10 @@ it is based on.
   source (#24).
 - `netbird_reverse_proxy_service`: `private` and `access_groups` for NetBird-only services
   (reachable over the tunnel by the given groups, with a server-generated access policy);
-  the private-service rules (HTTP mode, at least one group, no bearer auth) are checked at
-  plan time. Also in the data source (#25).
+  the private-service rules (HTTP mode, at least one group, no empty group IDs, no bearer
+  auth) are checked at plan time, also for a service that stays private from its state. An
+  update stops before writing when `private` or `access_groups`, shown unchanged by the plan,
+  changed on the server after the plan. Also in the data source (#25).
 
 ### Changed
 

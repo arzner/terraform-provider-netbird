@@ -3,10 +3,11 @@ package provider
 import (
 	"context"
 	"fmt"
-	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
+	"slices"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -14,6 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -25,8 +27,6 @@ import (
 )
 
 // NewReverseProxyService creates a new reverse proxy service resource.
-var _ resource.ResourceWithValidateConfig = &ReverseProxyService{}
-
 func NewReverseProxyService() resource.Resource {
 	return &ReverseProxyService{}
 }
@@ -308,7 +308,10 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.List{listplanmodifier.UseStateForUnknown()},
-				Validators:          []validator.List{listvalidator.NoNullValues()},
+				Validators: []validator.List{
+					listvalidator.NoNullValues(),
+					listvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1)),
+				},
 			},
 			"targets": schema.ListNestedAttribute{
 				MarkdownDescription: "List of target backends for this service",
@@ -646,8 +649,9 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 
 	data.ProxyCluster = types.StringPointerValue(svc.ProxyCluster)
 	data.Private = types.BoolValue(svc.Private != nil && *svc.Private)
-	if svc.AccessGroups == nil && !data.AccessGroups.IsNull() && !data.AccessGroups.IsUnknown() && len(data.AccessGroups.Elements()) == 0 {
-		// The server omits an empty list; keep the configured empty list.
+	if svc.AccessGroups == nil {
+		// The server omits an empty list; an empty list is the one form for
+		// no groups, so an import reads what an apply of [] stored.
 		data.AccessGroups = types.ListValueMust(types.StringType, []attr.Value{})
 	} else {
 		accessGroups, agDiags := sortedStringListPointer(ctx, data.AccessGroups, svc.AccessGroups)
@@ -1167,22 +1171,26 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 
-	// The update replaces the whole service. private and access_groups left
-	// out of the configuration are sent as the live service has them, not as
-	// planned from prior state: an operator may have closed the service or
-	// revoked a group since the plan.
-	var config ReverseProxyServiceModel
-	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	// The update replaces the whole service, so an access setting the plan
+	// shows unchanged but that changed on the server since the plan (a closed
+	// service, a revoked group) would be overwritten without the plan saying
+	// so. Stop instead and let a new plan show the change.
+	var prior ReverseProxyServiceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if config.Private.IsNull() || config.AccessGroups.IsNull() {
-		live, err := r.client.ReverseProxyServices.Get(ctx, data.Id.ValueString())
-		if err != nil {
-			resp.Diagnostics.AddError("Error reading reverse proxy service", err.Error())
-			return
-		}
-		keepLivePrivateFields(&serviceReq, live, config.Private.IsNull(), config.AccessGroups.IsNull())
+	live, err := r.client.ReverseProxyServices.Get(ctx, data.Id.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Error reading reverse proxy service", err.Error())
+		return
+	}
+	if changed := serviceAccessChangedSincePlan(prior, data, live); len(changed) > 0 {
+		resp.Diagnostics.AddError("Reverse proxy service changed after the plan",
+			"The service's access settings changed after this plan was made, so applying the plan would overwrite "+
+				"that change although the plan shows the setting unchanged:\n\n"+strings.Join(changed, "\n")+
+				"\n\nNothing was changed. Run plan again.")
+		return
 	}
 
 	svc, err := r.client.ReverseProxyServices.Update(ctx, data.Id.ValueString(), serviceReq)
@@ -1237,49 +1245,113 @@ func (r *ReverseProxyService) ImportState(ctx context.Context, req resource.Impo
 }
 
 var (
-	_ resource.Resource                = &ReverseProxyService{}
-	_ resource.ResourceWithImportState = &ReverseProxyService{}
+	_ resource.Resource                   = &ReverseProxyService{}
+	_ resource.ResourceWithImportState    = &ReverseProxyService{}
+	_ resource.ResourceWithValidateConfig = &ReverseProxyService{}
+	_ resource.ResourceWithModifyPlan     = &ReverseProxyService{}
 )
 
-// ValidateConfig checks the private-service contract the server enforces:
-// HTTP mode, at least one access group, no bearer auth.
+// ValidateConfig checks the private-service contract the server enforces
+// (HTTP mode, at least one access group, no bearer auth) on the configured
+// values; ModifyPlan checks the values a service keeps from its state.
 func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var data ReverseProxyServiceModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() || data.Private.IsNull() || data.Private.IsUnknown() || !data.Private.ValueBool() {
 		return
 	}
-	if !data.Mode.IsNull() && !data.Mode.IsUnknown() && data.Mode.ValueString() != "http" {
-		resp.Diagnostics.AddAttributeError(path.Root("mode"), "Private services are HTTP only",
-			fmt.Sprintf("private = true requires mode = \"http\", got %q.", data.Mode.ValueString()))
+	// A left-out list may be adopted from an existing service; ModifyPlan
+	// refuses it for a new one.
+	resp.Diagnostics.Append(privateServiceProblems(data.Mode, data.AccessGroups, data.Auth)...)
+}
+
+// ModifyPlan refuses a private service the server would reject when the
+// configuration alone does not show it: a new private service without access
+// groups, or a service that stays private from its state while the
+// configuration sets another mode, no groups or bearer auth.
+func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
 	}
-	// A left-out list may be adopted from an existing service; only an
-	// explicitly empty one is certainly refused by the server.
-	if !data.AccessGroups.IsNull() && !data.AccessGroups.IsUnknown() && len(data.AccessGroups.Elements()) == 0 {
+	var plan, config ReverseProxyServiceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() || plan.Private.IsUnknown() || !plan.Private.ValueBool() {
+		return
+	}
+	if req.State.Raw.IsNull() && config.AccessGroups.IsNull() {
 		resp.Diagnostics.AddAttributeError(path.Root("access_groups"), "Access groups required",
-			"private = true requires at least one group in access_groups.")
-	}
-	if data.Auth.IsNull() || data.Auth.IsUnknown() {
+			"A new service with private = true needs at least one group in access_groups.")
 		return
 	}
-	bearer, ok := data.Auth.Attributes()["bearer_auth"].(types.Object)
-	if !ok || bearer.IsNull() || bearer.IsUnknown() {
-		return
-	}
-	if enabled, ok := bearer.Attributes()["enabled"].(types.Bool); ok && !enabled.IsUnknown() && enabled.ValueBool() {
-		resp.Diagnostics.AddAttributeError(path.Root("auth").AtName("bearer_auth"), "Bearer auth not allowed",
-			"private = true is NetBird-only access and cannot be combined with bearer auth (SSO).")
+	if config.Private.IsNull() {
+		// Configured values were checked by ValidateConfig.
+		resp.Diagnostics.Append(privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth)...)
 	}
 }
 
-// keepLivePrivateFields copies private and access_groups from the live service
-// into the request for the fields the configuration leaves out.
-func keepLivePrivateFields(req *api.ServiceRequest, live *api.Service, private, groups bool) {
-	if private {
-		v := live.Private != nil && *live.Private
-		req.Private = &v
+// privateServiceProblems returns the errors the server would give for a
+// private service with these values; unknown values are not checked.
+func privateServiceProblems(mode types.String, groups types.List, auth types.Object) diag.Diagnostics {
+	var diags diag.Diagnostics
+	if !mode.IsNull() && !mode.IsUnknown() && mode.ValueString() != "http" {
+		diags.AddAttributeError(path.Root("mode"), "Private services are HTTP only",
+			fmt.Sprintf("private = true requires mode = \"http\", got %q.", mode.ValueString()))
 	}
-	if groups {
-		req.AccessGroups = live.AccessGroups
+	if !groups.IsNull() && !groups.IsUnknown() && len(groups.Elements()) == 0 {
+		diags.AddAttributeError(path.Root("access_groups"), "Access groups required",
+			"private = true requires at least one group in access_groups.")
 	}
+	if auth.IsNull() || auth.IsUnknown() {
+		return diags
+	}
+	bearer, ok := auth.Attributes()["bearer_auth"].(types.Object)
+	if !ok || bearer.IsNull() || bearer.IsUnknown() {
+		return diags
+	}
+	if enabled, ok := bearer.Attributes()["enabled"].(types.Bool); ok && !enabled.IsUnknown() && enabled.ValueBool() {
+		diags.AddAttributeError(path.Root("auth").AtName("bearer_auth"), "Bearer auth not allowed",
+			"private = true is NetBird-only access and cannot be combined with bearer auth (SSO).")
+	}
+	return diags
+}
+
+// serviceAccessChangedSincePlan lists the access settings that the plan shows
+// unchanged from prior but that the live service no longer has; settings the
+// plan changes get the planned value.
+func serviceAccessChangedSincePlan(prior, plan ReverseProxyServiceModel, live *api.Service) []string {
+	var changed []string
+	livePrivate := live.Private != nil && *live.Private
+	if plan.Private.Equal(prior.Private) && !prior.Private.IsNull() && !prior.Private.IsUnknown() && prior.Private.ValueBool() != livePrivate {
+		changed = append(changed, fmt.Sprintf("- private: %t when planned, now %t", prior.Private.ValueBool(), livePrivate))
+	}
+	if !prior.AccessGroups.IsNull() && !prior.AccessGroups.IsUnknown() && sameElements(plan.AccessGroups, prior.AccessGroups) {
+		var was []string
+		for _, v := range prior.AccessGroups.Elements() {
+			if s, ok := v.(types.String); ok {
+				was = append(was, s.ValueString())
+			}
+		}
+		var now []string
+		if live.AccessGroups != nil {
+			now = *live.AccessGroups
+		}
+		if !sameStrings(was, now) {
+			changed = append(changed, fmt.Sprintf("- access_groups: %v when planned, now %v", sortedCopy(was), sortedCopy(now)))
+		}
+	}
+	return changed
+}
+
+func sortedCopy(v []string) []string {
+	c := slices.Clone(v)
+	slices.Sort(c)
+	if c == nil {
+		return []string{}
+	}
+	return c
+}
+
+func sameStrings(a, b []string) bool {
+	return slices.Equal(sortedCopy(a), sortedCopy(b))
 }
