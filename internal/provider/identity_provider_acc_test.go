@@ -5,10 +5,12 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 
 	"github.com/netbirdio/netbird/shared/management/http/api"
@@ -108,6 +110,141 @@ func Test_IdentityProvider_Update(t *testing.T) {
 	})
 }
 
+// Test_IdentityProvider_TypesAddedInNetBird covers the types the provider did
+// not accept before: each is created, checked on the server, given a
+// type-prefixed ID and imported. adfs also takes its own path on the server
+// (other scopes).
+func Test_IdentityProvider_TypesAddedInNetBird(t *testing.T) {
+	testE2E(t)
+	for _, idpType := range []string{"keycloak", "authentik", "adfs"} {
+		t.Run(idpType, func(t *testing.T) {
+			rName := "idp" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+			rNameFull := "netbird_identity_provider." + rName
+			var createdID string
+			resource.Test(t, resource.TestCase{
+				PreCheck:                 func() { testEnsureManagementRunning(t) },
+				ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+				CheckDestroy:             testCheckGone(testClient().IdentityProviders.Get, &createdID),
+				Steps: []resource.TestStep{
+					{
+						Config: testIdentityProviderResource(rName, idpType, idpType, "client-id", "client-secret", "https://oauth.id.jumpcloud.com/"),
+						Check: resource.ComposeAggregateTestCheckFunc(
+							testRecordID(rNameFull, &createdID),
+							resource.TestCheckResourceAttr(rNameFull, "type", idpType),
+							resource.TestMatchResourceAttr(rNameFull, "id", regexp.MustCompile("^"+idpType+"-")),
+							idpTypeOnServer(&createdID, idpType),
+						),
+					},
+					{
+						// A rename updates in place: same ID, same type.
+						Config:           testIdentityProviderResource(rName, idpType+"-renamed", idpType, "client-id", "client-secret", "https://oauth.id.jumpcloud.com/"),
+						ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{testExpectUpdateInPlace(rNameFull)}},
+						Check: resource.ComposeAggregateTestCheckFunc(
+							resource.TestCheckResourceAttrPtr(rNameFull, "id", &createdID),
+							idpTypeOnServer(&createdID, idpType),
+							func(*terraform.State) error {
+								idp, err := testClient().IdentityProviders.Get(context.Background(), createdID)
+								if err != nil {
+									return err
+								}
+								if idp.Name != idpType+"-renamed" {
+									return fmt.Errorf("name on the server: expected %s-renamed, found %s", idpType, idp.Name)
+								}
+								return nil
+							},
+						),
+					},
+					{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"client_secret"}},
+				},
+			})
+		})
+	}
+}
+
+// Test_IdentityProvider_TypeChangeReplaces: the server refuses to change the
+// type of a provider, so a new type replaces it.
+func Test_IdentityProvider_TypeChangeReplaces(t *testing.T) {
+	testE2E(t)
+	rName := "idp" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_identity_provider." + rName
+	var createdID, firstID string
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().IdentityProviders.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: testIdentityProviderResource(rName, "migrated", "oidc", "client-id", "client-secret", "https://oauth.id.jumpcloud.com/"),
+				Check:  testRecordID(rNameFull, &firstID),
+			},
+			{
+				// A type without a built-in issuer and issuer = "" fails at
+				// plan time, before the working provider is deleted.
+				Config:      testIdentityProviderResource(rName, "migrated", "keycloak", "client-id", "client-secret", ""),
+				ExpectError: regexp.MustCompile(`Issuer required`),
+			},
+			{
+				// And an empty name, which the server refuses on create.
+				Config:      testIdentityProviderResource(rName, "", "keycloak", "client-id", "client-secret", "https://oauth.id.jumpcloud.com/"),
+				ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Length.*name`),
+			},
+			{
+				// And an empty client ID, which the server refuses on create.
+				Config:      testIdentityProviderResource(rName, "migrated", "keycloak", "", "client-secret", "https://oauth.id.jumpcloud.com/"),
+				ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Length.*client_id`),
+			},
+			{
+				// So does an issuer with a port and no host name.
+				Config:      testIdentityProviderResource(rName, "migrated", "keycloak", "client-id", "client-secret", "https://:8443/realms/main"),
+				ExpectError: regexp.MustCompile(`(?s)Invalid issuer.*host`),
+			},
+			{
+				// So does an issuer with a stray bracket in its host.
+				Config:      testIdentityProviderResource(rName, "migrated", "keycloak", "client-id", "client-secret", "https://sso.example.com]/realms/main"),
+				ExpectError: regexp.MustCompile(`(?s)Invalid issuer.*brackets`),
+			},
+			{
+				// So does an issuer the server refuses (http).
+				Config:      testIdentityProviderResource(rName, "migrated", "keycloak", "client-id", "client-secret", "http://sso.example.test/realms/main"),
+				ExpectError: regexp.MustCompile(`(?s)Invalid issuer.*https`),
+			},
+			{
+				Config:   testIdentityProviderResource(rName, "migrated", "oidc", "client-id", "client-secret", "https://oauth.id.jumpcloud.com/"),
+				PlanOnly: true,
+			},
+			{
+				Config: testIdentityProviderResource(rName, "migrated", "keycloak", "client-id", "client-secret", "https://oauth.id.jumpcloud.com/"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionDestroyBeforeCreate),
+				}},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestMatchResourceAttr(rNameFull, "id", regexp.MustCompile("^keycloak-")),
+					idpTypeOnServer(&createdID, "keycloak"),
+					func(s *terraform.State) error {
+						// Only a not-found answer proves the old one is gone.
+						return testCheckGone(testClient().IdentityProviders.Get, &firstID)(s)
+					},
+				),
+			},
+		},
+	})
+}
+
+// idpTypeOnServer checks the provider's type as the server stores it.
+func idpTypeOnServer(id *string, want string) resource.TestCheckFunc {
+	return func(*terraform.State) error {
+		idp, err := testClient().IdentityProviders.Get(context.Background(), *id)
+		if err != nil {
+			return fmt.Errorf("get identity provider: %w", err)
+		}
+		if string(idp.Type) != want {
+			return fmt.Errorf("type on the server: expected %s, found %s", want, idp.Type)
+		}
+		return nil
+	}
+}
+
 func testIdentityProviderResource(rName, name, idpType, clientID, clientSecret, issuer string) string {
 	return fmt.Sprintf(`resource "netbird_identity_provider" "%s" {
   name          = "%s"
@@ -117,4 +254,92 @@ func testIdentityProviderResource(rName, name, idpType, clientID, clientSecret, 
   issuer        = "%s"
 }
 `, rName, name, idpType, clientID, clientSecret, issuer)
+}
+
+// Test_IdentityProvider_IgnoredTypeIssuer: with type ignored, the plan keeps
+// the stored keycloak type, so an empty issuer is refused at plan time.
+func Test_IdentityProvider_IgnoredTypeIssuer(t *testing.T) {
+	testE2E(t)
+	rName := "idp" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_identity_provider." + rName
+	var createdID string
+	config := func(idpType, issuer string) string {
+		return fmt.Sprintf(`resource "netbird_identity_provider" %q {
+  name          = %q
+  type          = %q
+  client_id     = "client-id"
+  client_secret = "client-secret"
+  issuer        = %q
+  lifecycle {
+    ignore_changes = [type]
+  }
+}`, rName, rName, idpType, issuer)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().IdentityProviders.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: config("keycloak", "https://oauth.id.jumpcloud.com/"),
+				Check:  testRecordID(rNameFull, &createdID),
+			},
+			{
+				Config:      config("google", ""),
+				ExpectError: regexp.MustCompile(`(?s)Issuer required.*keycloak`),
+			},
+		},
+	})
+}
+
+// Test_IdentityProvider_IgnoredIssuerReplacement: with the issuer ignored, a
+// type change still replaces the provider with the configured issuer.
+func Test_IdentityProvider_IgnoredIssuerReplacement(t *testing.T) {
+	testE2E(t)
+	rName := "idp" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_identity_provider." + rName
+	var firstID, createdID string
+	config := func(idpType, issuer string) string {
+		return fmt.Sprintf(`resource "netbird_identity_provider" %q {
+  name          = %q
+  type          = %q
+  client_id     = "client-id"
+  client_secret = "client-secret"
+  issuer        = %q
+  lifecycle {
+    ignore_changes = [issuer]
+  }
+}`, rName, rName, idpType, issuer)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().IdentityProviders.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: config("google", ""),
+				Check:  testRecordID(rNameFull, &firstID),
+			},
+			{
+				Config: config("keycloak", "https://oauth.id.jumpcloud.com/"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionDestroyBeforeCreate),
+				}},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					idpTypeOnServer(&createdID, "keycloak"),
+					func(*terraform.State) error {
+						idp, err := testClient().IdentityProviders.Get(context.Background(), createdID)
+						if err != nil {
+							return fmt.Errorf("get identity provider: %w", err)
+						}
+						if idp.Issuer != "https://oauth.id.jumpcloud.com/" {
+							return fmt.Errorf("issuer on the server: expected the configured one, found %q", idp.Issuer)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
 }
