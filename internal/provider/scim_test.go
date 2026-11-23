@@ -163,8 +163,21 @@ func Test_scim_connectorIDRequests(t *testing.T) {
 		t.Fatal(update.Diagnostics)
 	}
 
-	if len(bodies) != 2 {
-		t.Fatalf("expected two requests, found %d", len(bodies))
+	// Update with a configured connector: the planned value is sent, not the
+	// raw configuration (they differ here to tell them apart).
+	planned := tftypes.NewValue(tftypes.String, "dex-planned")
+	configured := tftypes.NewValue(tftypes.String, "dex-config")
+	update2 := resource.UpdateResponse{State: state}
+	r.Update(ctx, resource.UpdateRequest{Plan: tfsdk.Plan{Schema: sch.Schema, Raw: value(planned, "7")}, Config: tfsdk.Config{Schema: sch.Schema, Raw: value(configured, "7")}, State: state}, &update2)
+	if update2.Diagnostics.HasError() {
+		t.Fatal(update2.Diagnostics)
+	}
+
+	if len(bodies) != 3 {
+		t.Fatalf("expected three requests, found %d", len(bodies))
+	}
+	if bodies[2]["connector_id"] != "dex-planned" {
+		t.Errorf("update: expected the planned connector dex-planned, found %v", bodies[2]["connector_id"])
 	}
 	if bodies[0]["connector_id"] != "dex-okta" {
 		t.Errorf("create: expected connector_id dex-okta, found %v", bodies[0]["connector_id"])
