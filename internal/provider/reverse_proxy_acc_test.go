@@ -1190,21 +1190,47 @@ func Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream(t *testing.T) {
 	var createdID string
 	peerID1 := testPeerID(t, "peer1")
 	groupID := e2eGroupAllID()
+	// The server stores every CrowdSec mode whatever the cluster supports;
+	// observe is the one that also reads well on a capable cluster.
 	crowdsec := "off"
 	if cluster.SupportsCrowdsec != nil && *cluster.SupportsCrowdsec {
 		crowdsec = "observe"
 	}
 	// Both targets are one backend (the shared read-only peer1) on two paths,
-	// which is how access actions are meant to be used. adminAction is the
-	// /admin target's access_action line ("" leaves it out), adminPort its
-	// port; direct toggles direct_upstream on the first target of a private
-	// service.
-	config := func(adminAction string, adminPort int, direct bool) string {
+	// which is how access actions are meant to be used.
+	type svc struct {
+		adminAction string // the /admin target's access_action line, "" leaves it out
+		adminPort   int    // 0 leaves the /admin target out
+		firstAction string // the first target's access_action line
+		direct      bool   // direct_upstream on the first target of a private service
+		crowdsec    string // "" leaves access_restrictions out
+		extra       string // more configuration
+	}
+	config := func(c svc) string {
 		options, private := "", "false"
-		if direct {
+		if c.direct {
 			options = `
     options     = { direct_upstream = true }`
 			private = "true"
+		}
+		restrictions := ""
+		if c.crowdsec != "" {
+			restrictions = fmt.Sprintf(`
+  access_restrictions = {
+    crowdsec_mode = %q
+  }
+`, c.crowdsec)
+		}
+		admin := ""
+		if c.adminPort != 0 {
+			admin = fmt.Sprintf(`, {
+    target_id   = %q
+    target_type = "peer"
+    port        = %d
+    protocol    = "http"
+    path        = "/admin"
+    %s
+  }`, peerID1, c.adminPort, c.adminAction)
 		}
 		return fmt.Sprintf(`
 resource "netbird_reverse_proxy_service" %q {
@@ -1214,27 +1240,19 @@ resource "netbird_reverse_proxy_service" %q {
   private       = %s
   access_groups = [%q]
   auth          = {}
-
-  access_restrictions = {
-    crowdsec_mode = %q
-  }
-
+%s
   targets = [{
     target_id   = %q
     target_type = "peer"
     port        = 8080
-    protocol    = "http"%s
-  }, {
-    target_id   = %q
-    target_type = "peer"
-    port        = %d
     protocol    = "http"
-    path        = "/admin"
-    %s
-  }]
-}`, rName, rName, domain, private, groupID, crowdsec, peerID1, options, peerID1, adminPort, adminAction)
+    %s%s
+  }%s]
+}`, rName, rName, domain, private, groupID, restrictions, peerID1, c.firstAction, options, admin) + c.extra
 	}
-	onServer := func(action string, direct bool) resource.TestCheckFunc {
+	// onServer checks the service as the server has it: action is the /admin
+	// target's ("" for no /admin target), crowdsec the stored mode ("" none).
+	onServer := func(action string, direct bool, crowdsec string) resource.TestCheckFunc {
 		return func(s *terraform.State) error {
 			svc, err := testClient().ReverseProxyServices.Get(context.Background(), s.RootModule().Resources[rNameFull].Primary.Attributes["id"])
 			if err != nil {
@@ -1244,8 +1262,12 @@ resource "netbird_reverse_proxy_service" %q {
 			for _, target := range svc.Targets {
 				seen[normalizedPath(target.Path)]++
 			}
-			if len(svc.Targets) != 2 || seen["/"] != 1 || seen["/admin"] != 1 {
-				return fmt.Errorf("expected one target at / and one at /admin, found %v", seen)
+			wantAdmin := 0
+			if action != "" {
+				wantAdmin = 1
+			}
+			if len(svc.Targets) != 1+wantAdmin || seen["/"] != 1 || seen["/admin"] != wantAdmin {
+				return fmt.Errorf("expected one target at / and %d at /admin, found %v", wantAdmin, seen)
 			}
 			for _, target := range svc.Targets {
 				switch normalizedPath(target.Path) {
@@ -1262,79 +1284,122 @@ resource "netbird_reverse_proxy_service" %q {
 					}
 				}
 			}
-			if svc.AccessRestrictions == nil || svc.AccessRestrictions.CrowdsecMode == nil || string(*svc.AccessRestrictions.CrowdsecMode) != crowdsec {
-				return fmt.Errorf("crowdsec_mode on the server: expected %s, found %+v", crowdsec, svc.AccessRestrictions)
+			got := ""
+			if svc.AccessRestrictions != nil && svc.AccessRestrictions.CrowdsecMode != nil {
+				got = string(*svc.AccessRestrictions.CrowdsecMode)
+			}
+			if got != crowdsec {
+				return fmt.Errorf("crowdsec_mode on the server: expected %q, found %q", crowdsec, got)
 			}
 			return nil
 		}
 	}
+	l4 := fmt.Sprintf(`
+resource "netbird_reverse_proxy_service" "l4" {
+  name    = "%s-l4"
+  domain  = "%s-l4.%s"
+  mode    = "tcp"
+  auth    = {}
+  targets = [{
+    target_id     = %q
+    target_type   = "peer"
+    port          = 8080
+    protocol      = "tcp"
+    access_action = "block"
+  }]
+}`, rName, rName, cluster.Address, peerID1)
+	private := svc{adminAction: `access_action = "block"`, adminPort: 8082, direct: true, crowdsec: crowdsec}
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testEnsureManagementRunning(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		CheckDestroy:             testCheckGone(testClient().ReverseProxyServices.Get, &createdID),
 		Steps: []resource.TestStep{
 			{
-				Config: config(`access_action = "block"`, 8081, false),
+				Config: config(svc{adminAction: `access_action = "block"`, adminPort: 8081, crowdsec: crowdsec}),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					testRecordID(rNameFull, &createdID),
 					resource.TestCheckResourceAttr(rNameFull, "targets.0.access_action", "inherit"),
 					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "block"),
 					resource.TestCheckResourceAttr(rNameFull, "access_restrictions.crowdsec_mode", crowdsec),
-					onServer("block", false),
+					onServer("block", false, crowdsec),
 				),
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 			{
-				Config:           config(`access_action = "bypass"`, 8081, false),
+				// The action and the CrowdSec mode change in place.
+				Config:           config(svc{adminAction: `access_action = "bypass"`, adminPort: 8081, crowdsec: "enforce"}),
 				ConfigPlanChecks: updatesInPlace(rNameFull),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "bypass"),
-					onServer("bypass", false),
+					resource.TestCheckResourceAttr(rNameFull, "access_restrictions.crowdsec_mode", "enforce"),
+					onServer("bypass", false, "enforce"),
 				),
 			},
 			{
 				// Left out, the action stays as it is: no change planned.
-				Config:   config("", 8081, false),
+				Config:   config(svc{adminPort: 8081, crowdsec: "enforce"}),
 				PlanOnly: true,
 			},
 			{
 				// Left out while the target changes: the update does not send
 				// it, and the server keeps the action of the target at /admin.
-				Config:           config("", 8082, false),
+				// Without access_restrictions the server has no CrowdSec mode.
+				Config:           config(svc{adminPort: 8082}),
 				ConfigPlanChecks: updatesInPlace(rNameFull),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "bypass"),
 					resource.TestCheckResourceAttr(rNameFull, "targets.1.port", "8082"),
-					onServer("bypass", false),
+					resource.TestCheckNoResourceAttr(rNameFull, "access_restrictions.crowdsec_mode"),
+					onServer("bypass", false, ""),
 				),
 			},
 			{
 				// Turning the service private while /admin keeps bypass from
 				// the server is refused at plan time, left out or configured.
-				Config:      config("", 8082, true),
+				Config:      config(svc{adminPort: 8082, direct: true, crowdsec: crowdsec}),
 				ExpectError: regexp.MustCompile(`(?s)Bypass not allowed on a private service.*path "/admin"`),
 			},
 			{
-				Config:      config(`access_action = "bypass"`, 8082, true),
+				Config:      config(svc{adminAction: `access_action = "bypass"`, adminPort: 8082, direct: true, crowdsec: crowdsec}),
 				ExpectError: regexp.MustCompile(`Bypass not allowed on a private service`),
 			},
 			{
 				// A private service refuses bypass; block with a direct upstream
 				// target is fine on the harness cluster (private mode).
-				Config: config(`access_action = "block"`, 8082, true) + fmt.Sprintf(`
+				Config: config(svc{adminAction: private.adminAction, adminPort: 8082, direct: true, crowdsec: crowdsec,
+					extra: fmt.Sprintf(`
 data "netbird_reverse_proxy_service" "test" {
   id = netbird_reverse_proxy_service.%s.id
-}`, rName),
+}`, rName)}),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("data.netbird_reverse_proxy_service.test", "targets.0.options.direct_upstream", "true"),
 					resource.TestCheckResourceAttr("data.netbird_reverse_proxy_service.test", "targets.1.access_action", "block"),
 					resource.TestCheckResourceAttr("data.netbird_reverse_proxy_service.test", "access_restrictions.crowdsec_mode", crowdsec),
 					resource.TestCheckResourceAttr(rNameFull, "targets.0.options.direct_upstream", "true"),
 					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "block"),
-					onServer("block", true),
+					onServer("block", true, crowdsec),
 				),
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				// Outside HTTP mode only inherit is accepted.
+				Config:      config(private) + l4,
+				ExpectError: regexp.MustCompile(`Access action needs HTTP`),
+			},
+			{
+				// Dropping /admin (block) with no action set anywhere is refused
+				// by the server, so the plan refuses it.
+				Config:      config(svc{direct: true, crowdsec: crowdsec}),
+				ExpectError: regexp.MustCompile(`(?s)Access action needed when a controlled path goes.*path "/admin"`),
+			},
+			{
+				Config:           config(svc{firstAction: `access_action = "inherit"`, direct: true, crowdsec: crowdsec}),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "targets.#", "1"),
+					onServer("", true, crowdsec),
+				),
+			},
 		},
 	})
 }

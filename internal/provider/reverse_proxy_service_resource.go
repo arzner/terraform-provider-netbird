@@ -361,7 +361,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 							Default:             booldefault.StaticBool(true),
 						},
 						"access_action": schema.StringAttribute{
-							MarkdownDescription: "Access action once this target's path prefix is selected (HTTP services only): `inherit` applies the service's authentication, `bypass` skips it (not allowed for private services), `block` denies access. Left out, the server keeps the current action of the target at this path (`inherit` for a new one).",
+							MarkdownDescription: "Access action once this target's path prefix is selected (HTTP services only): `inherit` applies the service's authentication, `bypass` skips it (not allowed for private services), `block` denies access. Left out, the server keeps the current action of the target at this path (`inherit` for a new one). While a target has `bypass` or `block`, an update that sets no action anywhere must keep that path, and several targets at one path need an action on each; the plan reports both. `bypass` and `block` are refused for TCP, UDP and TLS services.",
 							Optional:            true,
 							Computed:            true,
 							Validators:          []validator.String{stringvalidator.OneOf("inherit", "bypass", "block")},
@@ -398,7 +398,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 									Optional:            true,
 								},
 								"direct_upstream": schema.BoolAttribute{
-									MarkdownDescription: "Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services, localhost sidecars). Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Applies to HTTP services; for TCP/UDP services NetBird v0.83 stores the flag but does not pass it to the proxy. Defaults to false.",
+									MarkdownDescription: "Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services, localhost sidecars). Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Applies to HTTP services only: for TCP, UDP and TLS services NetBird stores the flag but does not pass it to the proxy, and the plan warns. Defaults to false.",
 									Optional:            true,
 								},
 							},
@@ -506,7 +506,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 						ElementType:         types.StringType,
 					},
 					"crowdsec_mode": schema.StringAttribute{
-						MarkdownDescription: "CrowdSec IP reputation mode: `off`, `enforce` or `observe`. Only available when the proxy cluster supports CrowdSec. Left out, the server treats it as `off`.",
+						MarkdownDescription: "CrowdSec IP reputation mode: `off`, `enforce` or `observe`. The server accepts each mode whether or not the cluster supports CrowdSec: with `enforce`, a proxy without a ready CrowdSec checker denies every request from outside the tunnel, while `observe` lets them through. Requests over the NetBird tunnel, including all access to a private service, are not checked against CrowdSec. Left out, the server treats it as `off`.",
 						Optional:            true,
 						Validators:          []validator.String{stringvalidator.OneOf("off", "enforce", "observe")},
 					},
@@ -1456,85 +1456,121 @@ var (
 
 // ValidateConfig checks the private-service contract the server enforces
 // (HTTP mode, at least one access group, no bearer auth, no bypass target)
-// on the configured values; ModifyPlan checks the values a service keeps from its state.
+// and the target access actions on the configured values; ModifyPlan checks
+// the values a service keeps from its state.
 func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var data ReverseProxyServiceModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
-	if resp.Diagnostics.HasError() || data.Private.IsNull() || data.Private.IsUnknown() || !data.Private.ValueBool() {
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	private := !data.Private.IsUnknown() && data.Private.ValueBool()
+	mode := ""
+	if !data.Mode.IsNull() && !data.Mode.IsUnknown() {
+		mode = data.Mode.ValueString()
+	}
+	// Without state a left-out action reads as inherit, so only configured
+	// actions can fail here.
+	actions := targetActions(data.Targets, nil)
+	resp.Diagnostics.Append(actions.problems(private, mode)...)
+	if !private {
 		return
 	}
 	// A left-out list may be adopted from an existing service; ModifyPlan
 	// refuses it for a new one.
 	resp.Diagnostics.Append(privateServiceProblems(data.Mode, data.AccessGroups, data.Auth, true)...)
-	resp.Diagnostics.Append(bypassTargetProblems(ctx, data.Targets, types.ListNull(ReverseProxyServiceTargetModel{}.TFType()))...)
 }
 
-// ModifyPlan refuses a private service the server would reject when the
-// configuration alone does not show it: a new one without access groups, or
-// one whose groups, mode, auth or target access actions come from state or
-// the plan. Access settings
-// absent from state (written before they existed, planned without a refresh)
-// stay unknown on a real update through UseNonNullStateForUnknown, and the
-// update sends their live values.
+// ModifyPlan refuses what the server would reject when the configuration
+// alone does not show it: a private service that is new without access
+// groups, or whose groups, mode, auth or target access actions come from
+// state or the plan, and target access actions the server keeps from the
+// service's current targets. Access settings absent from state (written
+// before they existed, planned without a refresh) stay unknown on a real
+// update through UseNonNullStateForUnknown, and the update sends their live
+// values.
 func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
 		return
 	}
+	create := req.State.Raw.IsNull()
 	var plan, config, state ReverseProxyServiceModel
-	state.Targets = types.ListNull(ReverseProxyServiceTargetModel{}.TFType())
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if req.State.Raw.IsNull() && config.Private.IsNull() {
+	if create && config.Private.IsNull() {
 		// The server creates a service public unless told otherwise; show
 		// that in the plan rather than "known after apply".
 		plan.Private = types.BoolValue(false)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("private"), plan.Private)...)
 	}
-	if resp.Diagnostics.HasError() || plan.Private.IsUnknown() || !plan.Private.ValueBool() {
-		return
-	}
-	if req.State.Raw.IsNull() {
-		if config.AccessGroups.IsNull() {
-			resp.Diagnostics.AddAttributeError(path.Root("access_groups"), "Access groups required",
-				"A new service with private = true needs at least one group in access_groups.")
-			return
-		}
-	}
-	// Blank IDs are refused in a configured list and when a service turns
-	// private; an already-private service keeps a list that still works
-	// through its other IDs.
-	checkBlank := true
-	if !req.State.Raw.IsNull() {
+	if !create {
 		if req.Plan.Raw.Equal(req.State.Raw) {
 			// Nothing is written, so values the server already holds are
 			// not this plan's problem.
 			return
 		}
 		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	// The mode the server will hold: a left-out mode is not sent, so an
+	// existing service keeps its own and a new one is HTTP.
+	mode := plan.Mode
+	switch {
+	case config.Mode.IsNull() && create:
+		mode = types.StringValue("http")
+	case config.Mode.IsNull():
+		mode = state.Mode
+	}
+	modeKnown := ""
+	if !mode.IsNull() && !mode.IsUnknown() {
+		modeKnown = mode.ValueString()
+	}
+	private := !plan.Private.IsUnknown() && plan.Private.ValueBool()
+	var existing []ReverseProxyServiceTargetModel
+	if !create && !state.Targets.IsNull() && !state.Targets.IsUnknown() {
+		resp.Diagnostics.Append(state.Targets.ElementsAs(ctx, &existing, false)...)
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		checkBlank = !config.AccessGroups.IsNull() || !state.Private.ValueBool()
-		switch {
-		case config.Mode.IsNull():
-			// A left-out mode is not sent and the server keeps the
-			// service's mode.
-			plan.Mode = state.Mode
-		case !config.Mode.Equal(state.Mode):
-			// A configured mode change (or one not known yet) fails in
-			// place (#77) and is planned anew against an empty state when
-			// the service is replaced, so the values kept from this state
-			// say nothing about the new service.
-			return
-		}
+	}
+	actions := targetActions(config.Targets, existing)
+	if !create {
+		resp.Diagnostics.Append(actions.keptProblems()...)
+	}
+	if modeKnown != "" && modeKnown != "http" {
+		resp.Diagnostics.Append(directUpstreamWarnings(config.Targets, modeKnown)...)
+	}
+	targetProblems := actions.problems(private, modeKnown)
+	if !private {
+		resp.Diagnostics.Append(targetProblems...)
+		return
+	}
+	if create && config.AccessGroups.IsNull() {
+		resp.Diagnostics.AddAttributeError(path.Root("access_groups"), "Access groups required",
+			"A new service with private = true needs at least one group in access_groups.")
+		return
+	}
+	// Blank IDs are refused in a configured list and when a service turns
+	// private; an already-private service keeps a list that still works
+	// through its other IDs.
+	checkBlank := create || !config.AccessGroups.IsNull() || !state.Private.ValueBool()
+	if !create && !config.Mode.IsNull() && !config.Mode.Equal(state.Mode) {
+		// A configured mode change (or one not known yet) fails in place
+		// (#77) and is planned anew against an empty state when the service
+		// is replaced, so the values kept from this state say nothing about
+		// the new service.
+		resp.Diagnostics.Append(targetProblems...)
+		return
 	}
 	// A configuration error stops at ValidateConfig, so this reports only
 	// problems with values kept from state.
-	problems := privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth, checkBlank)
-	problems.Append(bypassTargetProblems(ctx, plan.Targets, state.Targets)...)
+	problems := privateServiceProblems(mode, plan.AccessGroups, plan.Auth, checkBlank)
+	problems.Append(targetProblems...)
 	if config.Private.IsNull() && problems.HasError() {
 		problems.AddAttributeError(path.Root("private"), "Service is private from its state",
 			"private is left out, so the service stays private and the errors above apply. Set private = false to make it "+
@@ -1543,44 +1579,198 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	resp.Diagnostics.Append(problems...)
 }
 
-// bypassTargetProblems refuses a target whose access action would be bypass
-// on a private service. A target that leaves its action out gets, on an
-// update, the action the server has for a target at the same path (v0.83,
-// v0.82: preserveTargetAccessActions), so state stands in for it; without
-// state such a target is inherit. Unknown actions and paths are not checked.
-func bypassTargetProblems(ctx context.Context, planned, state types.List) diag.Diagnostics {
-	var diags diag.Diagnostics
-	if planned.IsNull() || planned.IsUnknown() {
-		return diags
+// plannedAction is the access action a configured target ends up with.
+type plannedAction struct {
+	action  string // "" when not known at plan time
+	kept    bool   // left out and taken from the current target at its path
+	path    string // effective path, "" when not known
+	inherit bool   // left out with nothing to keep: the server default
+}
+
+// targetAccessActions is what the server will do with the configured
+// targets' access actions on a create (existing nil) or an update.
+type targetAccessActions struct {
+	targets []plannedAction
+	// removed lists the paths whose current non-inherit action the update
+	// drops while no target sets an action; duplicate is a path that has
+	// several current targets while some planned target leaves its action
+	// out. The server refuses both.
+	removed   []plannedAction
+	duplicate string
+}
+
+// targetActions follows the server (v0.83, v0.82:
+// preserveTargetAccessActions): when the current service has a non-inherit
+// action and not every target sets one, a target that leaves its action out
+// takes the action of the first current target at its path, and each current
+// path is taken at most once, in target order. A target or path not known at
+// plan time ends the simulation, since it could take any current path.
+func targetActions(configured types.List, existing []ReverseProxyServiceTargetModel) targetAccessActions {
+	var out targetAccessActions
+	if configured.IsNull() || configured.IsUnknown() {
+		return out
 	}
-	var targets, existing []ReverseProxyServiceTargetModel
-	diags.Append(planned.ElementsAs(ctx, &targets, false)...)
-	if !state.IsNull() && !state.IsUnknown() {
-		diags.Append(state.ElementsAs(ctx, &existing, false)...)
+	elements := configured.Elements()
+	out.targets = make([]plannedAction, len(elements))
+	known := true
+	// With no targets the server still checks for dropped controlled paths.
+	provided, allProvided := false, len(elements) > 0
+	for i, e := range elements {
+		obj, ok := e.(types.Object)
+		if !ok || obj.IsUnknown() || obj.IsNull() {
+			known = false
+			provided = true // may set one
+			continue
+		}
+		attrs := obj.Attributes()
+		if p, ok := attrs["path"].(types.String); ok && !p.IsUnknown() {
+			out.targets[i].path = targetLocation(p)
+		} else {
+			known = false
+		}
+		a, _ := attrs["access_action"].(types.String)
+		switch {
+		case a.IsNull():
+			allProvided = false
+		case a.IsUnknown():
+			provided = true
+		default:
+			provided = true
+			out.targets[i].action = a.ValueString()
+		}
+		if a.IsNull() {
+			out.targets[i].inherit = true
+		}
 	}
-	if diags.HasError() {
-		return diags
+	controlled := false
+	for _, t := range existing {
+		if v := t.AccessAction.ValueString(); v != "" && v != "inherit" {
+			controlled = true
+		}
+	}
+	if !controlled || allProvided || !known {
+		if !known {
+			// Which current path a left-out action takes is not known.
+			for i := range out.targets {
+				if out.targets[i].inherit && controlled {
+					out.targets[i].inherit = false
+				}
+			}
+		}
+		for i := range out.targets {
+			if out.targets[i].inherit {
+				out.targets[i].action = "inherit"
+			}
+		}
+		return out
 	}
 	byPath := map[string]string{}
 	for _, t := range existing {
-		if !t.Path.IsUnknown() && !t.AccessAction.IsUnknown() {
-			byPath[targetLocation(t.Path)] = t.AccessAction.ValueString()
+		loc := targetLocation(t.Path)
+		if _, dup := byPath[loc]; dup && out.duplicate == "" {
+			out.duplicate = loc
 		}
+		byPath[loc] = t.AccessAction.ValueString()
 	}
-	for i, t := range targets {
+	if out.duplicate != "" {
+		// The server stops before taking any action.
+		for i := range out.targets {
+			out.targets[i].inherit = false
+		}
+		return out
+	}
+	for i := range out.targets {
+		t := &out.targets[i]
+		if prev, ok := byPath[t.path]; ok && t.inherit {
+			t.action, t.kept, t.inherit = prev, true, false
+			if t.action == "" {
+				t.action = "inherit"
+			}
+		} else if t.inherit {
+			t.action = "inherit"
+		}
+		delete(byPath, t.path)
+	}
+	if !provided {
+		for loc, action := range byPath {
+			if action != "" && action != "inherit" {
+				out.removed = append(out.removed, plannedAction{path: loc, action: action})
+			}
+		}
+		slices.SortFunc(out.removed, func(x, y plannedAction) int { return strings.Compare(x.path, y.path) })
+	}
+	return out
+}
+
+// keptProblems reports the updates the server refuses while keeping
+// left-out actions.
+func (a targetAccessActions) keptProblems() diag.Diagnostics {
+	var diags diag.Diagnostics
+	if a.duplicate != "" {
+		diags.AddAttributeError(path.Root("targets"), "Access action needed on every target",
+			fmt.Sprintf("The service has several targets at path %q and a target with an access_action other than "+
+				"\"inherit\", so the server keeps left-out actions only when every target sets access_action. Set "+
+				"access_action on every target.", a.duplicate))
+	}
+	for _, r := range a.removed {
+		diags.AddAttributeError(path.Root("targets"), "Access action needed when a controlled path goes",
+			fmt.Sprintf("The target at path %q has access_action = %q on the server, and this update removes or moves it "+
+				"while no target sets access_action, which the server refuses. Set access_action on at least one target "+
+				"(\"inherit\" keeps the default).", r.path, r.action))
+	}
+	return diags
+}
+
+// problems reports actions the server refuses for this service: a
+// non-inherit action outside HTTP mode and bypass on a private service.
+// mode is "" when not known.
+func (a targetAccessActions) problems(private bool, mode string) diag.Diagnostics {
+	var diags diag.Diagnostics
+	for i, t := range a.targets {
+		if t.action == "" || t.action == "inherit" {
+			continue
+		}
 		at := path.Root("targets").AtListIndex(i).AtName("access_action")
 		switch {
-		case !t.AccessAction.IsNull() && !t.AccessAction.IsUnknown():
-			if t.AccessAction.ValueString() == "bypass" {
-				diags.AddAttributeError(at, "Bypass not allowed on a private service",
-					"private = true cannot be combined with access_action = \"bypass\" on a target; use \"inherit\" or \"block\".")
-			}
-		case t.Path.IsUnknown():
-		case byPath[targetLocation(t.Path)] == "bypass":
+		case mode != "" && mode != "http":
+			diags.AddAttributeError(at, "Access action needs HTTP",
+				fmt.Sprintf("access_action %q is only supported for HTTP services; mode is %q. Leave it out or set \"inherit\".",
+					t.action, mode))
+		case private && t.action == "bypass" && t.kept:
 			diags.AddAttributeError(at, "Bypass not allowed on a private service",
 				fmt.Sprintf("The target at path %q has access_action = \"bypass\" on the server and keeps it while access_action "+
-					"is left out, but a private service cannot have it. Set access_action = \"inherit\" or \"block\".",
-					targetLocation(t.Path)))
+					"is left out, but a private service cannot have it. Set access_action = \"inherit\" or \"block\".", t.path))
+		case private && t.action == "bypass":
+			diags.AddAttributeError(at, "Bypass not allowed on a private service",
+				"private = true cannot be combined with access_action = \"bypass\" on a target; use \"inherit\" or \"block\".")
+		}
+	}
+	return diags
+}
+
+// directUpstreamWarnings flags direct_upstream on an L4 service: NetBird
+// (v0.83, v0.82) stores it but does not pass it to the proxy for TCP, UDP
+// and TLS services, so the target is still dialled through the embedded
+// client.
+func directUpstreamWarnings(configured types.List, mode string) diag.Diagnostics {
+	var diags diag.Diagnostics
+	if configured.IsNull() || configured.IsUnknown() {
+		return diags
+	}
+	for i, e := range configured.Elements() {
+		obj, ok := e.(types.Object)
+		if !ok || obj.IsNull() || obj.IsUnknown() {
+			continue
+		}
+		opts, ok := obj.Attributes()["options"].(types.Object)
+		if !ok || opts.IsNull() || opts.IsUnknown() {
+			continue
+		}
+		if v, ok := opts.Attributes()["direct_upstream"].(types.Bool); ok && !v.IsUnknown() && v.ValueBool() {
+			diags.AddAttributeWarning(path.Root("targets").AtListIndex(i).AtName("options").AtName("direct_upstream"),
+				"direct_upstream has no effect in this mode",
+				fmt.Sprintf("NetBird stores direct_upstream for a %q service but does not pass it to the proxy, which dials "+
+					"the target through its embedded NetBird client as before. It takes effect for HTTP services only.", mode))
 		}
 	}
 	return diags

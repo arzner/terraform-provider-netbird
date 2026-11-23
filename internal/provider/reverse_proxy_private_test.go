@@ -416,7 +416,7 @@ func Test_reverseProxyService_accessPlanModifiers(t *testing.T) {
 	}
 }
 
-func Test_reverseProxyService_bypassOnPrivate(t *testing.T) {
+func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
 	ctx := context.Background()
 	r := &ReverseProxyService{}
 	var sch resource.SchemaResponse
@@ -500,15 +500,77 @@ func Test_reverseProxyService_bypassOnPrivate(t *testing.T) {
 			config: vals{"private": on, "targets": targets(target("", nil), target("/admin", "block"))},
 			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/admin", "block"))},
 		},
-		"made private, target moved off the bypass path": {
+		"made private, target moved off the bypass path, no action set": {
+			state:     vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config:    vals{"private": on, "targets": targets(target("", nil), target("/other", nil))},
+			plan:      vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/other", unknown))},
+			wantError: "Access action needed when a controlled path goes",
+		},
+		"made private, target moved off the bypass path, an action set": {
 			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
-			config: vals{"private": on, "targets": targets(target("", nil), target("/other", nil))},
-			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/other", unknown))},
+			config: vals{"private": on, "targets": targets(target("", "inherit"), target("/other", nil))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", "inherit"), target("/other", unknown))},
+		},
+		"public, block target removed, no action set": {
+			state:     vals{"private": off, "mode": http, "targets": targets(target("", "inherit"), target("/admin", "block"))},
+			config:    vals{"targets": targets(target("", nil))},
+			plan:      vals{"private": off, "mode": http, "targets": targets(target("", unknown))},
+			wantError: "Access action needed when a controlled path goes",
+		},
+		"public, block target removed, action set": {
+			state:  vals{"private": off, "mode": http, "targets": targets(target("", "inherit"), target("/admin", "block"))},
+			config: vals{"targets": targets(target("", "inherit"))},
+			plan:   vals{"private": off, "mode": http, "targets": targets(target("", "inherit"))},
+		},
+		"public, several targets at one path with left-out actions": {
+			state:     vals{"private": off, "mode": http, "targets": targets(target("", "inherit"), target("", "inherit"), target("/admin", "block"))},
+			config:    vals{"name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target("", nil), target("", nil), target("/admin", nil))},
+			plan:      vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target("", unknown), target("", unknown), target("/admin", unknown))},
+			wantError: "Access action needed on every target",
+		},
+		"made private, action from an expression on the bypass path": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config: vals{"private": on, "targets": targets(target("", nil), target("/admin", unknown))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/admin", unknown))},
+		},
+		"made private, each kept path taken once": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config: vals{"private": on, "targets": targets(target("", nil), target("/admin", "inherit"), target("/admin", nil))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/admin", "inherit"), target("/admin", unknown))},
+		},
+		"new private, a target not known yet next to a bypass": {
+			config:    vals{"private": on, "access_groups": groups, "targets": targets(tftypes.NewValue(targetType, unknown), target("/a", "bypass"))},
+			plan:      vals{"private": on, "access_groups": groups, "targets": targets(tftypes.NewValue(targetType, unknown), target("/a", "bypass"))},
+			wantError: "targets[1].access_action",
+		},
+		"new private, a target not known yet": {
+			config: vals{"private": on, "access_groups": groups, "targets": targets(tftypes.NewValue(targetType, unknown), target("/a", "block"))},
+			plan:   vals{"private": on, "access_groups": groups, "targets": targets(tftypes.NewValue(targetType, unknown), target("/a", "block"))},
+		},
+		"new tcp with block": {
+			config:    vals{"mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "block"))},
+			plan:      vals{"mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "block"))},
+			wantError: "targets[0].access_action",
+		},
+		"tcp from state with block": {
+			state:     vals{"private": off, "mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "inherit"))},
+			config:    vals{"targets": targets(target("", "block"))},
+			plan:      vals{"private": off, "mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "block"))},
+			wantError: "targets[0].access_action",
+		},
+		"tcp with inherit": {
+			config: vals{"mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "inherit"))},
+			plan:   vals{"mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "inherit"))},
 		},
 		"made private, path not known yet": {
 			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
 			config: vals{"private": on, "targets": targets(target("", nil), target(tftypes.NewValue(tftypes.String, unknown), nil))},
 			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target(tftypes.NewValue(tftypes.String, unknown), unknown))},
+		},
+		"no-op with bypass, actions left out": {
+			state:  vals{"private": off, "mode": http, "targets": bypassAtAdmin},
+			config: vals{"targets": targets(target("", nil), target("/other", nil))},
+			plan:   vals{"private": off, "mode": http, "targets": bypassAtAdmin},
 		},
 		"stays public with bypass": {
 			state:  vals{"private": off, "mode": http, "targets": bypassAtAdmin},
@@ -553,5 +615,33 @@ func Test_reverseProxyService_bypassOnPrivate(t *testing.T) {
 				t.Fatalf("expected an error at %s, found %v", tc.wantError, diags)
 			}
 		})
+	}
+}
+
+func Test_directUpstreamWarnings(t *testing.T) {
+	optsType := ReverseProxyTargetOptionsModel{}.TFType()
+	target := func(direct attr.Value) attr.Value {
+		opts := map[string]attr.Value{}
+		for n, at := range optsType.AttrTypes {
+			opts[n] = nullOf(at.ValueType(context.Background()))
+		}
+		opts["custom_headers"] = types.MapNull(types.StringType)
+		opts["direct_upstream"] = direct
+		attrs := map[string]attr.Value{}
+		targetType := ReverseProxyServiceTargetModel{}.TFType()
+		for n, at := range targetType.AttrTypes {
+			attrs[n] = nullOf(at.ValueType(context.Background()))
+		}
+		attrs["options"] = types.ObjectValueMust(optsType.AttrTypes, opts)
+		return types.ObjectValueMust(targetType.AttrTypes, attrs)
+	}
+	list := types.ListValueMust(ReverseProxyServiceTargetModel{}.TFType(), []attr.Value{
+		target(types.BoolValue(true)), target(types.BoolValue(false)), target(types.BoolUnknown()),
+	})
+	for _, mode := range []string{"tcp", "udp", "tls"} {
+		d := directUpstreamWarnings(list, mode)
+		if d.WarningsCount() != 1 || d.HasError() {
+			t.Errorf("%s: expected one warning for the first target, found %v", mode, d)
+		}
 	}
 }

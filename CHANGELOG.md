@@ -35,9 +35,12 @@ it is based on.
 - `netbird_reverse_proxy_service`: `access_restrictions.crowdsec_mode` (CrowdSec IP reputation),
   `targets[].access_action` (`inherit`, `bypass` or `block` for a target's path; left out, the
   server keeps the current action) and `targets[].options.direct_upstream` (dial through the
-  proxy host's network). Also in the data source (#45). A private service with a `bypass` target
-  is refused at plan time, also when the target leaves `access_action` out and would keep `bypass`
-  from the server.
+  proxy host's network). Also in the data source (#45). The plan refuses what the server would
+  reject: a `bypass` target on a private service, also one that keeps `bypass` from the server
+  because it leaves `access_action` out; `bypass` or `block` outside HTTP mode; and, while a
+  target has `bypass` or `block`, an update that sets no action and drops that path, or that
+  leaves an action out with several targets on one path. `direct_upstream` on a TCP, UDP or TLS
+  service, which NetBird stores but does not apply, gets a plan warning.
 
 ### Changed
 
