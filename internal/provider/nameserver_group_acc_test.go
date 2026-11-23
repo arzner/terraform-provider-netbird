@@ -178,6 +178,12 @@ func Test_NameserverGroup_SingleLabelDomain(t *testing.T) {
 				),
 			},
 			{
+				// A wildcard is refused at plan time. Not the last step, so the
+				// teardown runs with a valid configuration.
+				Config:      config(`["*.lan"]`),
+				ExpectError: regexp.MustCompile(`(?s)Invalid domain name.*Wildcards are not allowed`),
+			},
+			{
 				// Updated in place; listed in the order an import reads them.
 				Config:           config(`["consul.", "lan"]`),
 				ConfigPlanChecks: updatesInPlace(rNameFull),
@@ -188,10 +194,6 @@ func Test_NameserverGroup_SingleLabelDomain(t *testing.T) {
 				),
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
-			{
-				Config:      config(`["*.lan"]`),
-				ExpectError: regexp.MustCompile(`(?s)Invalid domain name.*Wildcards are not allowed`),
-			},
 		},
 	})
 }
