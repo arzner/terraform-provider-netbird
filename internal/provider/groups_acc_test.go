@@ -5,7 +5,9 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -56,7 +58,7 @@ data "netbird_groups" "%s" {
 }
 
 // checkGroupsAgainstAPI asserts the data source returned exactly the API groups
-// keep selects, in API order, with every attribute mapped from the API value.
+// keep selects, sorted by ID, with every attribute mapped from the API value.
 func checkGroupsAgainstAPI(ds string, keep func(api.Group) bool) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		groups, err := testClient().Groups.List(context.Background())
@@ -72,6 +74,8 @@ func checkGroupsAgainstAPI(ds string, keep func(api.Group) bool) resource.TestCh
 		if len(want) == 0 {
 			return fmt.Errorf("no API group matches, the case tests nothing")
 		}
+		// The data source lists groups by ID; memberships are compared as sets.
+		slices.SortFunc(want, func(a, b api.Group) int { return strings.Compare(a.Id, b.Id) })
 		checks := []resource.TestCheckFunc{
 			resource.TestCheckResourceAttr(ds, "ids.#", strconv.Itoa(len(want))),
 			resource.TestCheckResourceAttr(ds, "groups.#", strconv.Itoa(len(want))),
@@ -86,11 +90,11 @@ func checkGroupsAgainstAPI(ds string, keep func(api.Group) bool) resource.TestCh
 				resource.TestCheckResourceAttr(ds, p+"peers.#", strconv.Itoa(len(g.Peers))),
 				resource.TestCheckResourceAttr(ds, p+"resources.#", strconv.Itoa(len(g.Resources))),
 			)
-			for j, peer := range g.Peers {
-				checks = append(checks, resource.TestCheckResourceAttr(ds, fmt.Sprintf("%speers.%d", p, j), peer.Id))
+			for _, peer := range g.Peers {
+				checks = append(checks, resource.TestCheckTypeSetElemAttr(ds, p+"peers.*", peer.Id))
 			}
-			for j, r := range g.Resources {
-				checks = append(checks, resource.TestCheckResourceAttr(ds, fmt.Sprintf("%sresources.%d", p, j), r.Id))
+			for _, r := range g.Resources {
+				checks = append(checks, resource.TestCheckTypeSetElemAttr(ds, p+"resources.*", r.Id))
 			}
 		}
 		return resource.ComposeAggregateTestCheckFunc(checks...)(s)

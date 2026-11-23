@@ -5,7 +5,9 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,7 +61,7 @@ data "netbird_users" "%s" {
 }
 
 // checkUsersAgainstAPI asserts the data source returned exactly the API users
-// keep selects, in API order, with every attribute mapped from the API value.
+// keep selects, sorted by ID, with every attribute mapped from the API value.
 func checkUsersAgainstAPI(ds string, keep func(api.User) bool) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		users, err := testClient().Users.List(context.Background())
@@ -75,6 +77,8 @@ func checkUsersAgainstAPI(ds string, keep func(api.User) bool) resource.TestChec
 		if len(want) == 0 {
 			return fmt.Errorf("no API user matches, the case tests nothing")
 		}
+		// The data source lists users by ID; auto groups are compared as a set.
+		slices.SortFunc(want, func(a, b api.User) int { return strings.Compare(a.Id, b.Id) })
 		checks := []resource.TestCheckFunc{resource.TestCheckResourceAttr(ds, "ids.#", strconv.Itoa(len(want)))}
 		for i, u := range want {
 			p := fmt.Sprintf("users.%d.", i)
@@ -97,8 +101,8 @@ func checkUsersAgainstAPI(ds string, keep func(api.User) bool) resource.TestChec
 				checkOptionalAttr(ds, p+"is_current", boolString(u.IsCurrent)),
 				checkOptionalAttr(ds, p+"is_service_user", boolString(u.IsServiceUser)),
 			)
-			for j, g := range u.AutoGroups {
-				checks = append(checks, resource.TestCheckResourceAttr(ds, fmt.Sprintf("%sauto_groups.%d", p, j), g))
+			for _, g := range u.AutoGroups {
+				checks = append(checks, resource.TestCheckTypeSetElemAttr(ds, p+"auto_groups.*", g))
 			}
 		}
 		return resource.ComposeAggregateTestCheckFunc(checks...)(s)

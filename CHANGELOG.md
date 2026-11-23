@@ -11,7 +11,7 @@ it is based on.
 ### Added
 
 - Data sources `netbird_groups` and `netbird_users`, listing groups and users with optional
-  filters (#7; upstream [#225](https://github.com/netbirdio/terraform-provider-netbird/pull/225)
+  filters, sorted by ID (#7; upstream [#225](https://github.com/netbirdio/terraform-provider-netbird/pull/225)
   by Benjamin Dupuis).
 
 ## [0.1.0] - 2026-11-23

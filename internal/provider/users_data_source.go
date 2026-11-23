@@ -6,6 +6,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -93,7 +95,7 @@ func (d *UsersDataSource) Schema(ctx context.Context, req datasource.SchemaReque
 				MarkdownDescription: "Only return users having all these auto group IDs, even if they have more",
 				ElementType:         types.StringType,
 				Optional:            true,
-				Validators:          []validator.List{listvalidator.SizeAtLeast(1)},
+				Validators:          []validator.List{listvalidator.SizeAtLeast(1), listvalidator.NoNullValues()},
 			},
 			"ids": schema.ListAttribute{
 				MarkdownDescription: "IDs of the matching users",
@@ -253,8 +255,14 @@ func (d *UsersDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 }
 
 // usersAPIToTerraform converts API users into the Terraform users list.
+//
+// The API returns users in no defined order (the server iterates a map), so
+// they are sorted by ID: an unchanged account gives the same list, and the
+// same index, on every read.
 func usersAPIToTerraform(ctx context.Context, users []api.User, data *UsersModel) diag.Diagnostics {
 	var ret diag.Diagnostics
+	users = slices.Clone(users)
+	slices.SortFunc(users, func(a, b api.User) int { return strings.Compare(a.Id, b.Id) })
 	ids := make([]string, len(users))
 	data.Users = make([]UserModel, len(users))
 	for i := range users {

@@ -6,6 +6,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -170,8 +172,13 @@ func (d *GroupsDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 }
 
 // groupsAPIToTerraform converts API groups into the Terraform groups list.
+//
+// The API returns groups in no defined order, so they are sorted by ID: an
+// unchanged account gives the same list, and the same index, on every read.
 func groupsAPIToTerraform(ctx context.Context, groups []api.Group, data *GroupsModel) diag.Diagnostics {
 	var ret diag.Diagnostics
+	groups = slices.Clone(groups)
+	slices.SortFunc(groups, func(a, b api.Group) int { return strings.Compare(a.Id, b.Id) })
 	ids := make([]string, len(groups))
 	data.Groups = make([]GroupModel, len(groups))
 	for i := range groups {
