@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -185,7 +186,14 @@ func Test_DNSZone_DomainReplaces(t *testing.T) {
 				ExpectError: regexp.MustCompile(`Invalid group ID`),
 			},
 			{
-				Config: testDNSRecordResource(zoneName, "after.local", rName, "www", "A", "192.168.1.1", 300),
+				// The new zone's group is created by the same apply, so its
+				// ID is not known at plan time.
+				Config: strings.Replace(testDNSRecordResource(zoneName, "after.local", rName, "www", "A", "192.168.1.1", 300),
+					fmt.Sprintf("distribution_groups = [%q]", e2eGroupAllID()), "distribution_groups = [netbird_group.zone.id]", 1) + fmt.Sprintf(`
+resource "netbird_group" "zone" {
+  name = %q
+}
+`, zoneName+"-group"),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					plancheck.ExpectResourceAction(zoneFull, plancheck.ResourceActionDestroyBeforeCreate),
 					plancheck.ExpectResourceAction(recordFull, plancheck.ResourceActionDestroyBeforeCreate),
@@ -204,6 +212,10 @@ func Test_DNSZone_DomainReplaces(t *testing.T) {
 						}
 						if zone.Domain != "after.local" {
 							return fmt.Errorf("domain on the server: expected after.local, found %s", zone.Domain)
+						}
+						groupID := s.RootModule().Resources["netbird_group.zone"].Primary.ID
+						if !slices.Equal(zone.DistributionGroups, []string{groupID}) {
+							return fmt.Errorf("distribution groups on the server: expected [%s], found %v", groupID, zone.DistributionGroups)
 						}
 						recordID := s.RootModule().Resources[recordFull].Primary.ID
 						if recordID == firstRecord {

@@ -190,3 +190,40 @@ func Test_dnsZone_groupLookupStopsOnServerError(t *testing.T) {
 		t.Errorf("expected the plan refused after one request, found %v after %d requests", resp.Diagnostics, requests)
 	}
 }
+
+// Test_dnsZone_firstCreateSendsNoRequest: a first create looks up no group,
+// as the endpoint may not be known yet and nothing is deleted.
+func Test_dnsZone_firstCreateSendsNoRequest(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+	r := &DNSZone{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	values := map[string]tftypes.Value{}
+	for n, at := range typ.AttributeTypes {
+		values[n] = tftypes.NewValue(at, nil)
+	}
+	values["name"] = tftypes.NewValue(tftypes.String, "z")
+	values["domain"] = tftypes.NewValue(tftypes.String, "new.local")
+	values["distribution_groups"] = tftypes.NewValue(tftypes.Set{ElementType: tftypes.String}, []tftypes.Value{tftypes.NewValue(tftypes.String, "g1")})
+	config := tftypes.NewValue(typ, values)
+	req := resource.ModifyPlanRequest{
+		Config: tfsdk.Config{Schema: sch.Schema, Raw: config},
+		Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: config},
+		State:  tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(typ, nil)},
+	}
+	resp := resource.ModifyPlanResponse{Plan: req.Plan}
+	r.ModifyPlan(ctx, req, &resp)
+	if resp.Diagnostics.HasError() || requests != 0 {
+		t.Errorf("expected a first create planned without requests, found %v after %d requests", resp.Diagnostics, requests)
+	}
+}
