@@ -196,13 +196,13 @@ func Test_scim_connectorIDRequests(t *testing.T) {
 // prefix is read from the response.
 func Test_scim_disabledOnCreate(t *testing.T) {
 	ctx := context.Background()
-	var methods []string
+	var methods, paths []string
 	var bodies []map[string]any
 	enabled := true
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		methods, bodies = append(methods, r.Method), append(bodies, body)
+		methods, bodies, paths = append(methods, r.Method), append(bodies, body), append(paths, r.URL.Path)
 		if v, ok := body["enabled"].(bool); ok {
 			enabled = v
 		}
@@ -234,8 +234,11 @@ func Test_scim_disabledOnCreate(t *testing.T) {
 	if create.Diagnostics.HasError() {
 		t.Fatal(create.Diagnostics)
 	}
-	if !slices.Equal(methods, []string{"POST", "PUT"}) || bodies[1]["enabled"] != false {
-		t.Fatalf("expected a create then an update with enabled false, found %v %v", methods, bodies)
+	if !slices.Equal(methods, []string{"POST", "PUT"}) || bodies[1]["enabled"] != false || len(bodies[1]) != 1 {
+		t.Fatalf("expected a create then an update with only enabled false, found %v %v", methods, bodies)
+	}
+	if paths[1] != "/api/integrations/scim-idp/7" {
+		t.Errorf("expected the disable to target the created integration, found %s", paths[1])
 	}
 	var got ScimModel
 	if d := create.State.Get(ctx, &got); d.HasError() {

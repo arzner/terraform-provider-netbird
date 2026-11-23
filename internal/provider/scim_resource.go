@@ -183,13 +183,9 @@ func (r *Scim) Create(ctx context.Context, req resource.CreateRequest, resp *res
 	// an update right after the create.
 	if !plannedEnabled.IsNull() && !plannedEnabled.IsUnknown() && !plannedEnabled.ValueBool() && scim.Enabled {
 		disabled := false
-		// The same fields as the create, so nothing else moves.
-		updated, err := r.client.SCIM.Update(ctx, data.Id.ValueString(), api.UpdateScimIntegrationRequest{
-			Enabled:           &disabled,
-			GroupPrefixes:     scimReq.GroupPrefixes,
-			UserGroupPrefixes: scimReq.UserGroupPrefixes,
-			ConnectorId:       scimReq.ConnectorId,
-		})
+		// Only enabled: the create already set the rest, and sending it
+		// again could overwrite a change made in between.
+		updated, err := r.client.SCIM.Update(ctx, data.Id.ValueString(), api.UpdateScimIntegrationRequest{Enabled: &disabled})
 		if err != nil {
 			// Keep the created integration in state so it is not orphaned.
 			data.AuthToken = authToken
@@ -197,15 +193,11 @@ func (r *Scim) Create(ctx context.Context, req resource.CreateRequest, resp *res
 			resp.Diagnostics.AddError("Error disabling the new SCIM integration", err.Error())
 			return
 		}
-		created := data.Prefix // as the create confirmed it
-		resp.Diagnostics.Append(scimAPIToTerraform(ctx, updated, &data)...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-		// The update does not send the prefix: a known planned one stays as
-		// the create returned it, an unknown one takes the latest answer.
-		if !plannedPrefix.IsUnknown() {
-			data.Prefix = created
+		// The create's result stands for everything but enabled; later
+		// changes show at the next refresh.
+		data.Enabled = types.BoolValue(updated.Enabled)
+		if plannedPrefix.IsUnknown() {
+			data.Prefix = types.StringValue(updated.Prefix)
 		}
 	}
 	data.AuthToken = authToken
