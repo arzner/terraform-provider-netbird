@@ -137,10 +137,10 @@ func (r *PostureCheck) Schema(ctx context.Context, req resource.SchemaRequest, r
 				MarkdownDescription: "Requires a certificate held by the peer that chains to one of the given CA certificates. Not supported on iOS and Android, which always fail this check and are denied access.",
 				Attributes: map[string]schema.Attribute{
 					"ca_certificates": schema.ListAttribute{
-						MarkdownDescription: "PEM-encoded CA certificates the peer's certificate must chain to.",
+						MarkdownDescription: "PEM-encoded CA certificates the peer's certificate must chain to. Required when the block is present (at least one).",
 						ElementType:         types.StringType,
 						Optional:            true,
-						Validators:          []validator.List{listvalidator.SizeAtLeast(1), listvalidator.ValueStringsAre(pemCertificate{})},
+						Validators:          []validator.List{listvalidator.SizeAtLeast(1), listvalidator.NoNullValues(), listvalidator.ValueStringsAre(pemCertificate{})},
 					},
 				},
 			},

@@ -87,7 +87,7 @@ resource "netbird_posture_check" "example" {
 
 Optional:
 
-- `ca_certificates` (List of String) PEM-encoded CA certificates the peer's certificate must chain to.
+- `ca_certificates` (List of String) PEM-encoded CA certificates the peer's certificate must chain to. Required when the block is present (at least one).
 
 
 <a id="nestedblock--geo_location_check"></a>
