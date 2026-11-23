@@ -12,16 +12,19 @@ Coding conventions, the test rules and the review checklist are in
    features name the NetBird API fields or endpoints they use.
 2. **Milestone.** Issues the next release will carry go into its milestone
    (`v0.2.0`, ...). Issues without a milestone are backlog.
-3. **Pull request.** One pull request per purpose, opened against `main`, with
-   `Closes #N` and the PR template filled in. Keep it small; when a change cannot
-   be small, agree the split in the issue first. Push fixes as new commits rather
-   than rewriting a branch under review.
+3. **Pull request.** One pull request per purpose, with the PR template filled
+   in. A standalone pull request targets `main`; when a change cannot be small,
+   agree the split in the issue first and open each dependent pull request
+   against the branch below it. Reference the issue with `Refs #N`, and use
+   `Closes #N` only in the pull request that finishes it. Push fixes as new
+   commits rather than rewriting a branch under review.
 4. **CI.** The pull request must pass the required checks: build, `make generate`
    without a diff, lint, unit and integration tests, and the acceptance suite
    with Terraform and OpenTofu against the pinned NetBird version. The suite also
    runs against the newest release of the previous NetBird minor line; a failure
    there needs a fix or a stated reason before merging (see
-   [Compatibility with NetBird](README.md#compatibility-with-netbird)).
+   [Compatibility with NetBird](README.md#compatibility-with-netbird)). A pull
+   request that changes only `README.md` does not start these workflows.
 5. **Review.** Every pull request gets an independent review against the
    [review checklist](AGENTS.md#review-checklist) and is updated until no
    blocking finding is left. A finding is either fixed or answered with why it
@@ -65,7 +68,8 @@ and stays open to it.
   (`git merge upstream/main`), never rebased.
 - **Porting an upstream pull request.** Check the fix against the NetBird source
   at the pinned version first; port only what holds. Cherry-pick with
-  `git cherry-pick -x` so the commits keep their author and name their origin,
+  `git cherry-pick -S -x <commit>` so the commits keep their author, name their
+  origin and are signed,
   link the upstream pull request in the issue and the pull request, and credit
   the author in the changelog entry. Changes on top of the port go in separate
   commits.
