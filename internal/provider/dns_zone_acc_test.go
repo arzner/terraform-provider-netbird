@@ -161,6 +161,13 @@ func Test_DNSZone_DomainReplaces(t *testing.T) {
 				ExpectError: regexp.MustCompile(`Distribution group not found`),
 			},
 			{
+				// A real group ID with a suffix the lookup URL drops is
+				// refused too, also for a tainted zone planned as a create.
+				Taint:       []string{zoneFull},
+				Config:      strings.Replace(testDNSRecordResource(zoneName, "before.local", rName, "www", "A", "192.168.1.1", 300), fmt.Sprintf("distribution_groups = [%q]", e2eGroupAllID()), fmt.Sprintf("distribution_groups = [%q]", e2eGroupAllID()+"#old"), 1),
+				ExpectError: regexp.MustCompile(`Distribution group not found`),
+			},
+			{
 				// Left out on an in-place change, the groups are kept.
 				Config:   testDNSRecordResource(zoneName, "before.local", rName, "www", "A", "192.168.1.1", 300),
 				PlanOnly: true,

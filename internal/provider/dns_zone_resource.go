@@ -315,9 +315,10 @@ func (r *DNSZone) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest
 			"Creating the zone, also to replace it for a new domain, needs at least one group in distribution_groups.")
 		return
 	}
-	// A replacement deletes the old zone first, and the server refuses to
-	// create one with a group that does not exist: look the known ones up.
-	if !replaces || r.client == nil || configured.IsUnknown() {
+	// The server refuses to create a zone with a group that does not exist,
+	// and a replacement (also one Terraform plans as a create, for a tainted
+	// zone) deletes the old zone first: look the known groups up.
+	if r.client == nil || configured.IsUnknown() {
 		return
 	}
 	for _, e := range configured.Elements() {
