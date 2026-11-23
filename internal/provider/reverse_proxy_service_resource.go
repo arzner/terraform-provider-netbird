@@ -994,10 +994,13 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 				}
 			}
 			if len(found) == 1 || (!onlyOne && len(found) > 0) {
-				// Among equals, the target at the same position wins.
+				// Among equals: with as many targets on both sides (a create or
+				// update response, an unchanged refresh) the one at the same
+				// position wins; otherwise a target was added or removed, and
+				// equals pair in their relative order.
 				pick := found[0]
 				for _, i := range found {
-					if i == j {
+					if i == j && len(planned) == len(live) {
 						pick = i
 					}
 				}

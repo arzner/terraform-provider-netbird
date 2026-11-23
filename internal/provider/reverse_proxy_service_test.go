@@ -1712,3 +1712,20 @@ func Test_preserveTargetPlanValues_subnetHostAndPosition(t *testing.T) {
 		t.Errorf("options must stay with their own target, found %s, %s", timeout(out[0]), timeout(out[1]))
 	}
 }
+
+// After an earlier target was removed outside Terraform, equal survivors keep
+// their relative order.
+func Test_matchPlanTargets_removalKeepsRelativeOrder(t *testing.T) {
+	target := func(id, tag string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue(id), Port: types.Int64Value(80), Protocol: types.StringValue("http"),
+			Path: types.StringValue("/"), Host: types.StringNull(), TargetType: types.StringValue(tag),
+		}
+	}
+	got := matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target("a", "A"), target("p", "B"), target("p", "C")},
+		[]ReverseProxyServiceTargetModel{target("p", ""), target("p", "")})
+	if len(got) != 2 || got[0].TargetType.ValueString() != "B" || got[1].TargetType.ValueString() != "C" {
+		t.Errorf("expected B, C in order, found %v", got)
+	}
+}
