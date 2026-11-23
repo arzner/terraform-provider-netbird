@@ -201,8 +201,12 @@ through the shared harness in `e2e_harness_test.go`.
   `specUnmodelled` with a reason and an issue. Nested objects and arrays of
   objects that a nested attribute or block models are compared recursively;
   when the provider spreads an array's item members over the parent block,
-  list it in `specNestedFlattened`. Never add an entry without a reason; stale
-  entries fail the test too. A new resource gets an entry in `specResources`.
+  list it in `specNestedFlattened`; when it models an object as one value (an
+  ID, a version string), name the member that value holds in `specProjected`.
+  Nested keys are `Component.property`; a key for the request path
+  (`Schema.property.member`) overrides it for that one use of a shared
+  component. Never add an entry without a reason; stale entries fail the test
+  too. A new resource gets an entry in `specResources`.
 - **Geolocation stays enabled** in the harness so posture-check location rules
   are actually evaluated. The escape hatch is `NB_E2E_DISABLE_GEOLOCATION=1`; do
   not disable it to make a run pass.

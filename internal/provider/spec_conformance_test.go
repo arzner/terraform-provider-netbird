@@ -39,7 +39,7 @@ func Test_SpecConformance(t *testing.T) {
 
 	seenAllowlist := map[string]bool{}
 	checked := map[string]bool{}
-	walk := &specWalk{t: t, spec: spec, seen: seenAllowlist, checked: checked, expanded: map[string]bool{}}
+	walk := &specWalk{t: t, spec: spec, seen: seenAllowlist, checked: checked, expanded: map[string]bool{}, projected: map[string]bool{}}
 	// A flattened child schema of a read-only parent is read-only throughout;
 	// the child is checked as its own entry, so the flag is carried over.
 	readOnlyChild := map[string]bool{} // resource type + "/" + child schema
@@ -142,6 +142,11 @@ func Test_SpecConformance(t *testing.T) {
 	for key := range specRenamed {
 		if !checked[key] {
 			t.Errorf("specRenamed lists %s, which no checked schema has any more; remove it", key)
+		}
+	}
+	for key := range specProjected {
+		if !walk.projected[key] {
+			t.Errorf("specProjected lists %s, which no check applied; remove it or fix it", key)
 		}
 	}
 }
@@ -313,6 +318,8 @@ type specProperty struct {
 	// array is set when the property is an array (directly or through a
 	// reference): items and inline then describe its items.
 	array bool
+	// itemReadOnly is set when an array's item schema is read-only.
+	itemReadOnly bool
 }
 
 type openAPISpec struct {
@@ -375,6 +382,7 @@ func (s openAPISpec) property(d schemaDoc, depth int) (specProperty, bool) {
 			return specProperty{}, false
 		}
 		out.items, out.inline, out.array = item.ref, item.inline, true
+		out.itemReadOnly = item.readOnly
 	}
 	if len(d.Properties) > 0 || (len(d.AllOf) > 1 && objectParts(d.AllOf)) ||
 		(d.Ref != "" && len(d.AllOf) > 0 && objectParts(d.AllOf)) {
@@ -609,6 +617,9 @@ schemas:
                 properties:
                   e: {type: string}
           namedArray: {$ref: '#/components/schemas/ChildList'}
+          frozenItems:
+            type: array
+            items: {$ref: '#/components/schemas/ReadOnlyThing'}
           refAndSiblings:
             $ref: '#/components/schemas/Child'
             properties:
@@ -659,6 +670,7 @@ schemas:
 		"children":         {items: "Child", array: true},
 		"composedChildren": {items: "Child", array: true},
 		"namedArray":       {ref: "ChildList", items: "Child", array: true},
+		"frozenItems":      {items: "ReadOnlyThing", array: true, itemReadOnly: true},
 	}
 	// Inline schemas and compositions: their members, including every part.
 	inline := map[string]struct {
@@ -711,11 +723,62 @@ schemas:
 
 // specWalk carries the bookkeeping of one Test_SpecConformance run.
 type specWalk struct {
-	t        *testing.T
-	spec     openAPISpec
-	seen     map[string]bool // specUnmodelled entries that matched
-	checked  map[string]bool // every property key compared
-	expanded map[string]bool // specNestedFlattened entries that were applied
+	t         *testing.T
+	spec      openAPISpec
+	seen      map[string]bool // specUnmodelled entries that matched
+	checked   map[string]bool // every property key compared
+	expanded  map[string]bool // specNestedFlattened entries that were applied
+	projected map[string]bool // specProjected entries that were applied
+}
+
+// specListed reports whether a key has an entry in one of the lists.
+func specListed(key string) bool {
+	_, renamed := specRenamed[key]
+	_, unmodelled := specUnmodelled[key]
+	_, projected := specProjected[key]
+	return renamed || unmodelled || projected || specNestedFlattened[key]
+}
+
+// checkScalar checks a single-value attribute against its spec property. An
+// object property may only map to one value through specProjected, which
+// names the member the value holds; the other members must be read-only or
+// listed in specUnmodelled.
+func (w *specWalk) checkScalar(typeName, key string, prop specProperty, a attrInfo) {
+	w.t.Helper()
+	leaf, projected := specProjected[key]
+	members := prop.members()
+	var props map[string]specProperty
+	if members != nil {
+		props, _ = w.spec.propertiesOf(*members)
+	}
+	if len(props) == 0 {
+		if projected {
+			w.t.Errorf("%s: %s is listed in specProjected but has no members in the spec", typeName, key)
+		}
+		return
+	}
+	if !projected {
+		w.t.Errorf("%s: %s is an object in the spec but %q holds a single value; name the member it holds in specProjected", typeName, key, a.name)
+		return
+	}
+	w.projected[key] = true
+	if _, ok := props[leaf]; !ok {
+		w.t.Errorf("%s: specProjected maps %s to its member %q, which the spec does not have", typeName, key, leaf)
+	}
+	for _, name := range sortedKeys(props) {
+		if name == leaf {
+			continue
+		}
+		member := key + "." + name
+		w.checked[member] = true
+		if _, listed := specUnmodelled[member]; listed {
+			w.seen[member] = true
+			continue
+		}
+		if !props[name].readOnly && !prop.readOnly {
+			w.t.Errorf("%s: %s is not represented by %q, which holds only %s; model it or list it in specUnmodelled", typeName, member, a.name, leaf)
+		}
+	}
 }
 
 // specMaxDepth bounds the nested walk; the provider's own schemas are far
@@ -729,6 +792,7 @@ const specMaxDepth = 12
 func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrInfo, depth int) {
 	w.t.Helper()
 	if a.children == nil {
+		w.checkScalar(typeName, key, prop, a)
 		return
 	}
 	label := key
@@ -765,9 +829,15 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 	}
 	for _, name := range sortedKeys(props) {
 		p := props[name]
-		p.readOnly = p.readOnly || prop.readOnly
-		key := label + "." + name
-		w.checked[key] = true
+		p.readOnly = p.readOnly || prop.readOnly || (prop.array && prop.itemReadOnly)
+		// The request path names this use of a shared component; an entry
+		// for the path wins over one for the component.
+		pathKey, compKey := key+"."+name, label+"."+name
+		w.checked[pathKey], w.checked[compKey] = true, true
+		key := compKey
+		if specListed(pathKey) {
+			key = pathKey
+		}
 		if specNestedFlattened[key] {
 			// The provider spreads this array's item members over the parent.
 			if !p.array || !w.objectItems(p) {
@@ -810,4 +880,52 @@ func (w *specWalk) objectItems(p specProperty) bool {
 		props, ok = w.spec.properties(p.items)
 	}
 	return ok && len(props) > 0
+}
+
+// Test_specPathKeys checks that an entry for a request path applies to that
+// use of a shared component only.
+func Test_specPathKeys(t *testing.T) {
+	var doc struct {
+		Schemas map[string]schemaDoc `yaml:"schemas"`
+	}
+	fixture := `
+schemas:
+  Rule:
+    type: object
+    properties:
+      src: {$ref: '#/components/schemas/Res'}
+      dst: {$ref: '#/components/schemas/Res'}
+  Res:
+    type: object
+    properties:
+      id: {type: string}
+      kind: {type: string}
+`
+	if err := yaml.Unmarshal([]byte(fixture), &doc); err != nil {
+		t.Fatal(err)
+	}
+	spec := openAPISpec{schemas: doc.Schemas}
+	leaf := func(name string) attrInfo { return attrInfo{name: name, configurable: true} }
+	attrs := map[string]attrInfo{
+		"src": {name: "src", configurable: true, children: map[string]attrInfo{"id": leaf("id"), "kind": leaf("kind")}},
+		"dst": {name: "dst", configurable: true, children: map[string]attrInfo{"id": leaf("id"), "kind_name": leaf("kind_name")}},
+	}
+	specRenamed["Rule.dst.kind"] = "kind_name"
+	defer delete(specRenamed, "Rule.dst.kind")
+	if !specListed("Rule.dst.kind") || specListed("Rule.src.kind") {
+		t.Fatal("only the destination path is listed")
+	}
+	walk := &specWalk{t: t, spec: spec, seen: map[string]bool{}, checked: map[string]bool{}, expanded: map[string]bool{}, projected: map[string]bool{}}
+	props, ok := spec.properties("Rule")
+	if !ok {
+		t.Fatal("Rule did not resolve")
+	}
+	for _, name := range sortedKeys(props) {
+		walk.checkNested("test", "Rule."+name, props[name], attrs[name], 1)
+	}
+	for _, key := range []string{"Rule.dst.kind", "Rule.src.kind", "Res.kind"} {
+		if !walk.checked[key] {
+			t.Errorf("%s was not recorded as checked", key)
+		}
+	}
 }

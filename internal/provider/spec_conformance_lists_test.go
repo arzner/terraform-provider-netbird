@@ -22,6 +22,20 @@ var specRenamed = map[string]string{
 	"OSVersionCheck.windows": "windows_min_kernel_version",
 }
 
+// specProjected lists object properties the provider models as one value,
+// as "Schema.property": "member": the value holds that member of the object.
+// The object's other members must be read-only or listed in specUnmodelled.
+var specProjected = map[string]string{
+	"OSVersionCheck.android": "min_version",
+	"OSVersionCheck.darwin":  "min_version",
+	"OSVersionCheck.ios":     "min_version",
+	"OSVersionCheck.linux":   "min_kernel_version",
+	"OSVersionCheck.windows": "min_kernel_version",
+
+	// resources is a list of IDs; the provider sends each one's type.
+	"GroupRequest.resources": "id",
+}
+
 // specNestedFlattened lists nested array properties whose item members the
 // provider models directly on the parent block, as "Schema.property".
 var specNestedFlattened = map[string]bool{
@@ -33,4 +47,6 @@ var specNestedFlattened = map[string]bool{
 // does not model, as "Schema.property": "reason". Every entry needs a reason a
 // reviewer can check; a property that later gets modelled or leaves the spec
 // fails Test_SpecConformance until it is removed here.
-var specUnmodelled = map[string]string{}
+var specUnmodelled = map[string]string{
+	"GroupRequest.resources.type": "not configurable: the provider looks up each resource's type from its ID",
+}
