@@ -1002,6 +1002,8 @@ data "netbird_reverse_proxy_service" "test" {
 %s`, rName, rName, domain, lines, peerID, c.port, auth, rName, c.extra)
 	}
 	group := fmt.Sprintf("[%q]", groupID)
+	otherGroupID := e2eGroupNotAllID()
+	twoGroups := fmt.Sprintf("[%q, %q]", groupID, otherGroupID)
 	onServer := func(private bool, groups []string, port int) resource.TestCheckFunc {
 		return func(s *terraform.State) error {
 			svc, err := testClient().ReverseProxyServices.Get(context.Background(), s.RootModule().Resources[rNameFull].Primary.Attributes["id"])
@@ -1065,7 +1067,8 @@ data "netbird_reverse_proxy_service" "test" {
 				ExpectError: regexp.MustCompile(`Bearer auth not allowed`),
 			},
 			{Config: config(svc{private: "true", groups: "[null]"}), ExpectError: regexp.MustCompile(`(?s)access_groups.*null`)},
-			{Config: config(svc{private: "true", groups: `[""]`}), ExpectError: regexp.MustCompile(`(?s)access_groups.*at least 1`)},
+			{Config: config(svc{private: "true", groups: `[""]`}), ExpectError: regexp.MustCompile(`(?s)access_groups.*must not be blank`)},
+			{Config: config(svc{private: "true", groups: `[" "]`}), ExpectError: regexp.MustCompile(`(?s)access_groups.*must not be blank`)},
 			{
 				// A new private service has no groups to keep.
 				Config: config(svc{private: "true", groups: group, extra: fmt.Sprintf(`
@@ -1080,6 +1083,7 @@ resource "netbird_reverse_proxy_service" "other" {
     port        = 8080
     protocol    = "http"
   }]
+  auth = {}
 }`, rName, rName, cluster.Address, peerID)}),
 				ExpectError: regexp.MustCompile(`Access groups required`),
 			},
@@ -1093,6 +1097,19 @@ resource "netbird_reverse_proxy_service" "other" {
 			{
 				// The outside change was kept; a new plan restores the configuration.
 				PreConfig: onServerBefore(false, []string{groupID}, 8080),
+				Config:    config(svc{private: "true", groups: twoGroups}),
+				Check:     onServer(true, []string{groupID, otherGroupID}, 8080),
+			},
+			{
+				// Only a group is revoked on the server after a port-only plan.
+				Config: config(svc{private: "true", groups: twoGroups, port: 8081}),
+				ConfigPlanChecks: outside(func(r *api.ServiceRequest) {
+					r.AccessGroups = &[]string{groupID}
+				}),
+				ExpectError: regexp.MustCompile(`(?s)changed after the plan.*access_groups: `),
+			},
+			{
+				PreConfig: onServerBefore(true, []string{groupID}, 8080),
 				Config:    config(svc{private: "true", groups: group}),
 				Check:     onServer(true, []string{groupID}, 8080),
 			},
@@ -1117,6 +1134,12 @@ resource "netbird_reverse_proxy_service" "other" {
 			{
 				// Imported, the cleared list reads as the applied one.
 				ResourceName: rNameFull, ImportState: true, ImportStateVerify: true,
+			},
+			{
+				// Made private with the groups left out: the empty list from
+				// state is refused at plan time.
+				Config:      config(svc{private: "true"}),
+				ExpectError: regexp.MustCompile(`Access groups required`),
 			},
 			{
 				// Both access settings left out: the service is made private

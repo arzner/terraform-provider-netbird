@@ -222,9 +222,10 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 	tcp := tftypes.NewValue(tftypes.String, "tcp")
 	bearer := authWithBearer(t, typ.AttributeTypes["auth"])
 	for name, tc := range map[string]struct {
-		create       bool
-		config, plan vals
-		wantError    bool
+		create              bool
+		state, config, plan vals
+		wantError           bool
+		wantUnknown         bool
 	}{
 		"new without groups":     {create: true, config: vals{"private": on}, plan: vals{"private": on, "access_groups": tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, tftypes.UnknownValue)}, wantError: true},
 		"new with groups":        {create: true, config: vals{"private": on, "access_groups": groups}, plan: vals{"private": on, "access_groups": groups}},
@@ -234,11 +235,20 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 		"kept private, fine":     {config: vals{}, plan: vals{"private": on, "mode": http, "access_groups": groups}},
 		"kept groups":            {config: vals{"private": on}, plan: vals{"private": on, "access_groups": groups}},
 		"public":                 {config: vals{"auth": bearer}, plan: vals{"private": tftypes.NewValue(tftypes.Bool, false), "auth": bearer}},
+		"made private, adopted empty list": {
+			state:  vals{"private": tftypes.NewValue(tftypes.Bool, false), "access_groups": noGroups},
+			config: vals{"private": on}, plan: vals{"private": on, "mode": http, "access_groups": noGroups}, wantError: true,
+		},
+		"state without access settings": {state: vals{}, config: vals{}, plan: vals{"mode": http}, wantUnknown: true},
+		"new without access settings":   {create: true, config: vals{}, plan: vals{"mode": http}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			state := tftypes.NewValue(typ, nil)
 			if !tc.create {
-				state = object(vals{"private": on, "access_groups": groups})
+				if tc.state == nil {
+					tc.state = vals{"private": on, "access_groups": groups}
+				}
+				state = object(tc.state)
 			}
 			req := resource.ModifyPlanRequest{
 				Config: tfsdk.Config{Schema: sch.Schema, Raw: object(tc.config)},
@@ -250,6 +260,31 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 			if resp.Diagnostics.HasError() != tc.wantError {
 				t.Fatalf("expected error %v, found %v", tc.wantError, resp.Diagnostics)
 			}
+			var planned ReverseProxyServiceModel
+			if d := resp.Plan.Get(ctx, &planned); d.HasError() {
+				t.Fatal(d)
+			}
+			if got := planned.Private.IsUnknown() && planned.AccessGroups.IsUnknown(); got != tc.wantUnknown {
+				t.Errorf("expected unknown access settings %v, found private %v, access_groups %v", tc.wantUnknown, planned.Private, planned.AccessGroups)
+			}
 		})
+	}
+}
+
+func Test_keepLiveUnknownAccess(t *testing.T) {
+	on, off := true, false
+	live := &api.Service{Private: &on, AccessGroups: &[]string{"g-live"}}
+	planned := api.ServiceRequest{Private: &off, AccessGroups: &[]string{"g-plan"}}
+
+	req := planned
+	keepLiveUnknownAccess(&req, ReverseProxyServiceModel{Private: types.BoolUnknown(), AccessGroups: types.ListUnknown(types.StringType)}, live)
+	if req.Private == nil || !*req.Private || req.AccessGroups == nil || !reflect.DeepEqual(*req.AccessGroups, []string{"g-live"}) {
+		t.Errorf("unknown: expected the live values, found %v %v", req.Private, req.AccessGroups)
+	}
+
+	req = planned
+	keepLiveUnknownAccess(&req, ReverseProxyServiceModel{Private: types.BoolValue(false), AccessGroups: types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g-plan")})}, live)
+	if *req.Private || !reflect.DeepEqual(*req.AccessGroups, []string{"g-plan"}) {
+		t.Errorf("known: expected the planned values, found %v %v", *req.Private, *req.AccessGroups)
 	}
 }

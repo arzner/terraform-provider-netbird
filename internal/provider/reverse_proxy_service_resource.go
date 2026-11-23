@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -297,7 +298,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Computed:            true,
 			},
 			"private": schema.BoolAttribute{
-				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity (no OIDC) and the server generates an access policy from `access_groups` to the cluster's proxy peers. Requires `mode = \"http\"`, at least one access group and no bearer auth. Left out, a new service is public and an existing one keeps its setting.",
+				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity and the server generates an access policy from `access_groups` to the cluster's proxy peers. The proxy then skips the service's other authentication (SSO, password, PIN, header auth), even where `auth` still enables it; access restrictions still apply. Requires `mode = \"http\"`, at least one access group and no bearer auth. Left out, a new service is public and an existing one keeps its setting.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
@@ -310,7 +311,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				PlanModifiers:       []planmodifier.List{listplanmodifier.UseStateForUnknown()},
 				Validators: []validator.List{
 					listvalidator.NoNullValues(),
-					listvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1)),
+					listvalidator.ValueStringsAre(stringvalidator.RegexMatches(regexp.MustCompile(`\S`), "must not be blank")),
 				},
 			},
 			"targets": schema.ListNestedAttribute{
@@ -1192,6 +1193,7 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 				"\n\nNothing was changed. Run plan again.")
 		return
 	}
+	keepLiveUnknownAccess(&serviceReq, data, live)
 
 	svc, err := r.client.ReverseProxyServices.Update(ctx, data.Id.ValueString(), serviceReq)
 	if err != nil {
@@ -1265,10 +1267,13 @@ func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.V
 	resp.Diagnostics.Append(privateServiceProblems(data.Mode, data.AccessGroups, data.Auth)...)
 }
 
-// ModifyPlan refuses a private service the server would reject when the
-// configuration alone does not show it: a new private service without access
-// groups, or a service that stays private from its state while the
-// configuration sets another mode, no groups or bearer auth.
+// ModifyPlan leaves private and access_groups unknown on an update whose
+// state has no value for them and whose configuration leaves them out (state
+// from before they existed, planned without a refresh), so the update keeps
+// the live values instead of sending none and making the service public. It
+// also refuses a private service the server would reject when the
+// configuration alone does not show it: a new one without access groups, or
+// one whose groups, mode or auth come from state or the plan.
 func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
 		return
@@ -1276,6 +1281,19 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	var plan, config ReverseProxyServiceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !req.State.Raw.IsNull() {
+		if config.Private.IsNull() && plan.Private.IsNull() {
+			plan.Private = types.BoolUnknown()
+			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("private"), plan.Private)...)
+		}
+		if config.AccessGroups.IsNull() && plan.AccessGroups.IsNull() {
+			plan.AccessGroups = types.ListUnknown(types.StringType)
+			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("access_groups"), plan.AccessGroups)...)
+		}
+	}
 	if resp.Diagnostics.HasError() || plan.Private.IsUnknown() || !plan.Private.ValueBool() {
 		return
 	}
@@ -1284,9 +1302,20 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 			"A new service with private = true needs at least one group in access_groups.")
 		return
 	}
-	if config.Private.IsNull() {
-		// Configured values were checked by ValidateConfig.
-		resp.Diagnostics.Append(privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth)...)
+	// A configuration error stops at ValidateConfig, so this reports only
+	// problems with values kept from state.
+	resp.Diagnostics.Append(privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth)...)
+}
+
+// keepLiveUnknownAccess sends the live value of an access setting the plan
+// leaves unknown, so the whole-service update does not drop it.
+func keepLiveUnknownAccess(req *api.ServiceRequest, plan ReverseProxyServiceModel, live *api.Service) {
+	if plan.Private.IsUnknown() {
+		v := live.Private != nil && *live.Private
+		req.Private = &v
+	}
+	if plan.AccessGroups.IsUnknown() {
+		req.AccessGroups = live.AccessGroups
 	}
 }
 
