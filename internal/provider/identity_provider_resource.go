@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -292,6 +293,8 @@ func issuerProblem(issuer string) string {
 	switch {
 	case err != nil || u.Host == "" || u.Hostname() == "":
 		return "The issuer must be an absolute URL with a host."
+	case !validPort(u.Port()):
+		return "The issuer's port must be between 1 and 65535."
 	case u.Scheme != "https":
 		return "The issuer must use https."
 	case u.User != nil:
@@ -300,4 +303,13 @@ func issuerProblem(issuer string) string {
 		return "The issuer must not contain a query or a fragment."
 	}
 	return ""
+}
+
+// validPort reports whether a URL port is absent or a TCP port number.
+func validPort(p string) bool {
+	if p == "" {
+		return true
+	}
+	n, err := strconv.Atoi(p)
+	return err == nil && n >= 1 && n <= 65535
 }
