@@ -427,6 +427,26 @@ func (r *AccountSettings) Delete(ctx context.Context, req resource.DeleteRequest
 	// Do nothing
 }
 
+// currentAccountID is the import ID that stands for the account of the token.
+const currentAccountID = "current"
+
+// ImportState takes an account ID, or "current" for the token's account: the
+// dashboard does not show account IDs. "current" needs the token to see
+// exactly one account, so it never guesses between several.
 func (r *AccountSettings) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+	if req.ID != currentAccountID {
+		resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+		return
+	}
+	accounts, err := r.client.Accounts.List(ctx)
+	if err != nil {
+		resp.Diagnostics.AddError("Error listing accounts", err.Error())
+		return
+	}
+	if len(accounts) != 1 {
+		resp.Diagnostics.AddError("Account ID required",
+			fmt.Sprintf(`The token sees %d accounts, so "current" is ambiguous; import with the account ID instead.`, len(accounts)))
+		return
+	}
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), accounts[0].Id)...)
 }
