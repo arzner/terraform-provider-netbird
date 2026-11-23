@@ -56,6 +56,26 @@ func Test_SpecConformance(t *testing.T) {
 	}
 	for _, rm := range specResources {
 		attrs := resourceAttributes(t, rm.resource())
+		// A request and the schemas flattened into it share one attribute
+		// namespace, so they share the claims; separate requests (create and
+		// update) do not.
+		parent := map[string]string{}
+		for _, sm := range rm.schemas {
+			for _, child := range sm.flatten {
+				parent[child] = sm.schema
+			}
+		}
+		claimsOf := map[string]map[string]string{}
+		for _, sm := range rm.schemas {
+			root := sm.schema
+			for seen := 0; parent[root] != "" && seen < len(rm.schemas); seen++ {
+				root = parent[root]
+			}
+			if claimsOf[root] == nil {
+				claimsOf[root] = map[string]string{}
+			}
+			claimsOf[sm.schema] = claimsOf[root]
+		}
 		for _, sm := range rm.schemas {
 			props, ok := spec.properties(sm.schema)
 			if !ok {
@@ -73,7 +93,7 @@ func Test_SpecConformance(t *testing.T) {
 					t.Errorf("%s: flattened property %s.%s is not in the spec any more; update specResources", rm.typeName, sm.schema, name)
 				}
 			}
-			claims := map[string]string{}
+			claims := claimsOf[sm.schema]
 			for _, name := range sortedKeys(props) {
 				prop := props[name]
 				key := sm.schema + "." + name
@@ -651,6 +671,7 @@ schemas:
           frozenItems:
             type: array
             items: {$ref: '#/components/schemas/ReadOnlyThing'}
+          frozenNamed: {$ref: '#/components/schemas/FrozenList'}
           refAndSiblings:
             $ref: '#/components/schemas/Child'
             properties:
@@ -680,6 +701,10 @@ schemas:
     type: array
     items:
       $ref: '#/components/schemas/Child'
+  FrozenList:
+    type: array
+    items:
+      $ref: '#/components/schemas/ReadOnlyThing'
 `
 	if err := yaml.Unmarshal([]byte(fixture), &doc); err != nil {
 		t.Fatal(err)
@@ -702,6 +727,7 @@ schemas:
 		"composedChildren": {items: "Child", array: true},
 		"namedArray":       {ref: "ChildList", items: "Child", array: true},
 		"frozenItems":      {items: "ReadOnlyThing", array: true, itemReadOnly: true},
+		"frozenNamed":      {ref: "FrozenList", items: "ReadOnlyThing", array: true, itemReadOnly: true},
 	}
 	// Inline schemas and compositions: their members, including every part.
 	inline := map[string]struct {
@@ -806,7 +832,7 @@ func (w *specWalk) checkScalar(typeName, key string, prop specProperty, a attrIn
 			w.seen[member] = true
 			continue
 		}
-		if !props[name].readOnly && !prop.readOnly {
+		if !props[name].readOnly && !prop.readOnly && !(prop.array && prop.itemReadOnly) {
 			w.t.Errorf("%s: %s is not represented by %q, which holds only %s; model it or list it in specUnmodelled", typeName, member, a.name, leaf)
 		}
 	}
