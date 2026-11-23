@@ -8,6 +8,12 @@ it is based on.
 
 ## [Unreleased]
 
+### Added
+
+- Data sources `netbird_groups` and `netbird_users`, listing groups and users with optional
+  filters (#7; upstream [#225](https://github.com/netbirdio/terraform-provider-netbird/pull/225)
+  by Benjamin Dupuis).
+
 ## [0.1.0] - 2026-11-23
 
 First release of the fork. Based on upstream `4aa1f36` (v0.0.11 plus [#263](https://github.com/netbirdio/terraform-provider-netbird/pull/263)),
