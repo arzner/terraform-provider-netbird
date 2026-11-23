@@ -207,11 +207,7 @@ func postureCheckAPIToTerraform(ctx context.Context, postureCheck *api.PostureCh
 	var d diag.Diagnostics
 	data.Id = types.StringValue(postureCheck.Id)
 	data.Name = types.StringValue(postureCheck.Name)
-	if postureCheck.Description != nil {
-		data.Description = types.StringValue(*postureCheck.Description)
-	} else {
-		data.Description = types.StringNull()
-	}
+	data.Description = emptyAsPrior(data.Description, postureCheck.Description)
 	if postureCheck.Checks.NbVersionCheck != nil {
 		data.NetbirdVersionCheck, d = types.ObjectValueFrom(
 			ctx,

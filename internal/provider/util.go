@@ -307,3 +307,28 @@ func nullUnconfigured[T any](plan, config T) T {
 	}
 	return out
 }
+
+// emptyAsPrior maps a string the server may report as "" when none was set:
+// the server does not tell "" from absent, so an empty value keeps the prior
+// spelling (planned or stored "" stays "", otherwise null), and any other
+// value is taken as it is.
+func emptyAsPrior(prior types.String, v *string) types.String {
+	if v != nil && *v != "" {
+		return types.StringValue(*v)
+	}
+	if !prior.IsNull() && !prior.IsUnknown() && prior.ValueString() == "" {
+		return types.StringValue("")
+	}
+	return types.StringNull()
+}
+
+// objectStringAttr returns a string attribute of an object, or null.
+func objectStringAttr(obj types.Object, name string) types.String {
+	if obj.IsNull() || obj.IsUnknown() {
+		return types.StringNull()
+	}
+	if v, ok := obj.Attributes()[name].(types.String); ok {
+		return v
+	}
+	return types.StringNull()
+}

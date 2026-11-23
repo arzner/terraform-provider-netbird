@@ -312,11 +312,7 @@ func policyAPIToTerraform(ctx context.Context, policy *api.Policy, data *PolicyM
 	var diag diag.Diagnostics
 	data.Id = types.StringValue(*policy.Id)
 	data.Name = types.StringValue(policy.Name)
-	if policy.Description == nil || *policy.Description == "" {
-		data.Description = types.StringNull()
-	} else {
-		data.Description = types.StringValue(*policy.Description)
-	}
+	data.Description = emptyAsPrior(data.Description, policy.Description)
 	data.Enabled = types.BoolValue(policy.Enabled)
 	data.SourcePostureChecks, diag = sortedStringList(ctx, data.SourcePostureChecks, policy.SourcePostureChecks)
 	ret.Append(diag...)
@@ -330,10 +326,7 @@ func policyAPIToTerraform(ctx context.Context, policy *api.Policy, data *PolicyM
 			Protocol:      types.StringValue(string(r.Protocol)),
 			Enabled:       types.BoolValue(r.Enabled),
 			Bidirectional: types.BoolValue(r.Bidirectional),
-			Description:   types.StringPointerValue(r.Description),
-		}
-		if r.Description == nil || *r.Description == "" {
-			ruleModel.Description = types.StringNull()
+			Description:   emptyAsPrior(objectStringAttr(prior, "description"), r.Description),
 		}
 		if r.Sources != nil {
 			var sources []string

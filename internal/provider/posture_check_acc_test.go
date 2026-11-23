@@ -281,3 +281,48 @@ data "netbird_posture_check" "test" {
 		},
 	})
 }
+
+// Test_PostureCheck_EmptyDescription: the server reports "" for a check
+// without a description; left out it stays null, and "" stays "".
+func Test_PostureCheck_EmptyDescription(t *testing.T) {
+	testE2E(t)
+	rName := "pc" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_posture_check." + rName
+	var createdID string
+	config := func(description string) string {
+		return fmt.Sprintf(`resource "netbird_posture_check" %q {
+  name = %q
+  %s
+  netbird_version_check {
+    min_version = "0.40.0"
+  }
+}`, rName, rName, description)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().PostureChecks.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: config(""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckNoResourceAttr(rNameFull, "description"),
+				),
+			},
+			{
+				Config: config(`description = ""`),
+				Check:  resource.TestCheckResourceAttr(rNameFull, "description", ""),
+			},
+			{
+				Config: config(`description = "set"`),
+				Check:  resource.TestCheckResourceAttr(rNameFull, "description", "set"),
+			},
+			{
+				// Removing it clears it on the server, read back as null.
+				Config: config(""),
+				Check:  resource.TestCheckNoResourceAttr(rNameFull, "description"),
+			},
+		},
+	})
+}
