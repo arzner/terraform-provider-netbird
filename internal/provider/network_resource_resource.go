@@ -94,7 +94,7 @@ func (r *NetworkResource) Schema(ctx context.Context, req resource.SchemaRequest
 				Default:             booldefault.StaticBool(true),
 			},
 			"groups": schema.SetAttribute{
-				MarkdownDescription: "Group IDs containing the resource. Left out, the resource's groups are not managed here: a new resource starts without groups, and an update keeps the groups the resource has, including ones a `netbird_group`'s `resources` adds. `[]` removes it from every group. A resource without groups is reached through policies that name it as `destination_resource`.",
+				MarkdownDescription: "Group IDs containing the resource. Left out, the resource's groups are not managed here: a new resource starts without groups, and an update keeps the groups the resource has, including ones a `netbird_group`'s `resources` adds. `[]` removes it from every group. A resource without groups is reached through policies that name it as `destination_resource`. The server refuses to delete a group that still holds resources, so to destroy a group that adds this resource through `resources`, apply `resources = []` on the group first.",
 				Optional:            true,
 				Computed:            true,
 				ElementType:         types.StringType,
