@@ -4,6 +4,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"testing"
@@ -94,13 +95,13 @@ func testUserResource(rName, groups, blocked, role string) string {
 }
 
 // Test_User_ServiceUserNameAndKind: the API does not change a user's name or
-// email. A service user's new name replaces it, an email change is refused at
-// plan time, and is_service_user left out keeps what the user is.
+// email, so both changes are refused at plan time; a kind change replaces the
+// user, and is_service_user left out keeps what the user is.
 func Test_User_ServiceUserNameAndKind(t *testing.T) {
 	testE2E(t)
 	rName := "u" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
 	rNameFull := "netbird_user." + rName
-	var firstID, createdID string
+	var createdID string
 	config := func(name, extra string) string {
 		return fmt.Sprintf(`resource "netbird_user" %q {
   name = %q
@@ -115,7 +116,7 @@ func Test_User_ServiceUserNameAndKind(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: config(rName, "is_service_user = true"),
-				Check:  testRecordID(rNameFull, &firstID),
+				Check:  testRecordID(rNameFull, &createdID),
 			},
 			{
 				// Left out, the user stays a service user.
@@ -128,56 +129,26 @@ func Test_User_ServiceUserNameAndKind(t *testing.T) {
 				ExpectError: regexp.MustCompile(`Email cannot be changed`),
 			},
 			{
-				// A rename replaces the user, and the new one is created as
-				// the configuration says, so the kind must be stated.
+				// NetBird does not rename users: refused at plan time.
 				PlanOnly:    true,
-				Config:      config(rName+"-renamed", ""),
-				ExpectError: regexp.MustCompile(`Service user kind required`),
+				Config:      config(rName+"-renamed", "is_service_user = true"),
+				ExpectError: regexp.MustCompile(`Name cannot be changed`),
 			},
 			{
-				// Blocked, then renamed: the replacement is created blocked
-				// too (an update follows the create).
-				Config: config(rName, "is_service_user = true\n  is_blocked = true"),
-				Check:  resource.TestCheckResourceAttr(rNameFull, "is_blocked", "true"),
-			},
-			{
-				Config: config(rName+"-renamed", "is_service_user = true\n  is_blocked = true"),
+				// A kind change replaces the user; checked on the plan and
+				// stopped before apply, which would send an invitation.
+				Config: config(rName, "is_service_user = false\n  email = \"someone@example.com\""),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionDestroyBeforeCreate),
+					stopBeforeApply{},
 				}},
-				Check: resource.ComposeAggregateTestCheckFunc(
-					testRecordID(rNameFull, &createdID),
-					resource.TestCheckResourceAttr(rNameFull, "name", rName+"-renamed"),
-					resource.TestCheckResourceAttr(rNameFull, "is_blocked", "true"),
-					func(*terraform.State) error {
-						if createdID == firstID {
-							return fmt.Errorf("the service user kept its ID %s; expected a replacement", createdID)
-						}
-						users, err := testClient().Users.List(context.Background())
-						if err != nil {
-							return err
-						}
-						found := false
-						for _, u := range users {
-							if u.Id == firstID {
-								return fmt.Errorf("the replaced service user %s still exists", firstID)
-							}
-							if u.Id == createdID {
-								found = u.Name == rName+"-renamed" && u.IsServiceUser != nil && *u.IsServiceUser
-							}
-						}
-						if !found {
-							return fmt.Errorf("user %s is not a service user named %s-renamed on the server", createdID, rName)
-						}
-						return nil
-					},
-				),
+				ExpectError: regexp.MustCompile(`stopped before apply`),
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 			{
 				// An import block with the kind left out plans the import and
 				// nothing else.
-				Config:          config(rName+"-renamed", ""),
+				Config:          config(rName, ""),
 				ResourceName:    rNameFull,
 				ImportState:     true,
 				ImportStateKind: resource.ImportBlockWithID,
@@ -187,4 +158,12 @@ func Test_User_ServiceUserNameAndKind(t *testing.T) {
 			},
 		},
 	})
+}
+
+// stopBeforeApply ends a step after its plan checks, so a plan can be checked
+// without applying it.
+type stopBeforeApply struct{}
+
+func (stopBeforeApply) CheckPlan(_ context.Context, _ plancheck.CheckPlanRequest, resp *plancheck.CheckPlanResponse) {
+	resp.Error = errors.New("stopped before apply")
 }

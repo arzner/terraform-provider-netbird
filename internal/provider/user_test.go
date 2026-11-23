@@ -9,8 +9,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -107,18 +105,30 @@ func Test_user_modifyPlanNameEmail(t *testing.T) {
 		m["is_current"] = tftypes.NewValue(tftypes.Bool, true)
 		return tftypes.NewValue(typ, m)
 	}
+	with := func(v tftypes.Value, attr string, value tftypes.Value) tftypes.Value {
+		var m map[string]tftypes.Value
+		if err := v.As(&m); err != nil {
+			t.Fatal(err)
+		}
+		m[attr] = value
+		return tftypes.NewValue(typ, m)
+	}
+	blocked := func(v tftypes.Value) tftypes.Value {
+		return with(v, "is_blocked", tftypes.NewValue(tftypes.Bool, true))
+	}
+	owner := func(v tftypes.Value) tftypes.Value { return with(v, "role", tftypes.NewValue(tftypes.String, "owner")) }
 	for name, tc := range map[string]struct {
 		state, config tftypes.Value
 		wantError     string
 	}{
-		"service rename, kind left out":     {object("ci", "", true), object("ci2", nil, nil), "Service user kind required"},
+		"service rename, kind left out":     {object("ci", "", true), object("ci2", nil, nil), "Name cannot be changed"},
 		"service rename, name unknown":      {object("ci", "", true), object(tftypes.UnknownValue, nil, true), "Name not known"},
 		"kind not known":                    {object("ci", "", true), object("ci", nil, tftypes.UnknownValue), "User kind not known"},
 		"email not known":                   {object("alice", "a@example.com", false), object("alice", tftypes.UnknownValue, false), "Email not known"},
 		"regular to service with an email":  {object("Alice", "a@example.com", false), object("ci", "a@example.com", true), "Service users have no email"},
 		"current user changes kind":         {current(object("ci", "", true)), object("Alice", "a@example.com", false), "Cannot replace the current user"},
 		"new service user with an email":    {tftypes.NewValue(typ, nil), object("ci", "ci@example.com", true), "Service users have no email"},
-		"current user renamed":              {current(object("ci", "", true)), object("ci2", nil, true), "Cannot replace the current user"},
+		"current user renamed":              {current(object("ci", "", true)), object("ci2", nil, true), "Name cannot be changed"},
 		"new regular user without email":    {tftypes.NewValue(typ, nil), object("Alice", nil, nil), "Name and email required"},
 		"new service user without email":    {tftypes.NewValue(typ, nil), object("ci", nil, true), ""},
 		"new regular user with both":        {tftypes.NewValue(typ, nil), object("Alice", "a@example.com", false), ""},
@@ -127,9 +137,12 @@ func Test_user_modifyPlanNameEmail(t *testing.T) {
 		"service to regular, email unknown": {object("ci", "", true), object("Alice", tftypes.UnknownValue, false), "Name and email not known"},
 		"regular user renamed":              {object("alice", "a@example.com", false), object("alicia", nil, false), "Name cannot be changed"},
 		"email changed":                     {object("ci", "a@example.com", true), object(nil, "b@example.com", true), "Email cannot be changed"},
-		"service user renamed":              {object("ci", "", true), object("ci2", nil, true), ""}, // replaced instead
+		"service user renamed":              {object("ci", "", true), object("ci2", nil, true), "Name cannot be changed"},
 		"unchanged name":                    {object("alice", "a@example.com", false), object("alice", "a@example.com", false), ""},
 		"name and email left out":           {object("alice", "a@example.com", false), object(nil, nil, false), ""},
+		"new blocked user":                  {tftypes.NewValue(typ, nil), blocked(object("ci", nil, true)), "Cannot create a blocked user"},
+		"new service user as owner":         {tftypes.NewValue(typ, nil), owner(object("ci", nil, true)), "Service users cannot be owners"},
+		"regular to service as owner":       {object("Alice", "a@example.com", false), owner(object("ci", nil, true)), "Service users cannot be owners"},
 		"name from an expression":           {object("alice", "a@example.com", false), object(tftypes.UnknownValue, nil, false), "Name not known"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -154,21 +167,6 @@ func Test_user_modifyPlanNameEmail(t *testing.T) {
 				t.Fatalf("expected %q, found %v", tc.wantError, resp.Diagnostics)
 			}
 		})
-	}
-	// A service user's new name requires replacement, a regular user's not.
-	for _, tc := range []struct {
-		service bool
-		want    bool
-	}{{true, true}, {false, false}} {
-		state := tfsdk.State{Schema: sch.Schema, Raw: object("ci", "", tc.service)}
-		var resp stringplanmodifier.RequiresReplaceIfFuncResponse
-		serviceUserRenamed(ctx, planmodifier.StringRequest{
-			State: state, StateValue: types.StringValue("ci"), ConfigValue: types.StringValue("ci2"),
-			Config: tfsdk.Config{Schema: sch.Schema, Raw: object("ci2", nil, true)},
-		}, &resp)
-		if resp.RequiresReplace != tc.want {
-			t.Errorf("service user %v: expected replacement %v, found %v", tc.service, tc.want, resp.RequiresReplace)
-		}
 	}
 }
 

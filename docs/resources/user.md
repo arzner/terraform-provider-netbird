@@ -44,7 +44,7 @@ resource "netbird_user" "real_user" {
 - `email` (String) User Email. NetBird does not change a user's email: a change is refused at plan time.
 - `is_blocked` (Boolean) If set to true then user is blocked and can't use the system
 - `is_service_user` (Boolean) If set to true, creates a Service Account User. Left out, a new user is a regular user and an existing one keeps what it is, as for an imported identity provider user. A configured change replaces the user.
-- `name` (String) User Name. NetBird does not change a user's name: for a service user a new name replaces the user (its tokens are deleted with it), which needs `is_service_user = true` in the configuration, a name known at plan time, and a user other than the one the provider authenticates as; for a regular user, whose name comes from the identity provider, a change is refused at plan time. A new regular user is an invitation and needs `name` and `email`.
+- `name` (String) User Name. NetBird does not change a user's name, so a change is refused at plan time; for a service user under a new name, declare a new `netbird_user` (with new tokens) and remove the old one. A new regular user is an invitation and needs `name` and `email`.
 - `role` (String) User's NetBird account role (owner|admin|user|billing_admin|auditor|network_admin).
 
 ### Read-Only

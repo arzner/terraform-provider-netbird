@@ -78,15 +78,10 @@ func (r *User) Schema(ctx context.Context, req resource.SchemaRequest, resp *res
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "User Name. NetBird does not change a user's name: for a service user a new name replaces the user (its tokens are deleted with it), which needs `is_service_user = true` in the configuration, a name known at plan time, and a user other than the one the provider authenticates as; for a regular user, whose name comes from the identity provider, a change is refused at plan time. A new regular user is an invitation and needs `name` and `email`.",
+				MarkdownDescription: "User Name. NetBird does not change a user's name, so a change is refused at plan time; for a service user under a new name, declare a new `netbird_user` (with new tokens) and remove the old one. A new regular user is an invitation and needs `name` and `email`.",
 				Optional:            true,
 				Computed:            true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.UseStateForUnknown(),
-					stringplanmodifier.RequiresReplaceIf(serviceUserRenamed,
-						"A service user's name cannot be changed, so a new name replaces the user.",
-						"A service user's name cannot be changed, so a new name replaces the user."),
-				},
+				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"last_login": schema.StringAttribute{
 				MarkdownDescription: "User Last Login timedate",
@@ -212,7 +207,6 @@ func (r *User) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		Name:          stringDefaultPointer(data.Name, nil),
 	}
 
-	planned := data
 	user, err := r.client.Users.Create(ctx, userReq)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating user", err.Error())
@@ -223,26 +217,6 @@ func (r *User) Create(ctx context.Context, req resource.CreateRequest, resp *res
 
 	if resp.Diagnostics.HasError() {
 		return
-	}
-
-	// The create request has no block flag, so a planned is_blocked = true
-	// (also on a replacement) is set by an update right after the create.
-	if planned.IsBlocked.Equal(types.BoolValue(true)) && !user.IsBlocked {
-		blocked, err := r.client.Users.Update(ctx, user.Id, api.UserRequest{
-			Role:       user.Role,
-			AutoGroups: user.AutoGroups,
-			IsBlocked:  true,
-		})
-		if err != nil {
-			// The user exists: keep it in state and report the error.
-			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
-			resp.Diagnostics.AddError("Error blocking the new user", err.Error())
-			return
-		}
-		resp.Diagnostics.Append(userResourceAPIToTerraform(ctx, blocked, &data)...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
 	}
 
 	// Save data into Terraform state
@@ -344,26 +318,11 @@ func (r *User) ImportState(ctx context.Context, req resource.ImportStateRequest,
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
-// serviceUserRenamed requires replacement when a service user's configured
-// name changes: UserRequest (v0.83, v0.82) carries no name, and a service
-// user's name is its own, so a new name means a new user.
-func serviceUserRenamed(ctx context.Context, req planmodifier.StringRequest, resp *stringplanmodifier.RequiresReplaceIfFuncResponse) {
-	if req.State.Raw.IsNull() || req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() || req.ConfigValue.Equal(req.StateValue) {
-		return
-	}
-	var stateService, configService types.Bool
-	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("is_service_user"), &stateService)...)
-	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("is_service_user"), &configService)...)
-	// ModifyPlan refuses the other combinations; the replacement creates a
-	// service user only when the configuration says so.
-	resp.RequiresReplace = stateService.ValueBool() && configService.Equal(types.BoolValue(true))
-}
-
 // ModifyPlan refuses what the API cannot do or what would fail after the
 // old user is deleted. UserRequest (v0.83, v0.82) carries only role,
-// auto_groups and is_blocked, so a name or email change is either a
-// replacement or impossible; a new regular user is an invitation, which needs
-// a name and an email.
+// auto_groups and is_blocked, so a name or email change is impossible; the
+// create request has no block flag and a service user cannot be an owner;
+// a new regular user is an invitation, which needs a name and an email.
 func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
 		return
@@ -387,6 +346,12 @@ func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, r
 	// service user is created without an email.
 	newUser := func() {
 		switch {
+		case config.IsBlocked.Equal(types.BoolValue(true)):
+			resp.Diagnostics.AddAttributeError(path.Root("is_blocked"), "Cannot create a blocked user",
+				"NetBird creates users unblocked (the create request has no block flag); create the user first, then set is_blocked = true.")
+		case configuredService && config.Role.Equal(types.StringValue("owner")):
+			resp.Diagnostics.AddAttributeError(path.Root("role"), "Service users cannot be owners",
+				"NetBird refuses the owner role for a service user.")
 		case configuredRegular && (missing(config.Email) || missing(config.Name)):
 			resp.Diagnostics.AddError("Name and email required",
 				"A regular user is created as an invitation, which needs a name and an email; set both, or is_service_user = true for a service user.")
@@ -435,22 +400,17 @@ func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, r
 		resp.Diagnostics.AddAttributeError(path.Root("email"), "Email cannot be changed",
 			fmt.Sprintf("NetBird does not change a user's email (%q). Keep the current email in the configuration, or leave it out.", state.Email.ValueString()))
 	}
-	if config.Name.IsNull() || config.Name.Equal(state.Name) {
-		return
-	}
 	switch {
+	case config.Name.IsNull() || config.Name.Equal(state.Name):
 	case config.Name.IsUnknown():
 		resp.Diagnostics.AddAttributeError(path.Root("name"), "Name not known",
-			"NetBird does not change a user's name (a service user's new name replaces it), so the plan needs the value to decide; it is not known until apply.")
-	case !state.IsServiceUser.ValueBool():
+			"NetBird does not change a user's name, so the plan needs the value to tell it is unchanged; it is not known until apply.")
+	case state.IsServiceUser.ValueBool():
+		resp.Diagnostics.AddAttributeError(path.Root("name"), "Name cannot be changed",
+			fmt.Sprintf("NetBird does not change a service user's name (%q). Keep the current name, or declare a new netbird_user under the new name (with new tokens) and remove this one.", state.Name.ValueString()))
+	default:
 		resp.Diagnostics.AddAttributeError(path.Root("name"), "Name cannot be changed",
 			fmt.Sprintf("A regular user's name (%q) comes from the identity provider and NetBird does not change it. Keep the current name in the configuration, or leave it out.", state.Name.ValueString()))
-	case !configuredService:
-		resp.Diagnostics.AddAttributeError(path.Root("is_service_user"), "Service user kind required",
-			"Renaming a service user replaces it, and the new user is created as the configuration says: set is_service_user = true, or keep the current name.")
-	case state.IsCurrent.ValueBool():
-		resp.Diagnostics.AddAttributeError(path.Root("name"), "Cannot replace the current user",
-			"This service user is the one the provider authenticates as, and NetBird refuses to delete it; rename it with another identity's token.")
 	}
 }
 
