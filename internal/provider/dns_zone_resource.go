@@ -316,9 +316,11 @@ func (r *DNSZone) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest
 		return
 	}
 	// The server refuses to create a zone with a group that does not exist,
-	// and a replacement (also one Terraform plans as a create, for a tainted
-	// zone) deletes the old zone first: look the known groups up.
-	if r.client == nil || configured.IsUnknown() {
+	// and a domain replacement deletes the old zone first: look the known
+	// groups up. Only then, with the zone just refreshed from the configured
+	// server; a first create needs no request at plan time (a refused create
+	// loses nothing), and the endpoint may not be known yet.
+	if !replaces || r.client == nil || configured.IsUnknown() {
 		return
 	}
 	for _, e := range configured.Elements() {
