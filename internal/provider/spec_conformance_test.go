@@ -39,6 +39,7 @@ func Test_SpecConformance(t *testing.T) {
 
 	seenAllowlist := map[string]bool{}
 	checked := map[string]bool{}
+	specRenamedApplied = map[string]bool{}
 	walk := &specWalk{t: t, spec: spec, seen: seenAllowlist, checked: checked, expanded: map[string]bool{}, projected: map[string]bool{}}
 	// A flattened child schema of a read-only parent is read-only throughout;
 	// the child is checked as its own entry, so the flag is carried over.
@@ -121,7 +122,7 @@ func Test_SpecConformance(t *testing.T) {
 				if prop.readOnly && a.configurable {
 					t.Errorf("%s: %s is read-only in the spec but %q is configurable", rm.typeName, key, a.name)
 				}
-				walk.checkNested(rm.typeName, key, prop, a, 1)
+				walk.checkNested(rm.typeName, key, key, prop, a, 1)
 			}
 		}
 	}
@@ -140,8 +141,8 @@ func Test_SpecConformance(t *testing.T) {
 		}
 	}
 	for key := range specRenamed {
-		if !checked[key] {
-			t.Errorf("specRenamed lists %s, which no checked schema has any more; remove it", key)
+		if !specRenamedApplied[key] {
+			t.Errorf("specRenamed lists %s, which no attribute lookup used; remove it or fix it", key)
 		}
 	}
 	for key := range specProjected {
@@ -298,10 +299,16 @@ func schemaMembers(attributes map[string]rschema.Attribute, blocks map[string]rs
 // specRenamed says otherwise.
 func attrName(key, property string) string {
 	if a, ok := specRenamed[key]; ok {
+		specRenamedApplied[key] = true
 		return a
 	}
 	return property
 }
+
+// specRenamedApplied records the specRenamed entries a lookup used, so an
+// entry every use overrides (or one for a property no attribute is looked up
+// for) is reported stale.
+var specRenamedApplied = map[string]bool{}
 
 // specProperty is a resolved request property: whether it is read-only and,
 // when it refers to a component schema, which one.
@@ -749,7 +756,11 @@ func (w *specWalk) checkScalar(typeName, key string, prop specProperty, a attrIn
 	members := prop.members()
 	var props map[string]specProperty
 	if members != nil {
-		props, _ = w.spec.propertiesOf(*members)
+		var ok bool
+		if props, ok = w.spec.propertiesOf(*members); !ok {
+			w.t.Errorf("%s: the members of %s do not resolve in the spec", typeName, key)
+			return
+		}
 	}
 	if len(props) == 0 {
 		if projected {
@@ -762,8 +773,12 @@ func (w *specWalk) checkScalar(typeName, key string, prop specProperty, a attrIn
 		return
 	}
 	w.projected[key] = true
-	if _, ok := props[leaf]; !ok {
+	if lp, ok := props[leaf]; !ok {
 		w.t.Errorf("%s: specProjected maps %s to its member %q, which the spec does not have", typeName, key, leaf)
+	} else if (lp.readOnly || prop.readOnly || (prop.array && prop.itemReadOnly)) && a.configurable {
+		w.t.Errorf("%s: %s.%s is read-only in the spec but %q, which holds it, is configurable", typeName, key, leaf, a.name)
+	} else if lp.members() != nil {
+		w.t.Errorf("%s: specProjected maps %s to %q, which is not a single value in the spec", typeName, key, leaf)
 	}
 	for _, name := range sortedKeys(props) {
 		if name == leaf {
@@ -789,7 +804,9 @@ const specMaxDepth = 12
 // models (a component, an array's item component, or an inline object) with
 // the attribute's own members, with the same rules as the top level. A
 // read-only parent makes every member read-only.
-func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrInfo, depth int) {
+// key is the property's lookup key (component or request path, whichever the
+// lists use), reqPath its full request path.
+func (w *specWalk) checkNested(typeName, key, reqPath string, prop specProperty, a attrInfo, depth int) {
 	w.t.Helper()
 	if a.children == nil {
 		w.checkScalar(typeName, key, prop, a)
@@ -832,7 +849,7 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 		p.readOnly = p.readOnly || prop.readOnly || (prop.array && prop.itemReadOnly)
 		// The request path names this use of a shared component; an entry
 		// for the path wins over one for the component.
-		pathKey, compKey := key+"."+name, label+"."+name
+		pathKey, compKey := reqPath+"."+name, label+"."+name
 		w.checked[pathKey], w.checked[compKey] = true, true
 		key := compKey
 		if specListed(pathKey) {
@@ -845,7 +862,7 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 				continue
 			}
 			w.expanded[key] = true
-			w.checkNested(typeName, key, specProperty{readOnly: p.readOnly, items: p.items, inline: p.inline, array: true}, a, depth+1)
+			w.checkNested(typeName, key, pathKey, specProperty{readOnly: p.readOnly, items: p.items, inline: p.inline, array: true, itemReadOnly: p.itemReadOnly}, a, depth+1)
 			continue
 		}
 		if _, listed := specUnmodelled[key]; listed {
@@ -866,7 +883,7 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 		if p.readOnly && c.configurable {
 			w.t.Errorf("%s: %s is read-only in the spec but %q is configurable", typeName, key, c.name)
 		}
-		w.checkNested(typeName, key, p, c, depth+1)
+		w.checkNested(typeName, key, pathKey, p, c, depth+1)
 	}
 }
 
@@ -890,6 +907,12 @@ func Test_specPathKeys(t *testing.T) {
 	}
 	fixture := `
 schemas:
+  Top:
+    type: object
+    properties:
+      rules:
+        type: array
+        items: {$ref: '#/components/schemas/Rule'}
   Rule:
     type: object
     properties:
@@ -906,26 +929,29 @@ schemas:
 	}
 	spec := openAPISpec{schemas: doc.Schemas}
 	leaf := func(name string) attrInfo { return attrInfo{name: name, configurable: true} }
-	attrs := map[string]attrInfo{
+	rule := attrInfo{name: "rule", configurable: true, children: map[string]attrInfo{
 		"src": {name: "src", configurable: true, children: map[string]attrInfo{"id": leaf("id"), "kind": leaf("kind")}},
 		"dst": {name: "dst", configurable: true, children: map[string]attrInfo{"id": leaf("id"), "kind_name": leaf("kind_name")}},
-	}
-	specRenamed["Rule.dst.kind"] = "kind_name"
-	defer delete(specRenamed, "Rule.dst.kind")
-	if !specListed("Rule.dst.kind") || specListed("Rule.src.kind") {
+	}}
+	// The full request path, one reference above Rule.
+	specRenamed["Top.rules.dst.kind"] = "kind_name"
+	defer delete(specRenamed, "Top.rules.dst.kind")
+	if !specListed("Top.rules.dst.kind") || specListed("Top.rules.src.kind") {
 		t.Fatal("only the destination path is listed")
 	}
+	specRenamedApplied = map[string]bool{}
 	walk := &specWalk{t: t, spec: spec, seen: map[string]bool{}, checked: map[string]bool{}, expanded: map[string]bool{}, projected: map[string]bool{}}
-	props, ok := spec.properties("Rule")
+	props, ok := spec.properties("Top")
 	if !ok {
-		t.Fatal("Rule did not resolve")
+		t.Fatal("Top did not resolve")
 	}
-	for _, name := range sortedKeys(props) {
-		walk.checkNested("test", "Rule."+name, props[name], attrs[name], 1)
-	}
-	for _, key := range []string{"Rule.dst.kind", "Rule.src.kind", "Res.kind"} {
+	walk.checkNested("test", "Top.rules", "Top.rules", props["rules"], rule, 1)
+	for _, key := range []string{"Top.rules.dst.kind", "Top.rules.src.kind", "Res.kind"} {
 		if !walk.checked[key] {
 			t.Errorf("%s was not recorded as checked", key)
 		}
+	}
+	if !specRenamedApplied["Top.rules.dst.kind"] {
+		t.Error("the path override was not used")
 	}
 }
