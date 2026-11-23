@@ -43,7 +43,7 @@ resource "netbird_user" "real_user" {
 - `auto_groups` (List of String) Group IDs to auto-assign to peers registered by this user
 - `email` (String) User Email. NetBird does not change a user's email: a change is refused at plan time.
 - `is_blocked` (Boolean) If set to true then user is blocked and can't use the system
-- `is_service_user` (Boolean) If set to true, creates a Service Account User. Left out, a new user is a regular user and an existing one keeps what it is, as for an imported identity provider user. A configured change replaces the user.
+- `is_service_user` (Boolean) If set to true, creates a Service Account User. Left out, a new user is a regular user and an existing one keeps what it is, as for an imported identity provider user. NetBird does not change a user's kind, so a change is refused; declare a new `netbird_user` of the other kind and remove the old one.
 - `name` (String) User Name. NetBird does not change a user's name, so a change is refused at plan time; for a service user under a new name, declare a new `netbird_user` (with new tokens) and remove the old one. A new regular user is an invitation and needs `name` and `email`.
 - `role` (String) User's NetBird account role (owner|admin|user|billing_admin|auditor|network_admin).
 

@@ -4,7 +4,6 @@ package provider
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"regexp"
 	"testing"
@@ -94,9 +93,9 @@ func testUserResource(rName, groups, blocked, role string) string {
 }`, rName, rName, groups, blocked, role)
 }
 
-// Test_User_ServiceUserNameAndKind: the API does not change a user's name or
-// email, so both changes are refused at plan time; a kind change replaces the
-// user, and is_service_user left out keeps what the user is.
+// Test_User_ServiceUserNameAndKind: the API does not change a user's name,
+// email or kind, so changes are refused at plan time, or at apply for a value
+// known only then; is_service_user left out keeps what the user is.
 func Test_User_ServiceUserNameAndKind(t *testing.T) {
 	testE2E(t)
 	rName := "u" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
@@ -108,6 +107,18 @@ func Test_User_ServiceUserNameAndKind(t *testing.T) {
   role = "user"
   %s
 }`, rName, name, extra)
+	}
+	// fromApply sets the name from a value Terraform knows only at apply.
+	fromApply := func(_, name string) string {
+		return fmt.Sprintf(`resource "terraform_data" "name" {
+  input = %q
+}
+
+resource "netbird_user" %q {
+  name            = terraform_data.name.output
+  role            = "user"
+  is_service_user = true
+}`, name, rName)
 	}
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testEnsureManagementRunning(t) },
@@ -135,14 +146,35 @@ func Test_User_ServiceUserNameAndKind(t *testing.T) {
 				ExpectError: regexp.MustCompile(`Name cannot be changed`),
 			},
 			{
-				// A kind change replaces the user; checked on the plan and
-				// stopped before apply, which would send an invitation.
-				Config: config(rName, "is_service_user = false\n  email = \"someone@example.com\""),
-				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
-					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionDestroyBeforeCreate),
-					stopBeforeApply{},
-				}},
-				ExpectError: regexp.MustCompile(`stopped before apply`),
+				PlanOnly:    true,
+				Config:      config(rName, "is_service_user = false\n  email = \"someone@example.com\""),
+				ExpectError: regexp.MustCompile(`User kind cannot be changed`),
+			},
+			{
+				// A name known only at apply that resolves to the current one
+				// applies.
+				Config: fromApply(rName, rName),
+			},
+			{
+				// One that resolves to another name is refused at apply,
+				// before anything is written.
+				Config:      fromApply(rName, rName+"-renamed"),
+				ExpectError: regexp.MustCompile(`Name cannot be changed`),
+			},
+			{
+				Config: config(rName, "is_service_user = true"),
+				Check: func(*terraform.State) error {
+					users, err := testClient().Users.List(context.Background())
+					if err != nil {
+						return err
+					}
+					for _, u := range users {
+						if u.Id == createdID && u.Name == rName {
+							return nil
+						}
+					}
+					return fmt.Errorf("user %s is not on the server as %s", createdID, rName)
+				},
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 			{
@@ -158,12 +190,4 @@ func Test_User_ServiceUserNameAndKind(t *testing.T) {
 			},
 		},
 	})
-}
-
-// stopBeforeApply ends a step after its plan checks, so a plan can be checked
-// without applying it.
-type stopBeforeApply struct{}
-
-func (stopBeforeApply) CheckPlan(_ context.Context, _ plancheck.CheckPlanRequest, resp *plancheck.CheckPlanResponse) {
-	resp.Error = errors.New("stopped before apply")
 }

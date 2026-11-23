@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
+	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
 
@@ -97,14 +100,6 @@ func Test_user_modifyPlanNameEmail(t *testing.T) {
 		values["is_service_user"] = tftypes.NewValue(tftypes.Bool, service)
 		return tftypes.NewValue(typ, values)
 	}
-	current := func(v tftypes.Value) tftypes.Value {
-		var m map[string]tftypes.Value
-		if err := v.As(&m); err != nil {
-			t.Fatal(err)
-		}
-		m["is_current"] = tftypes.NewValue(tftypes.Bool, true)
-		return tftypes.NewValue(typ, m)
-	}
 	with := func(v tftypes.Value, attr string, value tftypes.Value) tftypes.Value {
 		var m map[string]tftypes.Value
 		if err := v.As(&m); err != nil {
@@ -121,29 +116,25 @@ func Test_user_modifyPlanNameEmail(t *testing.T) {
 		state, config tftypes.Value
 		wantError     string
 	}{
-		"service rename, kind left out":     {object("ci", "", true), object("ci2", nil, nil), "Name cannot be changed"},
-		"service rename, name unknown":      {object("ci", "", true), object(tftypes.UnknownValue, nil, true), "Name not known"},
-		"kind not known":                    {object("ci", "", true), object("ci", nil, tftypes.UnknownValue), "User kind not known"},
-		"email not known":                   {object("alice", "a@example.com", false), object("alice", tftypes.UnknownValue, false), "Email not known"},
-		"regular to service with an email":  {object("Alice", "a@example.com", false), object("ci", "a@example.com", true), "Service users have no email"},
-		"current user changes kind":         {current(object("ci", "", true)), object("Alice", "a@example.com", false), "Cannot replace the current user"},
-		"new service user with an email":    {tftypes.NewValue(typ, nil), object("ci", "ci@example.com", true), "Service users have no email"},
-		"current user renamed":              {current(object("ci", "", true)), object("ci2", nil, true), "Name cannot be changed"},
-		"new regular user without email":    {tftypes.NewValue(typ, nil), object("Alice", nil, nil), "Name and email required"},
-		"new service user without email":    {tftypes.NewValue(typ, nil), object("ci", nil, true), ""},
-		"new regular user with both":        {tftypes.NewValue(typ, nil), object("Alice", "a@example.com", false), ""},
-		"service to regular with an email":  {object("ci", "", true), object("Alice", "a@example.com", false), ""},
-		"service to regular without email":  {object("ci", "", true), object("ci", nil, false), "Name and email required"},
-		"service to regular, email unknown": {object("ci", "", true), object("Alice", tftypes.UnknownValue, false), "Name and email not known"},
-		"regular user renamed":              {object("alice", "a@example.com", false), object("alicia", nil, false), "Name cannot be changed"},
-		"email changed":                     {object("ci", "a@example.com", true), object(nil, "b@example.com", true), "Email cannot be changed"},
-		"service user renamed":              {object("ci", "", true), object("ci2", nil, true), "Name cannot be changed"},
-		"unchanged name":                    {object("alice", "a@example.com", false), object("alice", "a@example.com", false), ""},
-		"name and email left out":           {object("alice", "a@example.com", false), object(nil, nil, false), ""},
-		"new blocked user":                  {tftypes.NewValue(typ, nil), blocked(object("ci", nil, true)), "Cannot create a blocked user"},
-		"new service user as owner":         {tftypes.NewValue(typ, nil), owner(object("ci", nil, true)), "Service users cannot be owners"},
-		"regular to service as owner":       {object("Alice", "a@example.com", false), owner(object("ci", nil, true)), "Service users cannot be owners"},
-		"name from an expression":           {object("alice", "a@example.com", false), object(tftypes.UnknownValue, nil, false), "Name not known"},
+		"new regular user without email": {tftypes.NewValue(typ, nil), object("Alice", nil, nil), "Name and email required"},
+		"new service user without email": {tftypes.NewValue(typ, nil), object("ci", nil, true), ""},
+		"new regular user with both":     {tftypes.NewValue(typ, nil), object("Alice", "a@example.com", false), ""},
+		"new service user with an email": {tftypes.NewValue(typ, nil), object("ci", "ci@example.com", true), "Service users have no email"},
+		"new blocked user":               {tftypes.NewValue(typ, nil), blocked(object("ci", nil, true)), "Cannot create a blocked user"},
+		"new service user as owner":      {tftypes.NewValue(typ, nil), owner(object("ci", nil, true)), "Cannot create an owner"},
+		"invitation as owner":            {tftypes.NewValue(typ, nil), owner(object("Alice", "a@example.com", false)), "Cannot create an owner"},
+		"kind changed":                   {object("ci", "", true), object("Alice", "a@example.com", false), "User kind cannot be changed"},
+		"kind left out":                  {object("ci", "", true), object("ci", nil, nil), ""},
+		"kind not known":                 {object("ci", "", true), object("ci", nil, tftypes.UnknownValue), ""},
+		"service user renamed":           {object("ci", "", true), object("ci2", nil, true), "Name cannot be changed"},
+		"service rename, kind left out":  {object("ci", "", true), object("ci2", nil, nil), "Name cannot be changed"},
+		"regular user renamed":           {object("alice", "a@example.com", false), object("alicia", nil, false), "Name cannot be changed"},
+		"email changed":                  {object("ci", "a@example.com", true), object(nil, "b@example.com", true), "Email cannot be changed"},
+		"email not known":                {object("alice", "a@example.com", false), object("alice", tftypes.UnknownValue, false), ""},
+		"name from an expression":        {object("alice", "a@example.com", false), object(tftypes.UnknownValue, nil, false), ""},
+		"unchanged name":                 {object("alice", "a@example.com", false), object("alice", "a@example.com", false), ""},
+		"name and email left out":        {object("alice", "a@example.com", false), object(nil, nil, false), ""},
+		"existing user blocked":          {object("ci", "", true), blocked(object("ci", nil, true)), ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			req := resource.ModifyPlanRequest{
@@ -170,16 +161,21 @@ func Test_user_modifyPlanNameEmail(t *testing.T) {
 	}
 }
 
-// The resource reads a response without the service-user flag as a regular
-// user (compatibility; current servers always send it), whatever the prior
-// value.
+// The resource reads a response without the service-user flag (compatibility;
+// current servers always send it) as the kind it knows, and as a regular user
+// without one, as on import.
 func Test_userResourceAPIToTerraform_absentFlag(t *testing.T) {
-	data := UserModel{IsServiceUser: types.BoolValue(true), AutoGroups: types.ListNull(types.StringType)}
-	if d := userResourceAPIToTerraform(context.Background(), &api.User{Id: "u1", Role: "user", Status: api.UserStatusActive}, &data); d.HasError() {
-		t.Fatal(d)
-	}
-	if !data.IsServiceUser.Equal(types.BoolValue(false)) {
-		t.Errorf("expected false for an absent flag, found %v", data.IsServiceUser)
+	for name, tc := range map[string]struct{ prior, want types.Bool }{
+		"known service user": {types.BoolValue(true), types.BoolValue(true)},
+		"import":             {types.BoolNull(), types.BoolValue(false)},
+	} {
+		data := UserModel{IsServiceUser: tc.prior, AutoGroups: types.ListNull(types.StringType)}
+		if d := userResourceAPIToTerraform(context.Background(), &api.User{Id: "u1", Role: "user", Status: api.UserStatusActive}, &data); d.HasError() {
+			t.Fatal(d)
+		}
+		if !data.IsServiceUser.Equal(tc.want) {
+			t.Errorf("%s: expected %v, found %v", name, tc.want, data.IsServiceUser)
+		}
 	}
 }
 
@@ -219,5 +215,50 @@ func Test_user_planRegularByDefault(t *testing.T) {
 	}
 	if !got.Equal(types.BoolValue(false)) {
 		t.Errorf("expected is_service_user planned false, found %v", got)
+	}
+}
+
+// A name known only at apply that resolves to another name is refused by the
+// update before it sends anything.
+func Test_user_updateRefusesResolvedRename(t *testing.T) {
+	ctx := context.Background()
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	r := &User{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	value := func(name string) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["id"] = tftypes.NewValue(tftypes.String, "u1")
+		values["name"] = tftypes.NewValue(tftypes.String, name)
+		values["email"] = tftypes.NewValue(tftypes.String, "")
+		values["role"] = tftypes.NewValue(tftypes.String, "user")
+		values["is_service_user"] = tftypes.NewValue(tftypes.Bool, true)
+		values["auto_groups"] = tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{})
+		return tftypes.NewValue(typ, values)
+	}
+	resp := resource.UpdateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: value("ci")}}
+	r.Update(ctx, resource.UpdateRequest{
+		Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: value("ci2")},
+		Config: tfsdk.Config{Schema: sch.Schema, Raw: value("ci2")},
+		State:  tfsdk.State{Schema: sch.Schema, Raw: value("ci")},
+	}, &resp)
+	found := false
+	for _, d := range resp.Diagnostics.Errors() {
+		found = found || d.Summary() == "Name cannot be changed"
+	}
+	if !found || requests != 0 {
+		t.Errorf("expected the rename refused without a request, found %v after %d requests", resp.Diagnostics, requests)
 	}
 }
