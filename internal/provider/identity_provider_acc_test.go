@@ -328,6 +328,16 @@ func Test_IdentityProvider_IgnoredIssuerReplacement(t *testing.T) {
 				Check: resource.ComposeAggregateTestCheckFunc(
 					testRecordID(rNameFull, &createdID),
 					idpTypeOnServer(&createdID, "keycloak"),
+					func(*terraform.State) error {
+						idp, err := testClient().IdentityProviders.Get(context.Background(), createdID)
+						if err != nil {
+							return fmt.Errorf("get identity provider: %w", err)
+						}
+						if idp.Issuer != "https://oauth.id.jumpcloud.com/" {
+							return fmt.Errorf("issuer on the server: expected the configured one, found %q", idp.Issuer)
+						}
+						return nil
+					},
 				),
 			},
 		},
