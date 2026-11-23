@@ -41,9 +41,9 @@ func Test_filterUsers(t *testing.T) {
 			expected: []string{"u3"},
 		},
 		{
-			name:     "regular users count an unset is_service_user as false",
+			name:     "a user without is_service_user matches neither selector",
 			filter:   UsersModel{IsServiceUser: types.BoolValue(false)},
-			expected: []string{"u1", "u2", "u4"},
+			expected: []string{"u1", "u2"},
 		},
 		{
 			name:     "role and is_blocked are both required",

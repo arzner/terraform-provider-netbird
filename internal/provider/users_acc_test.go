@@ -44,19 +44,38 @@ data "netbird_users" "%[1]s" {
 		checkUsersAgainstAPI(ds, func(u api.User) bool { return u.Name == rName }),
 	))
 
-	// A null auto group is refused before any request.
+	// Selectors that would match nothing or everything by mistake are refused
+	// before any request: a null or empty auto group, an empty list, a role
+	// the server does not know.
+	refused := func(selector, want string) resource.TestStep {
+		return resource.TestStep{
+			Config: fmt.Sprintf(`
+data "netbird_users" "%s" {
+  %s
+}
+`, rName, selector),
+			ExpectError: regexp.MustCompile(want),
+		}
+	}
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testEnsureManagementRunning(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{{
-			Config: fmt.Sprintf(`
-data "netbird_users" "%s" {
-  auto_groups = [null]
-}
-`, rName),
-			ExpectError: regexp.MustCompile(`Null List Value`),
-		}},
+		Steps: []resource.TestStep{
+			refused(`auto_groups = [null]`, `Null List Value`),
+			refused(`auto_groups = []`, `(?s)Invalid Attribute Value.*auto_groups`),
+			refused(`auto_groups = [""]`, `(?s)Invalid Attribute Value Length.*auto_groups`),
+			refused(`role = "admn"`, `(?s)Invalid Attribute Value Match.*role`),
+		},
 	})
+
+	// The server filters on is_service_user itself (service_user query);
+	// the account's owner is a regular user.
+	regularUsers := fmt.Sprintf(`
+data "netbird_users" "%s" {
+  is_service_user = false
+}
+`, rName)
+	dsCase(t, regularUsers, checkUsersAgainstAPI(ds, func(u api.User) bool { return u.IsServiceUser != nil && !*u.IsServiceUser }))
 
 	// An email no user has is an empty result, where netbird_user fails with No match.
 	missing := fmt.Sprintf(`

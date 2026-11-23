@@ -50,7 +50,8 @@ it is based on.
   writing.
 - Data sources `netbird_groups` and `netbird_users`, listing groups and users with optional
   filters, sorted by ID (#7; upstream [#225](https://github.com/netbirdio/terraform-provider-netbird/pull/225)
-  by Benjamin Dupuis).
+  by Benjamin Dupuis). `netbird_users` lets the server filter on `is_service_user`, and refuses
+  an unknown `role` and an empty group ID at plan time.
 
 ### Changed
 

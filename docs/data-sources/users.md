@@ -40,7 +40,7 @@ data "netbird_users" "service" {
 - `is_service_user` (Boolean) Only return service users (`true`) or regular users (`false`)
 - `issued` (String) Only return users issued by this source (`api` or `integration`)
 - `name` (String) Only return users with this name
-- `role` (String) Only return users with this role
+- `role` (String) Only return users with this role (`owner`, `admin`, `user`, `billing_admin`, `auditor`, `network_admin`, `agent_network_admin` or `usage_viewer`)
 - `status` (String) Only return users with this status (`active`, `invited` or `blocked`)
 
 ### Read-Only

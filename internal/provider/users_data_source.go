@@ -5,8 +5,12 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
@@ -69,9 +73,9 @@ func (d *UsersDataSource) Schema(ctx context.Context, req datasource.SchemaReque
 				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"role": schema.StringAttribute{
-				MarkdownDescription: "Only return users with this role",
+				MarkdownDescription: "Only return users with this role (`owner`, `admin`, `user`, `billing_admin`, `auditor`, `network_admin`, `agent_network_admin` or `usage_viewer`)",
 				Optional:            true,
-				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
+				Validators:          []validator.String{stringvalidator.OneOf(userRoles...)},
 			},
 			"status": schema.StringAttribute{
 				MarkdownDescription: "Only return users with this status (`active`, `invited` or `blocked`)",
@@ -95,7 +99,11 @@ func (d *UsersDataSource) Schema(ctx context.Context, req datasource.SchemaReque
 				MarkdownDescription: "Only return users having all these auto group IDs, even if they have more",
 				ElementType:         types.StringType,
 				Optional:            true,
-				Validators:          []validator.List{listvalidator.SizeAtLeast(1), listvalidator.NoNullValues()},
+				Validators: []validator.List{
+					listvalidator.SizeAtLeast(1),
+					listvalidator.NoNullValues(),
+					listvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1)),
+				},
 			},
 			"ids": schema.ListAttribute{
 				MarkdownDescription: "IDs of the matching users",
@@ -189,13 +197,19 @@ func filterUsers(ctx context.Context, users []api.User, data UsersModel) ([]api.
 		if u.Issued != nil {
 			issued = *u.Issued
 		}
-		isServiceUser := u.IsServiceUser != nil && *u.IsServiceUser
+		// A user without the flag matches neither explicit selector.
+		serviceUser := -1000
+		if u.IsServiceUser != nil {
+			serviceUser = matchBool(*u.IsServiceUser, data.IsServiceUser)
+		} else if data.IsServiceUser.IsNull() || data.IsServiceUser.IsUnknown() {
+			serviceUser = 0
+		}
 		match := matchString(u.Name, data.Name) +
 			matchString(u.Email, data.Email) +
 			matchString(u.Role, data.Role) +
 			matchString(string(u.Status), data.Status) +
 			matchString(issued, data.Issued) +
-			matchBool(isServiceUser, data.IsServiceUser) +
+			serviceUser +
 			matchBool(u.IsBlocked, data.IsBlocked)
 		m, di := matchListString(ctx, u.AutoGroups, data.AutoGroups)
 		d.Append(di...)
@@ -232,7 +246,7 @@ func (d *UsersDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 		return
 	}
 
-	users, err := d.client.Users.List(ctx)
+	users, err := listUsers(ctx, d.client, data.IsServiceUser)
 	if err != nil {
 		resp.Diagnostics.AddError("Error listing users", err.Error())
 		return
@@ -273,4 +287,50 @@ func usersAPIToTerraform(ctx context.Context, users []api.User, data *UsersModel
 	ret.Append(diag...)
 	data.Ids = l
 	return ret
+}
+
+// userRoles are the roles NetBird knows (v0.83, v0.82: StrRoleToUserRole);
+// the server refuses any other.
+var userRoles = []string{"owner", "admin", "user", "billing_admin", "auditor", "network_admin", "agent_network_admin", "usage_viewer"}
+
+// maxUsersResponse bounds what is read from the users endpoint.
+const maxUsersResponse = 64 << 20
+
+// listUsers lists the account's users. With is_service_user set, the server
+// filters on it (GET /api/users?service_user=...), so an account with many
+// users of the other kind does not have to be downloaded.
+func listUsers(ctx context.Context, client *netbird.Client, serviceUser types.Bool) ([]api.User, error) {
+	if serviceUser.IsNull() || serviceUser.IsUnknown() {
+		return client.Users.List(ctx)
+	}
+	resp, err := client.NewRequest(ctx, http.MethodGet, "/api/users", nil,
+		map[string]string{"service_user": strconv.FormatBool(serviceUser.ValueBool())})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Body == nil {
+		return nil, fmt.Errorf("empty response, HTTP status %d", resp.StatusCode)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxUsersResponse+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxUsersResponse {
+		return nil, fmt.Errorf("users response larger than %d bytes", maxUsersResponse)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		var apiErr struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(body, &apiErr) == nil && apiErr.Message != "" {
+			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, apiErr.Message)
+		}
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	var users []api.User
+	if err := json.Unmarshal(body, &users); err != nil {
+		return nil, fmt.Errorf("decoding the users list: %w", err)
+	}
+	return users, nil
 }
