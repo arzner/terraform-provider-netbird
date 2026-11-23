@@ -160,7 +160,7 @@ resource "netbird_reverse_proxy_service" "tls_backend" {
 - `listen_port` (Number) Port the proxy listens on (L4/TLS only). Set to 0 for auto-assignment.
 - `mode` (String) Service mode: "http" for L7 reverse proxy, "tcp"/"udp"/"tls" for L4 passthrough
 - `pass_host_header` (Boolean) When true, the original client Host header is passed through to the backend
-- `private` (Boolean) When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity and the server generates an access policy from `access_groups` to the cluster's proxy peers. The proxy then skips the service's other authentication (SSO, password, PIN, header auth), even where `auth` still enables it. CIDR access restrictions still apply, matched against the peer's NetBird address; country restrictions do not. Peers reach it only through a proxy of the cluster that has private access enabled (`NB_PROXY_PRIVATE=true` or `--private`, off by default); the server accepts the setting without one. A target with the `bypass` access action must be changed before a service can become private. Requires `mode = "http"`, at least one access group and no bearer auth. Left out, a new service is public and an existing one keeps its setting.
+- `private` (Boolean) When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity and the server generates an access policy from `access_groups` to the cluster's proxy peers. The proxy then skips the service's other authentication (SSO, password, PIN, header auth), even where `auth` still enables it. CIDR access restrictions still apply, matched against the peer's NetBird address; country restrictions do not. Peers reach it only through a proxy of the cluster that has private access enabled (`NB_PROXY_PRIVATE=true` or `--private`, off by default); the server accepts the setting without one. Requires `mode = "http"`, at least one access group, no bearer auth and no target with the `bypass` access action, including one a target keeps from the server while its `access_action` is left out. Left out, a new service is public and an existing one keeps its setting.
 - `rewrite_redirects` (Boolean) When true, Location headers in backend responses are rewritten to replace the backend address with the public-facing domain
 
 ### Read-Only
@@ -247,10 +247,11 @@ Required:
 
 Optional:
 
+- `access_action` (String) Access action once this target's path prefix is selected (HTTP services only): `inherit` applies the service's authentication, `bypass` skips it (not allowed for private services), `block` denies access. Left out, the server keeps the current action of the target at this path (`inherit` for a new one). While a current target has `bypass` or `block`, an update that sets no action on any target must keep that target's path, and if two current targets share a path, every target of the update must set its action. The plan warns about both, since it cannot tell an update from a replacement, and an in-place update stops before writing anything. `bypass` and `block` are refused for TCP, UDP and TLS services, need a canonical path prefix, and need each enabled target on its own path. Once any enabled target has `bypass` or `block`, the proxy checks request paths strictly for the whole service, also for targets that inherit: a request whose path has `//`, `\`, `;`, dot segments, control characters or an escaped `/`, `\`, `.` or `%` gets HTTP 400.
 - `enabled` (Boolean) Whether this target is enabled
 - `host` (String) Backend IP or domain for this target. If omitted, the API resolves it from the target peer.
 - `options` (Attributes) Per-target options (see [below for nested schema](#nestedatt--targets--options))
-- `path` (String) URL path prefix for this target. Defaults to "/" if omitted.
+- `path` (String) URL path prefix for this target. Left out, no path is sent and the server uses "/"; the plan shows null, also for a target that has another path now.
 
 <a id="nestedatt--targets--options"></a>
 ### Nested Schema for `targets.options`
@@ -258,6 +259,7 @@ Optional:
 Optional:
 
 - `custom_headers` (Map of String, Sensitive) Extra headers sent to the backend (HTTP only). Marked sensitive since values commonly carry credentials, e.g. an `Authorization` header.
+- `direct_upstream` (Boolean) Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services). The server refuses a loopback, multicast or link-local IP address as the host (except for a subnet target of a TCP, UDP or TLS service, where it only requires a host), and a proxy started with `NB_PROXY_DIRECT_UPSTREAM_BLOCK_PRIVATE` refuses, when it connects, addresses in a fixed list of special-use ranges (private, CGNAT, loopback, link-local, unique local, documentation, multicast and similar); any other address is dialled, publicly reachable or not. Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Applies to HTTP services only: for TCP, UDP and TLS services NetBird stores the flag but does not pass it to the proxy, and the plan warns. Defaults to false.
 - `path_rewrite` (String) Controls how the request path is rewritten before forwarding. Default strips the matched prefix. "preserve" keeps the full original path. (HTTP only)
 - `proxy_protocol` (Boolean) Send PROXY Protocol v2 header to this backend (TCP/TLS only)
 - `request_timeout` (String) Per-target response timeout as a Go duration string (e.g. "30s", "2m")
@@ -275,3 +277,4 @@ Optional:
 - `allowed_countries` (List of String) ISO 3166-1 alpha-2 country codes to allow
 - `blocked_cidrs` (List of String) CIDR blocklist
 - `blocked_countries` (List of String) ISO 3166-1 alpha-2 country codes to block
+- `crowdsec_mode` (String) CrowdSec IP reputation mode: `off`, `enforce` or `observe`. The server accepts each mode whether or not the cluster supports CrowdSec: with `enforce`, a proxy without a ready CrowdSec checker denies every request from outside the tunnel, while `observe` lets them through. Requests over the NetBird tunnel, including all access to a private service, are not checked against CrowdSec. Left out, the server treats it as `off`.

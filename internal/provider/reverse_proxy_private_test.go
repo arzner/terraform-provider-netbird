@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -412,5 +414,742 @@ func Test_reverseProxyService_accessPlanModifiers(t *testing.T) {
 	g1 := types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g1")})
 	if got := planList(g1); !got.Equal(g1) {
 		t.Errorf("access_groups from state: expected [g1], found %v", got)
+	}
+}
+
+func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
+	ctx := context.Background()
+	r := &ReverseProxyService{}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	listType, ok := typ.AttributeTypes["targets"].(tftypes.List)
+	if !ok {
+		t.Fatal("targets is not a list")
+	}
+	targetType, ok := listType.ElementType.(tftypes.Object)
+	if !ok {
+		t.Fatal("a target is not an object")
+	}
+	unknown := tftypes.UnknownValue
+	// target builds a target at path ("" leaves it out) with an access action
+	// (nil leaves it out, unknown is not known yet).
+	target := func(path, action any) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range targetType.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["target_id"] = tftypes.NewValue(tftypes.String, "p1")
+		switch p := path.(type) {
+		case tftypes.Value:
+			values["path"] = p
+		case string:
+			if p != "" {
+				values["path"] = tftypes.NewValue(tftypes.String, p)
+			}
+		}
+		values["access_action"] = tftypes.NewValue(tftypes.String, action)
+		return tftypes.NewValue(targetType, values)
+	}
+	targets := func(ts ...tftypes.Value) tftypes.Value { return tftypes.NewValue(listType, ts) }
+	disabled := func(tv tftypes.Value) tftypes.Value {
+		var m map[string]tftypes.Value
+		if err := tv.As(&m); err != nil {
+			t.Fatal(err)
+		}
+		m["enabled"] = tftypes.NewValue(tftypes.Bool, false)
+		return tftypes.NewValue(targetType, m)
+	}
+	unknownPath := tftypes.NewValue(tftypes.String, unknown)
+	groups := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{tftypes.NewValue(tftypes.String, "g1")})
+	on := tftypes.NewValue(tftypes.Bool, true)
+	off := tftypes.NewValue(tftypes.Bool, false)
+	http := tftypes.NewValue(tftypes.String, "http")
+	type vals map[string]tftypes.Value
+	object := func(v vals) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		for n, x := range v {
+			values[n] = x
+		}
+		return tftypes.NewValue(typ, values)
+	}
+	bypassAtAdmin := targets(target("", "inherit"), target("/admin", "bypass"))
+	for name, tc := range map[string]struct {
+		state, config, plan vals
+		wantError           string
+		noHint              bool // no "Service is private from its state" error
+		inPlace             bool // wantError is a warning: only an in-place update meets it
+	}{
+		"new, configured bypass": {
+			config:    vals{"private": on, "access_groups": groups, "targets": targets(target("/a", "bypass"))},
+			plan:      vals{"private": on, "access_groups": groups, "targets": targets(target("/a", "bypass"))},
+			wantError: "targets[0].access_action",
+		},
+		"new, left out": {
+			config: vals{"private": on, "access_groups": groups, "targets": targets(target("/a", nil))},
+			plan:   vals{"private": on, "access_groups": groups, "targets": targets(target("/a", unknown))},
+		},
+		"made private, bypass kept from state": {
+			state:   vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config:  vals{"private": on, "targets": targets(target("", nil), target("/admin", nil))},
+			plan:    vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/admin", unknown))},
+			inPlace: true, wantError: "targets[1].access_action",
+		},
+		"made private, bypass at / kept for a target without a path": {
+			state:   vals{"private": off, "mode": http, "access_groups": groups, "targets": targets(target("/", "bypass"))},
+			config:  vals{"private": on, "targets": targets(target("", nil))},
+			plan:    vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown))},
+			inPlace: true, wantError: "targets[0].access_action",
+		},
+		"made private, bypass replaced": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config: vals{"private": on, "targets": targets(target("", nil), target("/admin", "block"))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/admin", "block"))},
+		},
+		"made private, target moved off the bypass path, no action set": {
+			state:   vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config:  vals{"private": on, "targets": targets(target("", nil), target("/other", nil))},
+			plan:    vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/other", unknown))},
+			inPlace: true, wantError: "Access action needed when a controlled path goes",
+		},
+		"made private, target moved off the bypass path, an action set": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config: vals{"private": on, "targets": targets(target("", "inherit"), target("/other", nil))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", "inherit"), target("/other", unknown))},
+		},
+		"public, block target removed, no action set": {
+			state:   vals{"private": off, "mode": http, "targets": targets(target("", "inherit"), target("/admin", "block"))},
+			config:  vals{"targets": targets(target("", nil))},
+			plan:    vals{"private": off, "mode": http, "targets": targets(target("", unknown))},
+			inPlace: true, wantError: "Access action needed when a controlled path goes",
+		},
+		"public, block target removed, action set": {
+			state:  vals{"private": off, "mode": http, "targets": targets(target("", "inherit"), target("/admin", "block"))},
+			config: vals{"targets": targets(target("", "inherit"))},
+			plan:   vals{"private": off, "mode": http, "targets": targets(target("", "inherit"))},
+		},
+		"public, several targets at one path with left-out actions": {
+			state:   vals{"private": off, "mode": http, "targets": targets(target("", "inherit"), target("", "inherit"), target("/admin", "block"))},
+			config:  vals{"name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target("", nil), target("", nil), target("/admin", nil))},
+			plan:    vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target("", unknown), target("", unknown), target("/admin", unknown))},
+			inPlace: true, wantError: "Access action needed on every target",
+		},
+		"made private, action from an expression on the bypass path": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config: vals{"private": on, "targets": targets(target("", nil), target("/admin", unknown))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/admin", unknown))},
+		},
+		"made private, each kept path taken once": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config: vals{"private": on, "targets": targets(target("", nil), target("/admin", "inherit"), target("/admin", nil))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/admin", "inherit"), target("/admin", unknown))},
+		},
+		"new private, a target not known yet next to a bypass": {
+			config:    vals{"private": on, "access_groups": groups, "targets": targets(tftypes.NewValue(targetType, unknown), target("/a", "bypass"))},
+			plan:      vals{"private": on, "access_groups": groups, "targets": targets(tftypes.NewValue(targetType, unknown), target("/a", "bypass"))},
+			wantError: "targets[1].access_action",
+		},
+		"new private, a target not known yet": {
+			config: vals{"private": on, "access_groups": groups, "targets": targets(tftypes.NewValue(targetType, unknown), target("/a", "block"))},
+			plan:   vals{"private": on, "access_groups": groups, "targets": targets(tftypes.NewValue(targetType, unknown), target("/a", "block"))},
+		},
+		"made private, bypass kept before a path not known yet": {
+			state:   vals{"private": off, "mode": http, "access_groups": groups, "targets": targets(target("/admin", "bypass"), target("", "inherit"))},
+			config:  vals{"private": on, "targets": targets(target("/admin", nil), target(unknownPath, nil))},
+			plan:    vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("/admin", unknown), target(unknownPath, unknown))},
+			inPlace: true, wantError: "targets[0].access_action",
+		},
+		"made private, bypass path after a path not known yet": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": targets(target("", "inherit"), target("/admin", "bypass"))},
+			config: vals{"private": on, "targets": targets(target(unknownPath, nil), target("/admin", nil))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target(unknownPath, unknown), target("/admin", unknown))},
+		},
+		"several current targets at one path, a path not known yet": {
+			state:   vals{"private": off, "mode": http, "targets": targets(target("", "inherit"), target("", "inherit"), target("/admin", "block"))},
+			config:  vals{"name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target(unknownPath, nil), target("", nil), target("/admin", nil))},
+			plan:    vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target(unknownPath, unknown), target("", unknown), target("/admin", unknown))},
+			inPlace: true, wantError: "Access action needed on every target",
+		},
+		"two enabled targets at one controlled path": {
+			config:    vals{"targets": targets(target("/admin", "block"), target("/admin", "inherit"))},
+			plan:      vals{"private": off, "targets": targets(target("/admin", "block"), target("/admin", "inherit"))},
+			wantError: "targets[1].path",
+		},
+		"a disabled target at a controlled path": {
+			config: vals{"targets": targets(target("/admin", "block"), disabled(target("/admin", "inherit")))},
+			plan:   vals{"private": off, "targets": targets(target("/admin", "block"), disabled(target("/admin", "inherit")))},
+		},
+		"two enabled targets at one path, all inherit": {
+			config: vals{"targets": targets(target("/admin", nil), target("/admin", "inherit"))},
+			plan:   vals{"private": off, "targets": targets(target("/admin", unknown), target("/admin", "inherit"))},
+		},
+		"a kept block makes paths strict": {
+			state:   vals{"private": off, "mode": http, "targets": targets(target("", "inherit"), target("/admin", "block"))},
+			config:  vals{"targets": targets(target("", nil), target("/admin", nil), target("/admin", "inherit"))},
+			plan:    vals{"private": off, "mode": http, "targets": targets(target("", unknown), target("/admin", unknown), target("/admin", "inherit"))},
+			inPlace: true, wantError: "targets[2].path",
+		},
+		"no-op with a path left out next to a controlled one": {
+			state:  vals{"private": off, "mode": http, "targets": targets(target("/", "inherit"), target("/admin", "block"))},
+			config: vals{"targets": targets(target("", "inherit"), target("", "block"))},
+			plan:   vals{"private": off, "mode": http, "targets": targets(target("/", "inherit"), target("/admin", "block"))},
+		},
+		"update with a path left out next to a controlled one": {
+			state:     vals{"private": off, "mode": http, "targets": targets(target("/", "inherit"), target("/admin", "block"))},
+			config:    vals{"name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target("", "inherit"), target("", "block"))},
+			plan:      vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target(unknownPath, "inherit"), target(unknownPath, "block"))},
+			wantError: "targets[1].path",
+		},
+		"a path left out while only a name not known yet may change": {
+			state:  vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "a"), "targets": targets(target("/", "inherit"), target("/admin", "block"))},
+			config: vals{"name": tftypes.NewValue(tftypes.String, unknown), "targets": targets(target("", "inherit"), target("", "block"))},
+			plan:   vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, unknown), "targets": targets(target(unknownPath, "inherit"), target(unknownPath, "block"))},
+		},
+		"kept private, a duplicate path: no hint to make it public": {
+			state:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", "inherit"), target("/admin", "block"))},
+			config:  vals{"targets": targets(target("", nil), target("/admin", nil), target("/admin", nil))},
+			plan:    vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/admin", unknown), target("/admin", unknown))},
+			inPlace: true, wantError: "targets[2].path",
+			noHint: true,
+		},
+		"targets ignored in the configuration, rename": {
+			state:  vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "a"), "targets": targets(target("/", "inherit"), target("/admin", "block"))},
+			config: vals{"name": tftypes.NewValue(tftypes.String, "b"), "targets": targets(target("", nil))},
+			plan:   vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "b"), "targets": targets(target("/", "inherit"), target("/admin", "block"))},
+		},
+		"targets ignored, bypass changed outside, made private": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": targets(target("", "inherit"), target("/admin", "inherit"))},
+			config: vals{"private": on, "targets": targets(target("", nil), target("/admin", "bypass"))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", "inherit"), target("/admin", "inherit"))},
+		},
+		"replaced by a tcp service while / keeps block": {
+			state:     vals{"private": off, "mode": http, "targets": targets(target("", "block"))},
+			config:    vals{"mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", nil))},
+			plan:      vals{"private": off, "mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target(unknownPath, unknown))},
+			inPlace:   true,
+			wantError: "targets[0].access_action",
+		},
+		"block on a relative path": {
+			config:    vals{"targets": targets(target("admin", "block"))},
+			plan:      vals{"private": off, "targets": targets(target("admin", "block"))},
+			wantError: "targets[0].path",
+		},
+		"block on a dot segment": {
+			config:    vals{"targets": targets(target("/a/../b", "block"))},
+			plan:      vals{"private": off, "targets": targets(target("/a/../b", "block"))},
+			wantError: "targets[0].path",
+		},
+		"inherit on a relative path": {
+			config: vals{"targets": targets(target("admin", "inherit"))},
+			plan:   vals{"private": off, "targets": targets(target("admin", "inherit"))},
+		},
+		"block on the root path": {
+			config: vals{"targets": targets(target("/", "block"))},
+			plan:   vals{"private": off, "targets": targets(target("/", "block"))},
+		},
+		"new tcp with block": {
+			config:    vals{"mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "block"))},
+			plan:      vals{"mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "block"))},
+			wantError: "targets[0].access_action",
+		},
+		"tcp from state with block": {
+			state:     vals{"private": off, "mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "inherit"))},
+			config:    vals{"targets": targets(target("", "block"))},
+			plan:      vals{"private": off, "mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "block"))},
+			wantError: "targets[0].access_action",
+		},
+		"tcp with inherit": {
+			config: vals{"mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "inherit"))},
+			plan:   vals{"mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "inherit"))},
+		},
+		"made private, path not known yet": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config: vals{"private": on, "targets": targets(target("", nil), target(unknownPath, nil))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target(unknownPath, unknown))},
+		},
+		"no-op with bypass, actions left out": {
+			state:  vals{"private": off, "mode": http, "targets": bypassAtAdmin},
+			config: vals{"targets": targets(target("", nil), target("/other", nil))},
+			plan:   vals{"private": off, "mode": http, "targets": bypassAtAdmin},
+		},
+		"stays public with bypass": {
+			state:  vals{"private": off, "mode": http, "targets": bypassAtAdmin},
+			config: vals{"name": tftypes.NewValue(tftypes.String, "new")},
+			plan:   vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target("", unknown), target("/admin", unknown))},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := tftypes.NewValue(typ, nil)
+			if tc.state != nil {
+				state = object(tc.state)
+			}
+			var diags diag.Diagnostics
+			var vresp resource.ValidateConfigResponse
+			r.ValidateConfig(ctx, resource.ValidateConfigRequest{Config: tfsdk.Config{Schema: sch.Schema, Raw: object(tc.config)}}, &vresp)
+			diags.Append(vresp.Diagnostics...)
+			if !diags.HasError() {
+				req := resource.ModifyPlanRequest{
+					Config: tfsdk.Config{Schema: sch.Schema, Raw: object(tc.config)},
+					Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: object(tc.plan)},
+					State:  tfsdk.State{Schema: sch.Schema, Raw: state},
+				}
+				resp := resource.ModifyPlanResponse{Plan: req.Plan}
+				r.ModifyPlan(ctx, req, &resp)
+				diags.Append(resp.Diagnostics...)
+			}
+			if tc.wantError == "" {
+				if diags.HasError() || diags.WarningsCount() > 0 {
+					t.Fatalf("expected no error or warning, found %v", diags)
+				}
+				return
+			}
+			found := false
+			matched := diags.Errors()
+			if tc.inPlace {
+				if diags.HasError() {
+					t.Fatalf("an in-place-only problem must be a warning, found %v", diags)
+				}
+				matched = diags.Warnings()
+			}
+			for _, d := range matched {
+				p := ""
+				if wp, ok := d.(diag.DiagnosticWithPath); ok {
+					p = wp.Path().String()
+				}
+				found = found || p == tc.wantError || d.Summary() == tc.wantError
+			}
+			if !found {
+				t.Fatalf("expected an error at %s, found %v", tc.wantError, diags)
+			}
+			for _, d := range diags.Errors() {
+				if tc.noHint && d.Summary() == "Service is private from its state" {
+					t.Errorf("making the service public does not fix %v", diags)
+				}
+			}
+		})
+	}
+}
+
+func Test_directUpstreamWarnings(t *testing.T) {
+	optsType := ReverseProxyTargetOptionsModel{}.TFType()
+	target := func(direct attr.Value) attr.Value {
+		opts := map[string]attr.Value{}
+		for n, at := range optsType.AttrTypes {
+			opts[n] = nullOf(at.ValueType(context.Background()))
+		}
+		opts["custom_headers"] = types.MapNull(types.StringType)
+		opts["direct_upstream"] = direct
+		attrs := map[string]attr.Value{}
+		targetType := ReverseProxyServiceTargetModel{}.TFType()
+		for n, at := range targetType.AttrTypes {
+			attrs[n] = nullOf(at.ValueType(context.Background()))
+		}
+		attrs["options"] = types.ObjectValueMust(optsType.AttrTypes, opts)
+		return types.ObjectValueMust(targetType.AttrTypes, attrs)
+	}
+	list := types.ListValueMust(ReverseProxyServiceTargetModel{}.TFType(), []attr.Value{
+		target(types.BoolValue(true)), target(types.BoolValue(false)), target(types.BoolUnknown()),
+	})
+	for _, mode := range []string{"tcp", "udp", "tls"} {
+		d := directUpstreamWarnings(list, mode)
+		if d.WarningsCount() != 1 || d.HasError() {
+			t.Errorf("%s: expected one warning for the first target, found %v", mode, d)
+		}
+	}
+}
+
+// directTarget builds a target with a host and direct_upstream.
+func directTarget(host string, direct attr.Value) attr.Value {
+	ctx := context.Background()
+	optsType := ReverseProxyTargetOptionsModel{}.TFType()
+	opts := map[string]attr.Value{}
+	for n, at := range optsType.AttrTypes {
+		opts[n] = nullOf(at.ValueType(ctx))
+	}
+	opts["custom_headers"] = types.MapNull(types.StringType)
+	opts["direct_upstream"] = direct
+	targetType := ReverseProxyServiceTargetModel{}.TFType()
+	attrs := map[string]attr.Value{}
+	for n, at := range targetType.AttrTypes {
+		attrs[n] = nullOf(at.ValueType(ctx))
+	}
+	attrs["host"] = types.StringValue(host)
+	attrs["target_type"] = types.StringValue("peer")
+	attrs["options"] = types.ObjectValueMust(optsType.AttrTypes, opts)
+	return types.ObjectValueMust(targetType.AttrTypes, attrs)
+}
+
+func Test_hostProblem(t *testing.T) {
+	const on, off, unknown = 1, 0, -1
+	for _, tc := range []struct {
+		mode, targetType, host string
+		direct                 int
+		want                   bool
+	}{
+		{"http", "peer", "127.0.0.1", on, true},
+		{"http", "peer", "[::1]", on, true},
+		{"http", "host", "224.0.0.1", on, true},
+		{"http", "domain", "169.254.1.1", on, true},
+		{"http", "peer", "fe80::1%eth0", on, true},
+		{"http", "peer", "10.0.0.5:80", on, true},
+		{"http", "peer", "a b", on, true},
+		{"http", "peer", "a/b", on, true},
+		{"http", "peer", "10.0.0.5", on, false},
+		{"http", "peer", "backend.lan", on, false},
+		{"http", "peer", "bücher.example", on, false},
+		{"http", "peer", "2001:db8::1", on, false},
+		{"http", "peer", "", on, false},  // the looked-up address
+		{"http", "peer", " ", on, false}, // trimmed empty, as the server reads it
+		{"http", "peer", "127.0.0.1", off, false},
+		{"http", "peer", "127.0.0.1", unknown, false},
+		{"tcp", "peer", "127.0.0.1", on, true},
+		{"http", "subnet", "", off, true},
+		{"http", "subnet", "", unknown, true},
+		{"http", "subnet", " ", off, true},
+		{"http", "subnet", "fe80::1%eth0", off, true},
+		{"http", "subnet", "10.0.0.5:80", unknown, true},
+		{"http", "subnet", "169.254.1.1", off, false},
+		{"http", "subnet", "169.254.1.1", unknown, false},
+		{"http", "subnet", "169.254.1.1", on, true},
+		{"http", "subnet", "bücher.example", on, false},
+		{"tcp", "subnet", "169.254.1.1", on, false}, // L4 subnet targets need only a host
+		{"tcp", "subnet", "", on, true},
+		{"udp", "subnet", " ", off, false},
+		{"", "subnet", "", off, true}, // mode not known: empty fails in every mode
+		{"", "subnet", "169.254.1.1", on, false},
+		{"", "subnet", "a b", off, false}, // refused in HTTP only
+		{"", "peer", "127.0.0.1", on, true},
+	} {
+		if got := hostProblem(tc.mode, tc.targetType, tc.host, tc.direct) != ""; got != tc.want {
+			t.Errorf("%s %s %q direct=%d: expected a problem %v, found %v", tc.mode, tc.targetType, tc.host, tc.direct, tc.want, got)
+		}
+	}
+	// The diagnostic names the reason, not the value.
+	list := types.ListValueMust(ReverseProxyServiceTargetModel{}.TFType(), []attr.Value{directTarget("https://user:secret@db.lan:5432", types.BoolValue(true))})
+	for _, d := range targetHostProblems(list, "http") {
+		if strings.Contains(d.Detail(), "secret") || strings.Contains(d.Summary(), "secret") {
+			t.Errorf("the rejected host must not be repeated: %s", d.Detail())
+		}
+	}
+	if !targetHostProblems(list, "http").HasError() {
+		t.Error("a URL as host must be refused")
+	}
+	// A target type not known yet: an HTTP direct upstream host is checked
+	// the same way for every type, an empty one is left to the type.
+	unknownType := func(host string) types.List {
+		obj, ok := directTarget(host, types.BoolValue(true)).(types.Object)
+		if !ok {
+			t.Fatal("target is not an object")
+		}
+		attrs := obj.Attributes()
+		attrs["target_type"] = types.StringUnknown()
+		return types.ListValueMust(ReverseProxyServiceTargetModel{}.TFType(), []attr.Value{types.ObjectValueMust(obj.AttributeTypes(context.Background()), attrs)})
+	}
+	if !targetHostProblems(unknownType("127.0.0.1"), "http").HasError() {
+		t.Error("loopback with direct_upstream fails for every target type of an HTTP service")
+	}
+	if targetHostProblems(unknownType(""), "http").HasError() {
+		t.Error("an empty host depends on the target type")
+	}
+	if targetHostProblems(unknownType("127.0.0.1"), "tcp").HasError() {
+		t.Error("an L4 subnet target accepts any host, so an unknown type waits")
+	}
+}
+
+func Test_reverseProxyService_directUpstreamWarningWithoutChanges(t *testing.T) {
+	ctx := context.Background()
+	r := &ReverseProxyService{}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	list := types.ListValueMust(ReverseProxyServiceTargetModel{}.TFType(), []attr.Value{directTarget("10.0.0.5", types.BoolValue(true))})
+	targets, err := list.ToTerraformValue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]tftypes.Value{}
+	for n, at := range typ.AttributeTypes {
+		values[n] = tftypes.NewValue(at, nil)
+	}
+	values["mode"] = tftypes.NewValue(tftypes.String, "tcp")
+	values["private"] = tftypes.NewValue(tftypes.Bool, false)
+	values["targets"] = targets
+	state := tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(typ, values)}
+	req := resource.ModifyPlanRequest{
+		Config: tfsdk.Config{Schema: sch.Schema, Raw: state.Raw},
+		Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: state.Raw},
+		State:  state,
+	}
+	resp := resource.ModifyPlanResponse{Plan: req.Plan}
+	r.ModifyPlan(ctx, req, &resp)
+	if resp.Diagnostics.WarningsCount() != 1 || resp.Diagnostics.HasError() {
+		t.Fatalf("expected one warning on a plan without changes, found %v", resp.Diagnostics)
+	}
+}
+
+func Test_reverseProxyService_emptyRestrictionsKept(t *testing.T) {
+	ctx := context.Background()
+	arType := ReverseProxyAccessRestrictionsModel{}.TFType()
+	empty, d := types.ObjectValueFrom(ctx, arType.AttrTypes, ReverseProxyAccessRestrictionsModel{
+		AllowedCidrs: types.ListNull(types.StringType), BlockedCidrs: types.ListNull(types.StringType),
+		AllowedCountries: types.ListNull(types.StringType), BlockedCountries: types.ListNull(types.StringType),
+		CrowdsecMode: types.StringNull(),
+	})
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	set, d := types.ObjectValueFrom(ctx, arType.AttrTypes, ReverseProxyAccessRestrictionsModel{
+		AllowedCidrs: types.ListNull(types.StringType), BlockedCidrs: types.ListNull(types.StringType),
+		AllowedCountries: types.ListNull(types.StringType), BlockedCountries: types.ListNull(types.StringType),
+		CrowdsecMode: types.StringValue("enforce"),
+	})
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	for name, tc := range map[string]struct {
+		prior    types.Object
+		wantNull bool
+	}{
+		"planned object that sets nothing":  {prior: empty},
+		"stored mode removed on the server": {prior: set, wantNull: true},
+		"no object":                         {prior: types.ObjectNull(arType.AttrTypes), wantNull: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			data := ReverseProxyServiceModel{AccessRestrictions: tc.prior}
+			if d := reverseProxyServiceAPIToTerraform(ctx, &api.Service{Id: "s"}, &data); d.HasError() {
+				t.Fatal(d)
+			}
+			if data.AccessRestrictions.IsNull() != tc.wantNull {
+				t.Fatalf("expected null %v, found %v", tc.wantNull, data.AccessRestrictions)
+			}
+		})
+	}
+}
+
+func Test_reverseProxyService_emptyListBesideCrowdsec(t *testing.T) {
+	ctx := context.Background()
+	arType := ReverseProxyAccessRestrictionsModel{}.TFType()
+	prior, d := types.ObjectValueFrom(ctx, arType.AttrTypes, ReverseProxyAccessRestrictionsModel{
+		AllowedCidrs: types.ListValueMust(types.StringType, []attr.Value{}), BlockedCidrs: types.ListNull(types.StringType),
+		AllowedCountries: types.ListNull(types.StringType), BlockedCountries: types.ListNull(types.StringType),
+		CrowdsecMode: types.StringValue("enforce"),
+	})
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	mode := api.AccessRestrictionsCrowdsecMode("enforce")
+	data := ReverseProxyServiceModel{AccessRestrictions: prior}
+	if d := reverseProxyServiceAPIToTerraform(ctx, &api.Service{Id: "s", AccessRestrictions: &api.AccessRestrictions{CrowdsecMode: &mode}}, &data); d.HasError() {
+		t.Fatal(d)
+	}
+	attrs := data.AccessRestrictions.Attributes()
+	if l, ok := attrs["allowed_cidrs"].(types.List); !ok || l.IsNull() || len(l.Elements()) != 0 {
+		t.Errorf("a planned empty list stays empty where the server omits it, found %v", attrs["allowed_cidrs"])
+	}
+	if !attrs["blocked_cidrs"].IsNull() {
+		t.Errorf("a list left out stays null, found %v", attrs["blocked_cidrs"])
+	}
+}
+
+func Test_reverseProxyService_planOmittedTargetValues(t *testing.T) {
+	ctx := context.Background()
+	r := &ReverseProxyService{}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	listType, ok := typ.AttributeTypes["targets"].(tftypes.List)
+	if !ok {
+		t.Fatal("targets is not a list")
+	}
+	targetType, ok := listType.ElementType.(tftypes.Object)
+	if !ok {
+		t.Fatal("a target is not an object")
+	}
+	str := func(v any) tftypes.Value { return tftypes.NewValue(tftypes.String, v) }
+	target := func(kind string, host, path, action any) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range targetType.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["target_id"], values["target_type"] = str("r1"), str(kind)
+		values["host"], values["path"], values["access_action"] = str(host), str(path), str(action)
+		return tftypes.NewValue(targetType, values)
+	}
+	object := func(name string, targets ...tftypes.Value) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["name"], values["mode"] = str(name), str("http")
+		values["private"] = tftypes.NewValue(tftypes.Bool, false)
+		values["targets"] = tftypes.NewValue(listType, targets)
+		return tftypes.NewValue(typ, values)
+	}
+	unknown := tftypes.UnknownValue
+	t.Run("a left-out path is planned as the server's none", func(t *testing.T) {
+		state := object("a", target("peer", "10.0.0.1", "/public", "bypass"))
+		config := object("b", target("peer", nil, nil, "bypass"))
+		plan := object("b", target("peer", unknown, unknown, "bypass"))
+		req := resource.ModifyPlanRequest{
+			Config: tfsdk.Config{Schema: sch.Schema, Raw: config},
+			Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
+			State:  tfsdk.State{Schema: sch.Schema, Raw: state},
+		}
+		resp := resource.ModifyPlanResponse{Plan: req.Plan}
+		r.ModifyPlan(ctx, req, &resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatal(resp.Diagnostics)
+		}
+		var p types.String
+		if d := resp.Plan.GetAttribute(ctx, path.Root("targets").AtListIndex(0).AtName("path"), &p); d.HasError() {
+			t.Fatal(d)
+		}
+		if !p.IsNull() {
+			t.Errorf("expected path null (the server's \"/\") in the plan, found %v", p)
+		}
+	})
+	t.Run("a path stays unknown while only unknown values differ", func(t *testing.T) {
+		state := object("a", target("peer", "10.0.0.1", "/public", "bypass"))
+		config := object("a", target("peer", nil, nil, "bypass"))
+		plan := object("a", target("peer", unknown, unknown, "bypass"))
+		config, plan = withName(t, config, unknown), withName(t, plan, unknown)
+		req := resource.ModifyPlanRequest{
+			Config: tfsdk.Config{Schema: sch.Schema, Raw: config},
+			Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
+			State:  tfsdk.State{Schema: sch.Schema, Raw: state},
+		}
+		resp := resource.ModifyPlanResponse{Plan: req.Plan}
+		r.ModifyPlan(ctx, req, &resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatal(resp.Diagnostics)
+		}
+		var p types.String
+		if d := resp.Plan.GetAttribute(ctx, path.Root("targets").AtListIndex(0).AtName("path"), &p); d.HasError() {
+			t.Fatal(d)
+		}
+		if !p.IsUnknown() {
+			t.Errorf("the final plan may keep /public, so the path must stay unknown, found %v", p)
+		}
+	})
+	t.Run("a subnet target without a host", func(t *testing.T) {
+		config := object("a", target("subnet", nil, "/", nil))
+		plan := object("a", target("subnet", unknown, "/", unknown))
+		req := resource.ModifyPlanRequest{
+			Config: tfsdk.Config{Schema: sch.Schema, Raw: config},
+			Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
+			State:  tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(typ, nil)},
+		}
+		resp := resource.ModifyPlanResponse{Plan: req.Plan}
+		r.ModifyPlan(ctx, req, &resp)
+		if !resp.Diagnostics.HasError() {
+			t.Error("a subnet target needs a host")
+		}
+	})
+}
+
+// withName returns obj with its name set to v.
+func withName(t *testing.T, obj tftypes.Value, v any) tftypes.Value {
+	t.Helper()
+	var m map[string]tftypes.Value
+	if err := obj.As(&m); err != nil {
+		t.Fatal(err)
+	}
+	m["name"] = tftypes.NewValue(tftypes.String, v)
+	return tftypes.NewValue(obj.Type(), m)
+}
+
+func Test_targetActionDiagnosticsOmitPaths(t *testing.T) {
+	targetType := ReverseProxyServiceTargetModel{}.TFType()
+	target := func(p, action string) attr.Value {
+		attrs := map[string]attr.Value{}
+		for n, at := range targetType.AttrTypes {
+			attrs[n] = nullOf(at.ValueType(context.Background()))
+		}
+		attrs["options"] = types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes)
+		attrs["path"], attrs["access_action"] = types.StringValue(p), types.StringValue(action)
+		return types.ObjectValueMust(targetType.AttrTypes, attrs)
+	}
+	list := types.ListValueMust(targetType, []attr.Value{
+		target("/cb?token=secret", "block"), target("/x-secret", "bypass"), target("/x-secret", "inherit"),
+	})
+	privacy, diags, updateOnly := targetActions(list, list, nil, true).problems(true, "http")
+	diags.Append(privacy...)
+	diags.Append(updateOnly...)
+	if diags.ErrorsCount() < 3 {
+		t.Fatalf("expected the query path, the bypass and the duplicate to be refused, found %v", diags)
+	}
+	for _, d := range diags {
+		if strings.Contains(d.Detail(), "secret") || strings.Contains(d.Summary(), "secret") {
+			t.Errorf("a path must not be repeated in a diagnostic: %s", d.Detail())
+		}
+	}
+}
+
+func Test_keptActionProblems(t *testing.T) {
+	ctx := context.Background()
+	block, inherit, admin := api.ServiceTargetAccessAction("block"), api.ServiceTargetAccessAction("inherit"), "/admin"
+	live := &api.Service{Id: "s", Targets: []api.ServiceTarget{
+		{TargetId: "p1", Enabled: true, AccessAction: &inherit},
+		{TargetId: "p1", Enabled: true, Path: &admin, AccessAction: &block},
+	}}
+	only := func(targets ...api.ServiceTarget) api.ServiceRequest { return api.ServiceRequest{Targets: &targets} }
+	if d := keptActionProblems(ctx, only(api.ServiceTarget{TargetId: "p1", Enabled: true}), live); !d.HasError() {
+		t.Error("dropping /admin (block) with no action set must stop the update")
+	}
+	// ignore_changes = [targets]: the request carries the current targets
+	// with their actions, whatever the configuration lists.
+	if d := keptActionProblems(ctx, only(live.Targets...), live); d.HasError() {
+		t.Errorf("the request keeps /admin with its action, found %v", d)
+	}
+	if d := keptActionProblems(ctx, only(api.ServiceTarget{TargetId: "p1", Enabled: true, AccessAction: &inherit}), live); d.HasError() {
+		t.Errorf("an action in the request lets the server drop /admin, found %v", d)
+	}
+}
+
+func Test_targetOptionsDirectUpstreamDefault(t *testing.T) {
+	ctx := context.Background()
+	timeout := "5s"
+	obj, d := targetOptionsAPIToTerraform(ctx, &api.ServiceTargetOptions{RequestTimeout: &timeout})
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	if v := obj.Attributes()["direct_upstream"]; !v.Equal(types.BoolValue(false)) {
+		t.Errorf("the server omits false; with other options it must read as false, found %v", v)
+	}
+	if obj, _ := targetOptionsAPIToTerraform(ctx, &api.ServiceTargetOptions{}); !obj.IsNull() {
+		t.Errorf("no options read as none, found %v", obj)
+	}
+}
+
+func Test_reconcileOptions_legacyDirectUpstream(t *testing.T) {
+	optsType := ReverseProxyTargetOptionsModel{}.TFType()
+	options := func(direct types.Bool) types.Object {
+		attrs := map[string]attr.Value{}
+		for n, at := range optsType.AttrTypes {
+			attrs[n] = nullOf(at.ValueType(context.Background()))
+		}
+		attrs["custom_headers"] = types.MapNull(types.StringType)
+		attrs["request_timeout"] = types.StringValue("5s")
+		attrs["direct_upstream"] = direct
+		return types.ObjectValueMust(optsType.AttrTypes, attrs)
+	}
+	got, d := reconcileOptions(options(types.BoolNull()), options(types.BoolValue(false)))
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	if v := got.Attributes()["direct_upstream"]; !v.Equal(types.BoolValue(false)) {
+		t.Errorf("state without the attribute must refresh to the default false, found %v", v)
 	}
 }

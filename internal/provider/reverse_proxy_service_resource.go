@@ -3,8 +3,13 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/netip"
 	"slices"
 	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
@@ -21,6 +26,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
 	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
 	"github.com/netbirdio/netbird/shared/management/http/api"
@@ -57,28 +63,30 @@ type ReverseProxyServiceModel struct {
 
 // ReverseProxyServiceTargetModel describes a service target.
 type ReverseProxyServiceTargetModel struct {
-	TargetId   types.String `tfsdk:"target_id"`
-	TargetType types.String `tfsdk:"target_type"`
-	Host       types.String `tfsdk:"host"`
-	Port       types.Int64  `tfsdk:"port"`
-	Protocol   types.String `tfsdk:"protocol"`
-	Path       types.String `tfsdk:"path"`
-	Enabled    types.Bool   `tfsdk:"enabled"`
-	Options    types.Object `tfsdk:"options"`
+	TargetId     types.String `tfsdk:"target_id"`
+	TargetType   types.String `tfsdk:"target_type"`
+	Host         types.String `tfsdk:"host"`
+	Port         types.Int64  `tfsdk:"port"`
+	Protocol     types.String `tfsdk:"protocol"`
+	Path         types.String `tfsdk:"path"`
+	Enabled      types.Bool   `tfsdk:"enabled"`
+	AccessAction types.String `tfsdk:"access_action"`
+	Options      types.Object `tfsdk:"options"`
 }
 
 // TFType returns the Terraform object type for service targets.
 func (m ReverseProxyServiceTargetModel) TFType() types.ObjectType {
 	return types.ObjectType{
 		AttrTypes: map[string]attr.Type{
-			"target_id":   types.StringType,
-			"target_type": types.StringType,
-			"host":        types.StringType,
-			"port":        types.Int64Type,
-			"protocol":    types.StringType,
-			"path":        types.StringType,
-			"enabled":     types.BoolType,
-			"options":     ReverseProxyTargetOptionsModel{}.TFType(),
+			"target_id":     types.StringType,
+			"target_type":   types.StringType,
+			"host":          types.StringType,
+			"port":          types.Int64Type,
+			"protocol":      types.StringType,
+			"path":          types.StringType,
+			"enabled":       types.BoolType,
+			"access_action": types.StringType,
+			"options":       ReverseProxyTargetOptionsModel{}.TFType(),
 		},
 	}
 }
@@ -91,6 +99,7 @@ type ReverseProxyTargetOptionsModel struct {
 	CustomHeaders      types.Map    `tfsdk:"custom_headers"`
 	ProxyProtocol      types.Bool   `tfsdk:"proxy_protocol"`
 	SessionIdleTimeout types.String `tfsdk:"session_idle_timeout"`
+	DirectUpstream     types.Bool   `tfsdk:"direct_upstream"`
 }
 
 // TFType returns the Terraform object type for target options.
@@ -105,6 +114,7 @@ func (m ReverseProxyTargetOptionsModel) TFType() types.ObjectType {
 			},
 			"proxy_protocol":       types.BoolType,
 			"session_idle_timeout": types.StringType,
+			"direct_upstream":      types.BoolType,
 		},
 	}
 }
@@ -215,10 +225,11 @@ func (m ReverseProxyHeaderAuthModel) TFType() types.ObjectType {
 
 // ReverseProxyAccessRestrictionsModel describes access restrictions.
 type ReverseProxyAccessRestrictionsModel struct {
-	AllowedCidrs     types.List `tfsdk:"allowed_cidrs"`
-	BlockedCidrs     types.List `tfsdk:"blocked_cidrs"`
-	AllowedCountries types.List `tfsdk:"allowed_countries"`
-	BlockedCountries types.List `tfsdk:"blocked_countries"`
+	AllowedCidrs     types.List   `tfsdk:"allowed_cidrs"`
+	BlockedCidrs     types.List   `tfsdk:"blocked_cidrs"`
+	AllowedCountries types.List   `tfsdk:"allowed_countries"`
+	BlockedCountries types.List   `tfsdk:"blocked_countries"`
+	CrowdsecMode     types.String `tfsdk:"crowdsec_mode"`
 }
 
 // TFType returns the Terraform object type for access restrictions.
@@ -229,6 +240,7 @@ func (m ReverseProxyAccessRestrictionsModel) TFType() types.ObjectType {
 			"blocked_cidrs":     types.ListType{ElemType: types.StringType},
 			"allowed_countries": types.ListType{ElemType: types.StringType},
 			"blocked_countries": types.ListType{ElemType: types.StringType},
+			"crowdsec_mode":     types.StringType,
 		},
 	}
 }
@@ -297,7 +309,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Computed:            true,
 			},
 			"private": schema.BoolAttribute{
-				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity and the server generates an access policy from `access_groups` to the cluster's proxy peers. The proxy then skips the service's other authentication (SSO, password, PIN, header auth), even where `auth` still enables it. CIDR access restrictions still apply, matched against the peer's NetBird address; country restrictions do not. Peers reach it only through a proxy of the cluster that has private access enabled (`NB_PROXY_PRIVATE=true` or `--private`, off by default); the server accepts the setting without one. A target with the `bypass` access action must be changed before a service can become private. Requires `mode = \"http\"`, at least one access group and no bearer auth. Left out, a new service is public and an existing one keeps its setting.",
+				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity and the server generates an access policy from `access_groups` to the cluster's proxy peers. The proxy then skips the service's other authentication (SSO, password, PIN, header auth), even where `auth` still enables it. CIDR access restrictions still apply, matched against the peer's NetBird address; country restrictions do not. Peers reach it only through a proxy of the cluster that has private access enabled (`NB_PROXY_PRIVATE=true` or `--private`, off by default); the server accepts the setting without one. Requires `mode = \"http\"`, at least one access group, no bearer auth and no target with the `bypass` access action, including one a target keeps from the server while its `access_action` is left out. Left out, a new service is public and an existing one keeps its setting.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseNonNullStateForUnknown()},
@@ -343,7 +355,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 							Validators:          []validator.String{stringvalidator.OneOf("http", "https", "tcp", "udp")},
 						},
 						"path": schema.StringAttribute{
-							MarkdownDescription: "URL path prefix for this target. Defaults to \"/\" if omitted.",
+							MarkdownDescription: "URL path prefix for this target. Left out, no path is sent and the server uses \"/\"; the plan shows null, also for a target that has another path now.",
 							Optional:            true,
 							Computed:            true,
 						},
@@ -352,6 +364,12 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 							Optional:            true,
 							Computed:            true,
 							Default:             booldefault.StaticBool(true),
+						},
+						"access_action": schema.StringAttribute{
+							MarkdownDescription: "Access action once this target's path prefix is selected (HTTP services only): `inherit` applies the service's authentication, `bypass` skips it (not allowed for private services), `block` denies access. Left out, the server keeps the current action of the target at this path (`inherit` for a new one). While a current target has `bypass` or `block`, an update that sets no action on any target must keep that target's path, and if two current targets share a path, every target of the update must set its action. The plan warns about both, since it cannot tell an update from a replacement, and an in-place update stops before writing anything. `bypass` and `block` are refused for TCP, UDP and TLS services, need a canonical path prefix, and need each enabled target on its own path. Once any enabled target has `bypass` or `block`, the proxy checks request paths strictly for the whole service, also for targets that inherit: a request whose path has `//`, `\\`, `;`, dot segments, control characters or an escaped `/`, `\\`, `.` or `%` gets HTTP 400.",
+							Optional:            true,
+							Computed:            true,
+							Validators:          []validator.String{stringvalidator.OneOf("inherit", "bypass", "block")},
 						},
 						"options": schema.SingleNestedAttribute{
 							MarkdownDescription: "Per-target options",
@@ -383,6 +401,15 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 								"session_idle_timeout": schema.StringAttribute{
 									MarkdownDescription: "Idle timeout before a UDP session is reaped, as a Go duration string (e.g. \"30s\", \"2m\"). Maximum 10m. (UDP only)",
 									Optional:            true,
+								},
+								"direct_upstream": schema.BoolAttribute{
+									MarkdownDescription: "Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services). The server refuses a loopback, multicast or link-local IP address as the host (except for a subnet target of a TCP, UDP or TLS service, where it only requires a host), and a proxy started with `NB_PROXY_DIRECT_UPSTREAM_BLOCK_PRIVATE` refuses, when it connects, addresses in a fixed list of special-use ranges (private, CGNAT, loopback, link-local, unique local, documentation, multicast and similar); any other address is dialled, publicly reachable or not. Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Applies to HTTP services only: for TCP, UDP and TLS services NetBird stores the flag but does not pass it to the proxy, and the plan warns. Defaults to false.",
+									Optional:            true,
+									// The server omits false; reading it as false wherever
+									// options exist keeps an import or a refresh in line with
+									// a configuration that writes false or leaves it out.
+									Computed: true,
+									Default:  booldefault.StaticBool(false),
 								},
 							},
 						},
@@ -488,6 +515,11 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 						Optional:            true,
 						ElementType:         types.StringType,
 					},
+					"crowdsec_mode": schema.StringAttribute{
+						MarkdownDescription: "CrowdSec IP reputation mode: `off`, `enforce` or `observe`. The server accepts each mode whether or not the cluster supports CrowdSec: with `enforce`, a proxy without a ready CrowdSec checker denies every request from outside the tunnel, while `observe` lets them through. Requests over the NetBird tunnel, including all access to a private service, are not checked against CrowdSec. Left out, the server treats it as `off`.",
+						Optional:            true,
+						Validators:          []validator.String{stringvalidator.OneOf("off", "enforce", "observe")},
+					},
 				},
 			},
 		},
@@ -519,7 +551,8 @@ func targetOptionsAPIToTerraform(ctx context.Context, opts *api.ServiceTargetOpt
 	// If all fields are at zero/nil, treat as no options set.
 	if opts.SkipTlsVerify == nil && opts.RequestTimeout == nil && opts.PathRewrite == nil &&
 		opts.CustomHeaders == nil && opts.SessionIdleTimeout == nil &&
-		(opts.ProxyProtocol == nil || !*opts.ProxyProtocol) {
+		(opts.ProxyProtocol == nil || !*opts.ProxyProtocol) &&
+		(opts.DirectUpstream == nil || !*opts.DirectUpstream) {
 		return types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes), nil
 	}
 
@@ -530,10 +563,15 @@ func targetOptionsAPIToTerraform(ctx context.Context, opts *api.ServiceTargetOpt
 		proxyProtocol = opts.ProxyProtocol
 	}
 
+	// direct_upstream=false is the server default and not reported; the
+	// attribute defaults to false, so read it as false.
+	directUpstream := opts.DirectUpstream != nil && *opts.DirectUpstream
+
 	model := ReverseProxyTargetOptionsModel{
 		SkipTLSVerify:  types.BoolPointerValue(opts.SkipTlsVerify),
 		RequestTimeout: types.StringPointerValue(opts.RequestTimeout),
 		ProxyProtocol:  types.BoolPointerValue(proxyProtocol),
+		DirectUpstream: types.BoolValue(directUpstream),
 	}
 
 	if opts.PathRewrite != nil {
@@ -599,6 +637,11 @@ func targetOptionsTerraformToAPI(ctx context.Context, opts types.Object) (*api.S
 	if v, ok := attrs["session_idle_timeout"].(types.String); ok && !v.IsNull() && !v.IsUnknown() {
 		s := v.ValueString()
 		result.SessionIdleTimeout = &s
+		hasValue = true
+	}
+	if v, ok := attrs["direct_upstream"].(types.Bool); ok && !v.IsNull() && !v.IsUnknown() {
+		b := v.ValueBool()
+		result.DirectUpstream = &b
 		hasValue = true
 	}
 
@@ -673,6 +716,11 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 			Host:       types.StringPointerValue(t.Host),
 			Path:       types.StringPointerValue(t.Path),
 			Options:    opts,
+		}
+		if t.AccessAction != nil {
+			target.AccessAction = types.StringValue(string(*t.AccessAction))
+		} else {
+			target.AccessAction = types.StringNull()
 		}
 		targets = append(targets, target)
 	}
@@ -750,29 +798,36 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 			arModel.AllowedCidrs, d = sortedStringList(ctx, objectListAttr(data.AccessRestrictions, "allowed_cidrs"), *svc.AccessRestrictions.AllowedCidrs)
 			ret.Append(d...)
 		} else {
-			arModel.AllowedCidrs = types.ListNull(types.StringType)
+			arModel.AllowedCidrs = emptyOrNull(objectListAttr(data.AccessRestrictions, "allowed_cidrs"))
 		}
 		if svc.AccessRestrictions.BlockedCidrs != nil {
 			arModel.BlockedCidrs, d = sortedStringList(ctx, objectListAttr(data.AccessRestrictions, "blocked_cidrs"), *svc.AccessRestrictions.BlockedCidrs)
 			ret.Append(d...)
 		} else {
-			arModel.BlockedCidrs = types.ListNull(types.StringType)
+			arModel.BlockedCidrs = emptyOrNull(objectListAttr(data.AccessRestrictions, "blocked_cidrs"))
 		}
 		if svc.AccessRestrictions.AllowedCountries != nil {
 			arModel.AllowedCountries, d = sortedStringList(ctx, objectListAttr(data.AccessRestrictions, "allowed_countries"), *svc.AccessRestrictions.AllowedCountries)
 			ret.Append(d...)
 		} else {
-			arModel.AllowedCountries = types.ListNull(types.StringType)
+			arModel.AllowedCountries = emptyOrNull(objectListAttr(data.AccessRestrictions, "allowed_countries"))
 		}
 		if svc.AccessRestrictions.BlockedCountries != nil {
 			arModel.BlockedCountries, d = sortedStringList(ctx, objectListAttr(data.AccessRestrictions, "blocked_countries"), *svc.AccessRestrictions.BlockedCountries)
 			ret.Append(d...)
 		} else {
-			arModel.BlockedCountries = types.ListNull(types.StringType)
+			arModel.BlockedCountries = emptyOrNull(objectListAttr(data.AccessRestrictions, "blocked_countries"))
+		}
+		if svc.AccessRestrictions.CrowdsecMode != nil {
+			arModel.CrowdsecMode = types.StringValue(string(*svc.AccessRestrictions.CrowdsecMode))
+		} else {
+			arModel.CrowdsecMode = types.StringNull()
 		}
 		data.AccessRestrictions, d = types.ObjectValueFrom(ctx, ReverseProxyAccessRestrictionsModel{}.TFType().AttrTypes, arModel)
 		ret.Append(d...)
-	} else {
+	} else if !holdsNothing(data.AccessRestrictions) {
+		// The server reports no restrictions object when none is set; a
+		// planned or stored object that sets nothing means the same.
 		data.AccessRestrictions = types.ObjectNull(ReverseProxyAccessRestrictionsModel{}.TFType().AttrTypes)
 	}
 
@@ -870,30 +925,216 @@ func preserveTargetPlanValues(ctx context.Context, planTargets, apiTargets types
 		return apiTargets, ret
 	}
 
-	planByID := make(map[string]ReverseProxyServiceTargetModel, len(planModels))
-	for _, p := range planModels {
-		planByID[p.TargetId.ValueString()] = p
-	}
-
+	matches := matchPlanTargets(planModels, apiModels)
 	for i, apiModel := range apiModels {
-		planModel, ok := planByID[apiModel.TargetId.ValueString()]
+		planModel, ok := matches[i]
 		if !ok {
 			continue
 		}
-		if !planModel.Host.IsNull() && !planModel.Host.IsUnknown() {
+		// For peer, host and domain targets the server reports the address it
+		// looked up, not the configured one; subnet and cluster targets keep
+		// theirs, so the server's value stands and a change shows.
+		if !planModel.Host.IsNull() && !planModel.Host.IsUnknown() && serverResolvesHost(apiModel.TargetType.ValueString()) {
 			apiModels[i].Host = planModel.Host
 		}
 		if !planModel.Path.IsNull() && !planModel.Path.IsUnknown() {
 			apiModels[i].Path = planModel.Path
 		}
 		if !planModel.Options.IsNull() && !planModel.Options.IsUnknown() {
-			apiModels[i].Options = planModel.Options
+			options, d := reconcileOptions(planModel.Options, apiModel.Options)
+			ret.Append(d...)
+			apiModels[i].Options = options
 		}
 	}
 
 	result, d := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), apiModels)
 	ret.Append(d...)
 	return result, ret
+}
+
+// serverResolvesHost reports whether NetBird replaces a target's host with
+// the address it looks up for the target (v0.83: peer, host and domain).
+func serverResolvesHost(targetType string) bool {
+	switch targetType {
+	case "peer", "host", "domain":
+		return true
+	}
+	return false
+}
+
+// matchPlanTargets pairs each API target with at most one planned target, and
+// each planned target with at most one API target. One backend can serve
+// several paths, and several ports on one path, so a pair needs the same ID
+// and effective path (a left-out path is the server's "/"), and port and
+// protocol decide between targets that share both. A planned target whose path
+// is not known yet pairs on ID, port and protocol, or with the one remaining
+// API target of its ID. A known planned host decides between targets of one
+// subnet resource that share all of that. An API target left unpaired keeps
+// its server values,
+// so a change made outside Terraform (a moved path, a removed target) shows
+// in the next plan.
+func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]ReverseProxyServiceTargetModel {
+	samePath := func(p, l ReverseProxyServiceTargetModel) bool {
+		return !p.Path.IsUnknown() && targetLocation(p.Path) == targetLocation(l.Path)
+	}
+	unknownPath := func(p, _ ReverseProxyServiceTargetModel) bool { return p.Path.IsUnknown() }
+	sameEndpoint := func(p, l ReverseProxyServiceTargetModel) bool {
+		return p.Port.Equal(l.Port) && p.Protocol.Equal(l.Protocol)
+	}
+	// A known planned host tells apart targets of one subnet resource; for a
+	// peer target the server reports the peer's address instead, so this only
+	// narrows, never decides alone.
+	sameHost := func(p, l ReverseProxyServiceTargetModel) bool {
+		return !p.Host.IsNull() && !p.Host.IsUnknown() && p.Host.Equal(l.Host)
+	}
+	out := map[int]ReverseProxyServiceTargetModel{}
+	used := make([]bool, len(planned))
+	// Only targets of one ID are compared, in the API's order.
+	byID := map[string][]int{}
+	for i, l := range live {
+		if !l.TargetId.IsNull() && !l.TargetId.IsUnknown() {
+			byID[l.TargetId.ValueString()] = append(byID[l.TargetId.ValueString()], i)
+		}
+	}
+	// pair matches unpaired targets of the same ID; with onlyOne it pairs a
+	// planned target only when exactly one API target qualifies.
+	// For a known planned path, only live targets of that ID and path qualify.
+	byIDPath := map[[2]string][]int{}
+	for i, l := range live {
+		if !l.TargetId.IsNull() && !l.TargetId.IsUnknown() && !l.Path.IsUnknown() {
+			k := [2]string{l.TargetId.ValueString(), targetLocation(l.Path)}
+			byIDPath[k] = append(byIDPath[k], i)
+		}
+	}
+	pair := func(match func(p, l ReverseProxyServiceTargetModel) bool, onlyOne, byPath bool) {
+		for j, p := range planned {
+			if used[j] {
+				continue
+			}
+			var found []int
+			if p.TargetId.IsNull() || p.TargetId.IsUnknown() {
+				continue
+			}
+			if !byPath && !p.Path.IsUnknown() {
+				continue // the unknown-path round pairs only targets whose path is unknown
+			}
+			candidates := byID[p.TargetId.ValueString()]
+			if byPath {
+				if p.Path.IsUnknown() {
+					continue
+				}
+				candidates = byIDPath[[2]string{p.TargetId.ValueString(), targetLocation(p.Path)}]
+			}
+			for _, i := range candidates {
+				if _, taken := out[i]; !taken && match(p, live[i]) {
+					found = append(found, i)
+				}
+			}
+			if len(found) == 1 || (!onlyOne && len(found) > 0) {
+				// Among equals: with as many targets on both sides (a create or
+				// update response, an unchanged refresh) the one at the same
+				// position wins; otherwise a target was added or removed, and
+				// equals pair in their relative order.
+				pick := found[0]
+				for _, i := range found {
+					if i == j && len(planned) == len(live) {
+						pick = i
+					}
+				}
+				out[pick], used[j] = p, true
+			}
+		}
+	}
+	// From the most specific match to the least. Targets equal in everything
+	// compared pair in list order; a looser match pairs only when it is the
+	// one candidate left.
+	for round, known := range []func(p, l ReverseProxyServiceTargetModel) bool{samePath, unknownPath} {
+		byPath := round == 0
+		pair(func(p, l ReverseProxyServiceTargetModel) bool {
+			return known(p, l) && sameEndpoint(p, l) && sameHost(p, l)
+		}, false, byPath)
+		pair(func(p, l ReverseProxyServiceTargetModel) bool { return known(p, l) && sameEndpoint(p, l) }, false, byPath)
+		pair(func(p, l ReverseProxyServiceTargetModel) bool { return known(p, l) && sameHost(p, l) }, true, byPath)
+		pair(known, true, byPath)
+	}
+	return out
+}
+
+// reconcileOptions keeps the planned spelling of each target option where it
+// means what the server has (the server drops defaults and writes durations
+// its own way, "2m" as "2m0s") and takes the server's value where it does not,
+// so a change made outside Terraform, or a target paired with the wrong
+// planned one, shows in the next plan.
+func reconcileOptions(planned, live types.Object) (types.Object, diag.Diagnostics) {
+	var liveAttrs map[string]attr.Value
+	if !live.IsNull() && !live.IsUnknown() {
+		liveAttrs = live.Attributes()
+	}
+	attrs := planned.Attributes()
+	if liveAttrs == nil {
+		// The server reports no options: keep the planned object only if it
+		// sets nothing but defaults, otherwise the change shows as null.
+		for name, plannedValue := range attrs {
+			if !sameOption(name, plannedValue, nullOf(plannedValue)) {
+				return types.ObjectNull(planned.AttributeTypes(context.Background())), nil
+			}
+		}
+		return planned, nil
+	}
+	for name, plannedValue := range attrs {
+		liveValue, ok := liveAttrs[name]
+		if !ok {
+			liveValue = nullOf(plannedValue)
+		}
+		if !sameOption(name, plannedValue, liveValue) {
+			attrs[name] = liveValue
+		} else if name == "direct_upstream" && plannedValue.IsNull() && !liveValue.IsNull() {
+			// State written before the attribute existed holds null; the
+			// attribute now defaults to false, so keep the server's false
+			// rather than plan null -> false after a refresh.
+			attrs[name] = liveValue
+		}
+	}
+	return types.ObjectValue(planned.AttributeTypes(context.Background()), attrs)
+}
+
+// durationOptions are the target options the server writes as Go durations.
+var durationOptions = map[string]bool{"request_timeout": true, "session_idle_timeout": true}
+
+// sameOption reports whether a planned option value means the server's one.
+func sameOption(name string, planned, live attr.Value) bool {
+	if planned.IsUnknown() {
+		return false
+	}
+	switch p := planned.(type) {
+	case types.Bool:
+		l, _ := live.(types.Bool)
+		return p.ValueBool() == l.ValueBool() // null reads as false
+	case types.String:
+		l, _ := live.(types.String)
+		if pd, err := time.ParseDuration(p.ValueString()); err == nil && durationOptions[name] {
+			ld, lerr := time.ParseDuration(l.ValueString())
+			return (lerr == nil && pd == ld) || (pd == 0 && l.IsNull())
+		}
+		return p.ValueString() == l.ValueString() // null reads as ""
+	case types.Map:
+		l, _ := live.(types.Map)
+		return (len(p.Elements()) == 0 && len(l.Elements()) == 0) || p.Equal(l)
+	}
+	return planned.Equal(live)
+}
+
+// nullOf returns a null value of the same type.
+func nullOf(v attr.Value) attr.Value {
+	switch v.(type) {
+	case types.Bool:
+		return types.BoolNull()
+	case types.String:
+		return types.StringNull()
+	case types.Map:
+		return types.MapNull(types.StringType)
+	}
+	return v
 }
 
 func reverseProxyServiceTerraformToAPI(ctx context.Context, data *ReverseProxyServiceModel) (api.ServiceRequest, diag.Diagnostics) {
@@ -955,6 +1196,12 @@ func reverseProxyServiceTerraformToAPI(ctx context.Context, data *ReverseProxySe
 		if !t.Path.IsNull() && !t.Path.IsUnknown() {
 			v := t.Path.ValueString()
 			target.Path = &v
+		}
+		// Left out (unknown in the plan), the server keeps the action the target
+		// at this path has now.
+		if !t.AccessAction.IsNull() && !t.AccessAction.IsUnknown() {
+			v := api.ServiceTargetAccessAction(t.AccessAction.ValueString())
+			target.AccessAction = &v
 		}
 
 		opts, d := targetOptionsTerraformToAPI(ctx, t.Options)
@@ -1054,6 +1301,11 @@ func reverseProxyServiceTerraformToAPI(ctx context.Context, data *ReverseProxySe
 			var countries []string
 			ret.Append(v.ElementsAs(ctx, &countries, false)...)
 			ar.BlockedCountries = &countries
+			hasAR = true
+		}
+		if v, ok := arAttrs["crowdsec_mode"].(types.String); ok && !v.IsNull() && !v.IsUnknown() {
+			mode := api.AccessRestrictionsCrowdsecMode(v.ValueString())
+			ar.CrowdsecMode = &mode
 			hasAR = true
 		}
 		if hasAR {
@@ -1197,6 +1449,10 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 		resp.Diagnostics.AddError("Private service without usable access groups", err.Error())
 		return
 	}
+	resp.Diagnostics.Append(keptActionProblems(ctx, serviceReq, live)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 
 	svc, err := r.client.ReverseProxyServices.Update(ctx, data.Id.ValueString(), serviceReq)
 	if err != nil {
@@ -1258,11 +1514,19 @@ var (
 
 // ValidateConfig checks the private-service contract the server enforces
 // (HTTP mode, at least one access group, no bearer auth) on the configured
-// values; ModifyPlan checks the values a service keeps from its state.
+// values; ModifyPlan checks the values a service keeps from its state and
+// the target access actions.
 func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var data ReverseProxyServiceModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
-	if resp.Diagnostics.HasError() || data.Private.IsNull() || data.Private.IsUnknown() || !data.Private.ValueBool() {
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	private := !data.Private.IsUnknown() && data.Private.ValueBool()
+	// The target checks run in ModifyPlan on the planned targets, which are
+	// what the request sends: with ignore_changes they can differ from the
+	// configuration.
+	if !private {
 		return
 	}
 	// A left-out list may be adopted from an existing service; ModifyPlan
@@ -1270,76 +1534,712 @@ func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.V
 	resp.Diagnostics.Append(privateServiceProblems(data.Mode, data.AccessGroups, data.Auth, true)...)
 }
 
-// ModifyPlan refuses a private service the server would reject when the
-// configuration alone does not show it: a new one without access groups, or
-// one whose groups, mode or auth come from state or the plan. Access settings
-// absent from state (written before they existed, planned without a refresh)
-// stay unknown on a real update through UseNonNullStateForUnknown, and the
-// update sends their live values.
+// ModifyPlan refuses what the server would reject when the configuration
+// alone does not show it: a private service that is new without access
+// groups, or whose groups, mode, auth or target access actions come from
+// state or the plan, and target access actions the server keeps from the
+// service's current targets. Access settings absent from state (written
+// before they existed, planned without a refresh) stay unknown on a real
+// update through UseNonNullStateForUnknown, and the update sends their live
+// values.
 func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
 		return
 	}
-	var plan, config ReverseProxyServiceModel
+	create := req.State.Raw.IsNull()
+	var plan, config, state ReverseProxyServiceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if req.State.Raw.IsNull() && config.Private.IsNull() {
+	if create && config.Private.IsNull() {
 		// The server creates a service public unless told otherwise; show
 		// that in the plan rather than "known after apply".
 		plan.Private = types.BoolValue(false)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("private"), plan.Private)...)
 	}
-	if resp.Diagnostics.HasError() || plan.Private.IsUnknown() || !plan.Private.ValueBool() {
-		return
+	if !plan.Mode.IsNull() && !plan.Mode.IsUnknown() && plan.Mode.ValueString() != "http" {
+		// Also on a plan without changes, which is where an imported value
+		// would otherwise pass for one that works.
+		resp.Diagnostics.Append(directUpstreamWarnings(config.Targets, plan.Mode.ValueString())...)
 	}
-	if req.State.Raw.IsNull() {
-		if config.AccessGroups.IsNull() {
-			resp.Diagnostics.AddAttributeError(path.Root("access_groups"), "Access groups required",
-				"A new service with private = true needs at least one group in access_groups.")
-			return
-		}
-	}
-	// Blank IDs are refused in a configured list and when a service turns
-	// private; an already-private service keeps a list that still works
-	// through its other IDs.
-	checkBlank := true
-	if !req.State.Raw.IsNull() {
+	// writes is false when the plan differs from state only by values not
+	// known yet: the service may not be written at all, and what it holds
+	// was accepted by the server, so the target checks wait for the final
+	// plan.
+	writes := true
+	if !create {
 		if req.Plan.Raw.Equal(req.State.Raw) {
 			// Nothing is written, so values the server already holds are
 			// not this plan's problem.
 			return
 		}
-		var state ReverseProxyServiceModel
+		writes = !onlyUnknownDifferences(req.Plan.Raw, req.State.Raw)
 		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	// The mode the server will hold: a left-out mode is not sent, so an
+	// existing service keeps its own and a new one is HTTP.
+	mode := plan.Mode
+	switch {
+	case config.Mode.IsNull() && create:
+		mode = types.StringValue("http")
+	case config.Mode.IsNull():
+		mode = state.Mode
+	}
+	modeKnown := ""
+	if !mode.IsNull() && !mode.IsUnknown() {
+		modeKnown = mode.ValueString()
+	}
+	private := !plan.Private.IsUnknown() && plan.Private.ValueBool()
+	var existing []ReverseProxyServiceTargetModel
+	if !create && !state.Targets.IsNull() && !state.Targets.IsUnknown() {
+		resp.Diagnostics.Append(state.Targets.ElementsAs(ctx, &existing, false)...)
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		checkBlank = !config.AccessGroups.IsNull() || !state.Private.ValueBool()
-		switch {
-		case config.Mode.IsNull():
-			// A left-out mode is not sent and the server keeps the
-			// service's mode.
-			plan.Mode = state.Mode
-		case !config.Mode.Equal(state.Mode):
-			// A configured mode change (or one not known yet) fails in
-			// place (#77) and is planned anew against an empty state when
-			// the service is replaced, so the values kept from this state
-			// say nothing about the new service.
-			return
-		}
+	}
+	// A left-out path is "/" only on a write; otherwise it may be kept.
+	actions := targetActions(plan.Targets, config.Targets, existing, writes)
+	if !create && writes {
+		resp.Diagnostics.Append(inPlaceOnly(actions.keptProblems())...)
+	}
+	var targetPrivacy, targetProblems diag.Diagnostics
+	if writes {
+		resp.Diagnostics.Append(planOmittedPaths(ctx, config.Targets, plan.Targets, resp)...)
+		var updateOnly diag.Diagnostics
+		targetPrivacy, targetProblems, updateOnly = actions.problems(private, modeKnown)
+		resp.Diagnostics.Append(inPlaceOnly(updateOnly)...)
+		resp.Diagnostics.Append(targetHostProblems(config.Targets, modeKnown)...)
+	}
+	if !private {
+		resp.Diagnostics.Append(targetProblems...)
+		return
+	}
+	resp.Diagnostics.Append(targetProblems...)
+	if create && config.AccessGroups.IsNull() {
+		resp.Diagnostics.AddAttributeError(path.Root("access_groups"), "Access groups required",
+			"A new service with private = true needs at least one group in access_groups.")
+		return
+	}
+	// Blank IDs are refused in a configured list and when a service turns
+	// private; an already-private service keeps a list that still works
+	// through its other IDs.
+	checkBlank := create || !config.AccessGroups.IsNull() || !state.Private.ValueBool()
+	if !create && !config.Mode.IsNull() && !config.Mode.Equal(state.Mode) {
+		// A configured mode change (or one not known yet) fails in place
+		// (#77) and is planned anew against an empty state when the service
+		// is replaced, so the values kept from this state say nothing about
+		// the new service.
+		resp.Diagnostics.Append(targetPrivacy...)
+		return
 	}
 	// A configuration error stops at ValidateConfig, so this reports only
 	// problems with values kept from state.
-	problems := privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth, checkBlank)
+	problems := privateServiceProblems(mode, plan.AccessGroups, plan.Auth, checkBlank)
+	problems.Append(targetPrivacy...)
+	// The hint covers errors that come from the service being private, not
+	// the ones that public would leave in place.
 	if config.Private.IsNull() && problems.HasError() {
 		problems.AddAttributeError(path.Root("private"), "Service is private from its state",
 			"private is left out, so the service stays private and the errors above apply. Set private = false to make it "+
 				"public; that is also needed for -replace, which plans against the existing service first.")
 	}
 	resp.Diagnostics.Append(problems...)
+}
+
+// emptyOrNull keeps a prior empty list where the server omits the list: an
+// empty list and an absent one mean the same to it.
+func emptyOrNull(prior types.List) types.List {
+	if !prior.IsNull() && !prior.IsUnknown() && len(prior.Elements()) == 0 {
+		return prior
+	}
+	return types.ListNull(types.StringType)
+}
+
+// holdsNothing reports whether a known object sets no attribute: each is
+// null or an empty list.
+func holdsNothing(obj types.Object) bool {
+	if obj.IsNull() || obj.IsUnknown() {
+		return false
+	}
+	for _, v := range obj.Attributes() {
+		if l, ok := v.(types.List); ok && !l.IsUnknown() && len(l.Elements()) == 0 {
+			continue
+		}
+		if !v.IsNull() {
+			return false
+		}
+	}
+	return true
+}
+
+// planOmittedPaths plans path = null for a target whose path the
+// configuration leaves out. On a create or an update the path is not sent
+// and the server stores none, which it reads as "/"; "known after apply"
+// would hide that a target kept at another path (after an import) moves to
+// "/", together with its access action.
+func planOmittedPaths(ctx context.Context, configured, planned types.List, resp *resource.ModifyPlanResponse) diag.Diagnostics {
+	var diags diag.Diagnostics
+	if configured.IsNull() || configured.IsUnknown() || planned.IsNull() || planned.IsUnknown() {
+		return diags
+	}
+	cfg, plan := configured.Elements(), planned.Elements()
+	if len(cfg) != len(plan) {
+		return diags
+	}
+	elements := make([]attr.Value, len(plan))
+	changed := false
+	for i, e := range cfg {
+		elements[i] = plan[i]
+		c, ok := e.(types.Object)
+		p, pok := plan[i].(types.Object)
+		if !ok || !pok || c.IsNull() || c.IsUnknown() || p.IsNull() || p.IsUnknown() {
+			continue
+		}
+		if cp, ok := c.Attributes()["path"].(types.String); !ok || !cp.IsNull() {
+			continue
+		}
+		attrs := p.Attributes()
+		if pp, ok := attrs["path"].(types.String); !ok || !pp.IsUnknown() {
+			continue
+		}
+		attrs["path"] = types.StringNull()
+		obj, d := types.ObjectValue(p.AttributeTypes(ctx), attrs)
+		diags.Append(d...)
+		elements[i], changed = obj, true
+	}
+	if !changed || diags.HasError() {
+		return diags
+	}
+	// One write for the whole list: each SetAttribute rebuilds the plan.
+	list, d := types.ListValue(planned.ElementType(ctx), elements)
+	diags.Append(d...)
+	if !diags.HasError() {
+		diags.Append(resp.Plan.SetAttribute(ctx, path.Root("targets"), list)...)
+	}
+	return diags
+}
+
+// plannedAction is what the server will hold for a configured target.
+type plannedAction struct {
+	action    string // "" when not known at plan time
+	kept      bool   // left out and taken from the current target at its path
+	path      string // effective path ("/" when left out)
+	pathKnown bool
+	enabled   int // 1 enabled, 0 disabled, -1 not known
+}
+
+// targetAccessActions is what the server will do with the configured
+// targets' access actions on a create (existing nil) or an update.
+type targetAccessActions struct {
+	targets []plannedAction
+	// removed lists the paths whose current non-inherit action the update
+	// drops while no target sets an action; duplicate is a path that has
+	// several current targets while some planned target leaves its action
+	// out. The server refuses both.
+	removed      []int  // current target indexes
+	duplicate    [2]int // current target indexes sharing a path, valid when hasDuplicate
+	hasDuplicate bool
+}
+
+// targetActions follows the server (v0.83, v0.82:
+// preserveTargetAccessActions): when the current service has a non-inherit
+// action and not every target sets one, a target that leaves its action out
+// takes the action of the first current target at its path, and each current
+// path is taken at most once, in target order. The targets are followed in
+// order up to the first one whose path is not known at plan time, since that
+// one could take any current path; actions after it stay unknown.
+//
+// omittedPathIsRoot says whether a left-out path is "/": on a create or an
+// update it is (nothing is sent and the server uses "/"), but without a plan
+// it may stand for a path kept unchanged from state.
+func targetActions(planned, configured types.List, existing []ReverseProxyServiceTargetModel, omittedPathIsRoot bool) targetAccessActions {
+	var out targetAccessActions
+	if planned.IsNull() || planned.IsUnknown() {
+		return out
+	}
+	elements := planned.Elements()
+	// The configuration tells a left-out value from one not known yet, as
+	// long as it lines up with the plan (ignore_changes can keep targets the
+	// configuration no longer lists).
+	var cfg []attr.Value
+	if !configured.IsNull() && !configured.IsUnknown() && len(configured.Elements()) == len(elements) {
+		cfg = configured.Elements()
+	}
+	leftOut := func(i int, name string) bool {
+		if cfg == nil {
+			return false
+		}
+		c, ok := cfg[i].(types.Object)
+		if !ok || c.IsNull() || c.IsUnknown() {
+			return false
+		}
+		v, ok := c.Attributes()[name].(types.String)
+		return ok && v.IsNull()
+	}
+	out.targets = make([]plannedAction, len(elements))
+	omitted := make([]bool, len(elements))
+	// With no targets the server still checks for dropped controlled paths.
+	allProvided, provided := len(elements) > 0, false
+	for i, e := range elements {
+		t := &out.targets[i]
+		t.enabled = -1
+		obj, ok := e.(types.Object)
+		if !ok || obj.IsUnknown() || obj.IsNull() {
+			provided = true // may set one
+			continue
+		}
+		attrs := obj.Attributes()
+		p, _ := attrs["path"].(types.String)
+		switch {
+		case !p.IsNull() && !p.IsUnknown():
+			t.path, t.pathKnown = targetLocation(p), true
+		case omittedPathIsRoot && (p.IsNull() || leftOut(i, "path")):
+			// Not sent: the server uses "/".
+			t.path, t.pathKnown = "/", true
+		}
+		if en, ok := attrs["enabled"].(types.Bool); ok && !en.IsUnknown() {
+			t.enabled = 1 // left out, the schema default is true
+			if !en.IsNull() && !en.ValueBool() {
+				t.enabled = 0
+			}
+		}
+		a, _ := attrs["access_action"].(types.String)
+		switch {
+		case a.IsNull() || (a.IsUnknown() && leftOut(i, "access_action")):
+			omitted[i], allProvided = true, false
+		case a.IsUnknown():
+			provided = true
+		default:
+			provided = true
+			t.action = a.ValueString()
+		}
+	}
+	controlled := false
+	for _, t := range existing {
+		if v := t.AccessAction.ValueString(); v != "" && v != "inherit" {
+			controlled = true
+		}
+	}
+	if !controlled || allProvided {
+		for i := range out.targets {
+			if omitted[i] {
+				out.targets[i].action = "inherit"
+			}
+		}
+		return out
+	}
+	byPath := map[string]int{}
+	for j, t := range existing {
+		loc := targetLocation(t.Path)
+		if first, dup := byPath[loc]; dup && !out.hasDuplicate {
+			out.duplicate, out.hasDuplicate = [2]int{first, j}, true
+		}
+		byPath[loc] = j
+	}
+	if out.hasDuplicate {
+		// The server stops before taking any action.
+		return out
+	}
+	for i := range out.targets {
+		t := &out.targets[i]
+		if !t.pathKnown {
+			return out
+		}
+		if omitted[i] {
+			t.action = "inherit"
+			if j, ok := byPath[t.path]; ok && existing[j].AccessAction.ValueString() != "" {
+				t.action, t.kept = existing[j].AccessAction.ValueString(), true
+			}
+		}
+		delete(byPath, t.path)
+	}
+	if !provided {
+		for _, j := range byPath {
+			if action := existing[j].AccessAction.ValueString(); action != "" && action != "inherit" {
+				out.removed = append(out.removed, j)
+			}
+		}
+		slices.Sort(out.removed)
+	}
+	return out
+}
+
+// keptProblems reports the updates the server refuses while keeping
+// left-out actions.
+func (a targetAccessActions) keptProblems() diag.Diagnostics {
+	var diags diag.Diagnostics
+	// Paths are not repeated in diagnostics: a mistaken value may carry
+	// something secret, and Terraform cannot redact diagnostic text.
+	if a.hasDuplicate {
+		diags.AddAttributeError(path.Root("targets"), "Access action needed on every target",
+			fmt.Sprintf("Current targets %d and %d share a path and a target has an access_action other than "+
+				"\"inherit\", so the server keeps left-out actions only when every target sets access_action. Set "+
+				"access_action on every target.", a.duplicate[0], a.duplicate[1]))
+	}
+	for _, j := range a.removed {
+		diags.AddAttributeError(path.Root("targets"), "Access action needed when a controlled path goes",
+			fmt.Sprintf("Current target %d has an access_action other than \"inherit\" on the server, and this update "+
+				"removes or moves its path while no target sets access_action, which the server refuses. Set "+
+				"access_action on at least one target (\"inherit\" keeps the default).", j))
+	}
+	return diags
+}
+
+// problems reports actions the server refuses for this service (v0.83,
+// v0.82: validateL4Target, validateTargetAccessAction, validateHTTPTargets):
+// a non-inherit action outside HTTP mode, bypass on a private service, a
+// non-inherit action on a path that is not a canonical absolute prefix, and
+// two enabled targets on one path once any enabled target has a non-inherit
+// action. mode is "" when not known.
+//
+// A configured bypass on a private service comes back as privacy, the only
+// error the service being private causes; errors that rest on an action the
+// server keeps from a current target come back as updateOnly.
+func (a targetAccessActions) problems(private bool, mode string) (privacy, diags, updateOnly diag.Diagnostics) {
+	// strict is set by an action the request carries or defaults to;
+	// keptStrict by one the server only keeps on an update.
+	strict, keptStrict := false, false
+	for i, t := range a.targets {
+		if t.action == "" || t.action == "inherit" {
+			continue
+		}
+		if t.enabled == 1 {
+			if t.kept {
+				keptStrict = true
+			} else {
+				strict = true
+			}
+		}
+		at := path.Root("targets").AtListIndex(i).AtName("access_action")
+		switch {
+		case mode != "" && mode != "http":
+			d := diag.NewAttributeErrorDiagnostic(at, "Access action needs HTTP",
+				fmt.Sprintf("access_action %q is only supported for HTTP services; mode is %q. Leave it out or set \"inherit\".",
+					t.action, mode))
+			if t.kept {
+				// Kept from the current HTTP target: a new service starts
+				// at inherit.
+				updateOnly.Append(d)
+			} else {
+				diags.Append(d)
+			}
+			continue
+		case private && t.action == "bypass" && t.kept:
+			updateOnly.AddAttributeError(at, "Bypass not allowed on a private service",
+				"The current target at this path has access_action = \"bypass\" on the server, and this target keeps it "+
+					"while access_action is left out, but a private service cannot have it. Set access_action = \"inherit\" or \"block\".")
+		case private && t.action == "bypass":
+			privacy.AddAttributeError(at, "Bypass not allowed on a private service",
+				"private = true cannot be combined with access_action = \"bypass\" on a target; use \"inherit\" or \"block\".")
+		}
+		if t.pathKnown {
+			if problem := accessActionPathProblem(t.path); problem != "" {
+				diags.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("path"), "Path not usable with an access action",
+					fmt.Sprintf("access_action %q needs a canonical path prefix: %s.", t.action, problem))
+			}
+		}
+	}
+	if (!strict && !keptStrict) || (mode != "" && mode != "http") {
+		return privacy, diags, updateOnly
+	}
+	seen := map[string]int{}
+	for i, t := range a.targets {
+		if t.enabled != 1 || !t.pathKnown {
+			continue
+		}
+		if first, dup := seen[t.path]; dup {
+			d := diag.NewAttributeErrorDiagnostic(path.Root("targets").AtListIndex(i).AtName("path"), "Duplicate target path",
+				fmt.Sprintf("Targets %d and %d are both enabled at one path, which the server refuses once a target has an "+
+					"access_action other than \"inherit\". Give each enabled target its own path.", first, i))
+			if strict {
+				diags.Append(d)
+			} else {
+				updateOnly.Append(d)
+			}
+			continue
+		}
+		seen[t.path] = i
+	}
+	return privacy, diags, updateOnly
+}
+
+// keptActionProblems refuses, before the update is sent, what the server
+// refuses when it keeps left-out actions from the live targets; the plan
+// only warned, since it could not tell an update from a replacement.
+func keptActionProblems(ctx context.Context, req api.ServiceRequest, live *api.Service) diag.Diagnostics {
+	var diags diag.Diagnostics
+	// The server decides from the targets the request carries.
+	targetType := ReverseProxyServiceTargetModel{}.TFType()
+	var sent []attr.Value
+	if req.Targets != nil {
+		for _, t := range *req.Targets {
+			attrs := map[string]attr.Value{}
+			for n, at := range targetType.AttrTypes {
+				attrs[n] = nullOf(at.ValueType(ctx))
+			}
+			attrs["options"] = types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes)
+			attrs["path"] = types.StringPointerValue(t.Path)
+			attrs["enabled"] = types.BoolValue(t.Enabled)
+			if t.AccessAction != nil {
+				attrs["access_action"] = types.StringValue(string(*t.AccessAction))
+			}
+			obj, d := types.ObjectValue(targetType.AttrTypes, attrs)
+			diags.Append(d...)
+			sent = append(sent, obj)
+		}
+	}
+	requested, d := types.ListValue(targetType, sent)
+	diags.Append(d...)
+	var current ReverseProxyServiceModel
+	diags.Append(reverseProxyServiceAPIToTerraform(ctx, live, &current)...)
+	if diags.HasError() {
+		return diags
+	}
+	var existing []ReverseProxyServiceTargetModel
+	if !current.Targets.IsNull() && !current.Targets.IsUnknown() {
+		diags.Append(current.Targets.ElementsAs(ctx, &existing, false)...)
+	}
+	if diags.HasError() {
+		return diags
+	}
+	mode := "http"
+	if req.Mode != nil {
+		mode = string(*req.Mode)
+	} else if live.Mode != nil {
+		mode = string(*live.Mode)
+	}
+	actions := targetActions(requested, requested, existing, true)
+	diags.Append(actions.keptProblems()...)
+	_, _, updateOnly := actions.problems(req.Private != nil && *req.Private, mode)
+	diags.Append(updateOnly...)
+	return diags
+}
+
+// inPlaceOnly turns errors that only an in-place update meets into
+// warnings: the plan cannot tell an update from a replacement (-replace
+// plans against the current service first), and a new service keeps
+// nothing. Update refuses the same cases before writing.
+func inPlaceOnly(errs diag.Diagnostics) diag.Diagnostics {
+	var out diag.Diagnostics
+	for _, d := range errs {
+		detail := d.Detail() + " An in-place update stops before changing anything; a replacement is not affected."
+		if wp, ok := d.(diag.DiagnosticWithPath); ok {
+			out.AddAttributeWarning(wp.Path(), d.Summary(), detail)
+		} else {
+			out.AddWarning(d.Summary(), detail)
+		}
+	}
+	return out
+}
+
+// accessActionPathProblem returns why a path cannot carry a non-inherit
+// action (v0.83, v0.82: validateAccessActionPath), or "".
+func accessActionPathProblem(p string) string {
+	if p == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(p, "/") {
+		return "it must start with /"
+	}
+	if !utf8.ValidString(p) || strings.ContainsAny(p, "%\\?#;") || strings.IndexFunc(p, unicode.IsControl) >= 0 {
+		return "it must not contain %, \\, ?, #, ; or control characters"
+	}
+	segments := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	for i, segment := range segments {
+		if segment == "." || segment == ".." || (segment == "" && i != len(segments)-1) {
+			return "it must not contain empty, . or .. segments"
+		}
+	}
+	return ""
+}
+
+// targetHostProblems refuses a configured host the server rejects for the
+// service's mode and the target's type (v0.83, v0.82:
+// validateDirectUpstreamHost, validateSubnetTarget, validateL4Target). A
+// left-out host is not sent, so it counts as empty. Checks that depend on a
+// value not known at plan time wait for it; mode "" means not known, and
+// then only the rules both modes share are checked. The
+// host itself is not repeated in the diagnostic, since a mistaken value may
+// carry credentials.
+func targetHostProblems(configured types.List, mode string) diag.Diagnostics {
+	var diags diag.Diagnostics
+	if configured.IsNull() || configured.IsUnknown() {
+		return diags
+	}
+	for i, e := range configured.Elements() {
+		obj, ok := e.(types.Object)
+		if !ok || obj.IsNull() || obj.IsUnknown() {
+			continue
+		}
+		attrs := obj.Attributes()
+		targetType, _ := attrs["target_type"].(types.String)
+		host, _ := attrs["host"].(types.String)
+		if targetType.IsNull() || host.IsUnknown() {
+			continue
+		}
+		direct := 0
+		if opts, ok := attrs["options"].(types.Object); ok && opts.IsUnknown() {
+			direct = -1
+		} else if ok && !opts.IsNull() {
+			if v, ok := opts.Attributes()["direct_upstream"].(types.Bool); ok && v.IsUnknown() {
+				direct = -1
+			} else if ok && v.ValueBool() {
+				direct = 1
+			}
+		}
+		problem := ""
+		switch {
+		case !targetType.IsUnknown():
+			problem = hostProblem(mode, targetType.ValueString(), host.ValueString(), direct)
+		case mode == "http" && direct == 1:
+			// Every target type of an HTTP service checks a direct
+			// upstream host the same way, apart from an empty one.
+			problem = directHostProblem(strings.TrimSpace(host.ValueString()), direct)
+		}
+		if problem != "" {
+			diags.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("host"), "Host not usable",
+				fmt.Sprintf("The server refuses this target's host: %s.", problem))
+		}
+	}
+	return diags
+}
+
+// hostProblem returns why the server refuses host for a target, or "".
+// direct is 1 with direct_upstream, 0 without, -1 when not known.
+func hostProblem(mode, targetType, host string, direct int) string {
+	trimmed := strings.TrimSpace(host)
+	if targetType != "subnet" {
+		return directHostProblem(trimmed, direct) // the same in every mode
+	}
+	if mode != "http" {
+		// L4 (or not known yet: an empty host fails in every mode).
+		if host == "" {
+			return "a subnet target needs a host"
+		}
+		return ""
+	}
+	if trimmed == "" {
+		return "a subnet target needs a host"
+	}
+	if problem := hostSyntaxProblem(trimmed); problem != "" {
+		return problem
+	}
+	ip, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]"))
+	switch {
+	case err != nil:
+		return ""
+	case ip.Zone() != "":
+		return "IPv6 zones are refused"
+	case direct == 1 && (ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast()):
+		return "with direct_upstream, loopback, multicast and link-local addresses are refused"
+	}
+	return ""
+}
+
+// directHostProblem checks a peer, host or domain target's host, which the
+// server validates only with direct_upstream; an empty one is replaced by
+// the looked-up address.
+func directHostProblem(trimmed string, direct int) string {
+	if direct != 1 || trimmed == "" {
+		return ""
+	}
+	if problem := hostSyntaxProblem(trimmed); problem != "" {
+		return problem
+	}
+	ip, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]"))
+	if err == nil && (ip.Zone() != "" || ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast()) {
+		return "with direct_upstream, loopback, multicast, link-local and zoned addresses are refused"
+	}
+	return ""
+}
+
+// hostSyntaxProblem returns the server's syntax objection to a trimmed host.
+func hostSyntaxProblem(trimmed string) string {
+	if strings.ContainsAny(trimmed, " \t/") {
+		return "it contains a space, tab or slash"
+	}
+	if _, _, err := net.SplitHostPort(trimmed); err == nil {
+		return "it includes a port (set port instead)"
+	}
+	return ""
+}
+
+// onlyUnknownDifferences reports whether every known value of plan equals
+// the one in state, so the plan changes nothing unless a value not known yet
+// turns out different.
+func onlyUnknownDifferences(plan, state tftypes.Value) bool {
+	if !plan.IsKnown() {
+		return true
+	}
+	if plan.IsNull() || state.IsNull() || !state.IsKnown() || !plan.Type().Equal(state.Type()) {
+		return plan.Equal(state)
+	}
+	switch plan.Type().(type) {
+	case tftypes.Object, tftypes.Map:
+		var p, s map[string]tftypes.Value
+		if plan.As(&p) != nil || state.As(&s) != nil || len(p) != len(s) {
+			return false
+		}
+		for k, v := range p {
+			if sv, ok := s[k]; !ok || !onlyUnknownDifferences(v, sv) {
+				return false
+			}
+		}
+		return true
+	case tftypes.List, tftypes.Tuple:
+		var p, s []tftypes.Value
+		if plan.As(&p) != nil || state.As(&s) != nil || len(p) != len(s) {
+			return false
+		}
+		for i := range p {
+			if !onlyUnknownDifferences(p[i], s[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return plan.Equal(state)
+}
+
+// directUpstreamWarnings flags direct_upstream on an L4 service: NetBird
+// (v0.83, v0.82) stores it but does not pass it to the proxy for TCP, UDP
+// and TLS services, so the target is still dialled through the embedded
+// client.
+func directUpstreamWarnings(configured types.List, mode string) diag.Diagnostics {
+	var diags diag.Diagnostics
+	if configured.IsNull() || configured.IsUnknown() {
+		return diags
+	}
+	for i, e := range configured.Elements() {
+		obj, ok := e.(types.Object)
+		if !ok || obj.IsNull() || obj.IsUnknown() {
+			continue
+		}
+		opts, ok := obj.Attributes()["options"].(types.Object)
+		if !ok || opts.IsNull() || opts.IsUnknown() {
+			continue
+		}
+		if v, ok := opts.Attributes()["direct_upstream"].(types.Bool); ok && !v.IsUnknown() && v.ValueBool() {
+			diags.AddAttributeWarning(path.Root("targets").AtListIndex(i).AtName("options").AtName("direct_upstream"),
+				"direct_upstream has no effect in this mode",
+				fmt.Sprintf("NetBird stores direct_upstream for a %q service but does not pass it to the proxy, which dials "+
+					"the target through its embedded NetBird client as before. It takes effect for HTTP services only.", mode))
+		}
+	}
+	return diags
+}
+
+// targetLocation is the server's reading of a target path: left out is "/".
+func targetLocation(p types.String) string {
+	if p.IsNull() || p.ValueString() == "" {
+		return "/"
+	}
+	return p.ValueString()
 }
 
 // privateRequestProblem checks the access groups the update would send for a

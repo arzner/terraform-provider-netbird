@@ -6,12 +6,15 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
 
@@ -1180,6 +1183,339 @@ resource "netbird_group" "allowed" {
 	})
 }
 
+// Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream covers the
+// per-target access action, the CrowdSec mode and direct upstream targets.
+func Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream(t *testing.T) {
+	cluster := testRequireProxyCluster(t)
+	rName := "s" + acctest.RandStringFromCharSet(8, acctest.CharSetAlpha)
+	domain := rName + "." + cluster.Address
+	rNameFull := "netbird_reverse_proxy_service." + rName
+	var createdID string
+	peerID1 := testPeerID(t, "peer1")
+	groupID := e2eGroupAllID()
+	// The server stores every CrowdSec mode whatever the cluster supports,
+	// but only a capable cluster gets an active one: enforce without a
+	// checker denies every request from outside the tunnel.
+	crowdsec, crowdsecNext := "off", "off"
+	if cluster.SupportsCrowdsec != nil && *cluster.SupportsCrowdsec {
+		crowdsec, crowdsecNext = "observe", "enforce"
+	}
+	// Both targets are one backend (the shared read-only peer1) on two paths,
+	// which is how access actions are meant to be used.
+	type svc struct {
+		adminAction string // the /admin target's access_action line, "" leaves it out
+		adminPort   int    // 0 leaves the /admin target out
+		firstAction string // the first target's access_action line
+		direct      bool   // direct_upstream on the first target of a private service
+		crowdsec    string // "" leaves access_restrictions out, "null" sets crowdsec_mode = null
+		emptyCidrs  bool   // allowed_cidrs = [] beside the mode
+		adminNoPath bool   // the /admin target leaves path out (kept from state)
+		nameFrom    string // name from terraform_data.name with this input, not known until it is applied
+		extra       string // more configuration
+	}
+	config := func(c svc) string {
+		options, private := "", "false"
+		if c.direct {
+			options = `
+    options     = { direct_upstream = true }`
+			private = "true"
+		}
+		restrictions := ""
+		if c.crowdsec != "" {
+			mode := fmt.Sprintf("%q", c.crowdsec)
+			if c.crowdsec == "null" {
+				mode = "null"
+			}
+			cidrs := ""
+			if c.emptyCidrs {
+				cidrs = `
+    allowed_cidrs = []`
+			}
+			restrictions = fmt.Sprintf(`
+  access_restrictions = {
+    crowdsec_mode = %s%s
+  }
+`, mode, cidrs)
+		}
+		admin := ""
+		if c.adminPort != 0 {
+			adminPath := `
+    path        = "/admin"`
+			if c.adminNoPath {
+				adminPath = ""
+			}
+			admin = fmt.Sprintf(`, {
+    target_id   = %q
+    target_type = "peer"
+    port        = %d
+    protocol    = "http"%s
+    %s
+  }`, peerID1, c.adminPort, adminPath, c.adminAction)
+		}
+		name := fmt.Sprintf("%q", rName)
+		if c.nameFrom != "" {
+			name = "terraform_data.name.output"
+			c.extra += fmt.Sprintf(`
+resource "terraform_data" "name" {
+  input = %q
+}`, c.nameFrom)
+		}
+		return fmt.Sprintf(`
+resource "netbird_reverse_proxy_service" %q {
+  name          = %s
+  domain        = %q
+  mode          = "http"
+  private       = %s
+  access_groups = [%q]
+  auth          = {}
+%s
+  targets = [{
+    target_id   = %q
+    target_type = "peer"
+    port        = 8080
+    protocol    = "http"
+    %s%s
+  }%s]
+}`, rName, name, domain, private, groupID, restrictions, peerID1, c.firstAction, options, admin) + c.extra
+	}
+	// onServer checks the service as the server has it: action is the /admin
+	// target's ("" for no /admin target), crowdsec the stored mode ("" none).
+	onServer := func(action string, direct bool, crowdsec string) resource.TestCheckFunc {
+		return func(s *terraform.State) error {
+			svc, err := testClient().ReverseProxyServices.Get(context.Background(), s.RootModule().Resources[rNameFull].Primary.Attributes["id"])
+			if err != nil {
+				return fmt.Errorf("get service: %w", err)
+			}
+			seen := map[string]int{}
+			for _, target := range svc.Targets {
+				seen[normalizedPath(target.Path)]++
+			}
+			wantAdmin := 0
+			if action != "" {
+				wantAdmin = 1
+			}
+			if len(svc.Targets) != 1+wantAdmin || seen["/"] != 1 || seen["/admin"] != wantAdmin {
+				return fmt.Errorf("expected one target at / and %d at /admin, found %v", wantAdmin, seen)
+			}
+			for _, target := range svc.Targets {
+				switch normalizedPath(target.Path) {
+				case "/":
+					if target.AccessAction == nil || *target.AccessAction != api.ServiceTargetAccessActionInherit {
+						return fmt.Errorf("first target: expected inherit, found %v", target.AccessAction)
+					}
+					if got := target.Options != nil && target.Options.DirectUpstream != nil && *target.Options.DirectUpstream; got != direct {
+						return fmt.Errorf("first target: expected direct_upstream %t, found %t", direct, got)
+					}
+				case "/admin":
+					if target.AccessAction == nil || string(*target.AccessAction) != action {
+						return fmt.Errorf("admin target: expected %s, found %v", action, target.AccessAction)
+					}
+				}
+			}
+			got := ""
+			if svc.AccessRestrictions != nil && svc.AccessRestrictions.CrowdsecMode != nil {
+				got = string(*svc.AccessRestrictions.CrowdsecMode)
+			}
+			if got != crowdsec {
+				return fmt.Errorf("crowdsec_mode on the server: expected %q, found %q", crowdsec, got)
+			}
+			return nil
+		}
+	}
+	l4 := fmt.Sprintf(`
+resource "netbird_reverse_proxy_service" "l4" {
+  name    = "%s-l4"
+  domain  = "%s-l4.%s"
+  mode    = "tcp"
+  auth    = {}
+  targets = [{
+    target_id     = %q
+    target_type   = "peer"
+    port          = 8080
+    protocol      = "tcp"
+    access_action = "block"
+  }]
+}`, rName, rName, cluster.Address, peerID1)
+	private := svc{adminAction: `access_action = "block"`, adminPort: 8082, direct: true, crowdsec: crowdsec}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().ReverseProxyServices.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: config(svc{adminAction: `access_action = "block"`, adminPort: 8081, crowdsec: crowdsec}),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "targets.0.access_action", "inherit"),
+					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "block"),
+					resource.TestCheckResourceAttr(rNameFull, "access_restrictions.crowdsec_mode", crowdsec),
+					onServer("block", false, crowdsec),
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				// Values outside the enums are refused at plan time.
+				Config:      config(svc{adminAction: `access_action = "deny"`, adminPort: 8081, crowdsec: crowdsec}),
+				ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Match.*targets\[1\]\.access_action`),
+			},
+			{
+				Config:      config(svc{adminAction: `access_action = "block"`, adminPort: 8081, crowdsec: "strict"}),
+				ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Match.*access_restrictions\.crowdsec_mode`),
+			},
+			{
+				// A path left out is kept from state when nothing changes, so it
+				// is not a second target at "/".
+				Config:   config(svc{adminAction: `access_action = "block"`, adminPort: 8081, crowdsec: crowdsec, adminNoPath: true}),
+				PlanOnly: true,
+			},
+			{
+				// A name not known until apply makes the first plan an update
+				// that may not happen. It resolves to the current name: nothing
+				// is written and /admin stays.
+				Config: config(svc{adminAction: `access_action = "block"`, adminPort: 8081, crowdsec: crowdsec, adminNoPath: true, nameFrom: rName}),
+				Check:  onServer("block", false, crowdsec),
+			},
+			{
+				// It resolves to another name: the final plan sends no path for
+				// /admin, which would join "/", and refuses before writing.
+				Config:      config(svc{adminAction: `access_action = "block"`, adminPort: 8081, crowdsec: crowdsec, adminNoPath: true, nameFrom: rName + "x"}),
+				ExpectError: regexp.MustCompile(`Duplicate target path`),
+			},
+			{
+				// The service is unchanged: with its own name and /admin it
+				// plans nothing (terraform_data keeps the input it was given).
+				Config: config(svc{adminAction: `access_action = "block"`, adminPort: 8081, crowdsec: crowdsec}) + fmt.Sprintf(`
+resource "terraform_data" "name" {
+  input = %q
+}`, rName+"x"),
+				PlanOnly: true,
+			},
+			{
+				// On an update it is not sent and the server would move the
+				// target to "/", next to the first one: the plan says so.
+				Config:      config(svc{adminAction: `access_action = "block"`, adminPort: 8082, crowdsec: crowdsec, adminNoPath: true}),
+				ExpectError: regexp.MustCompile(`Duplicate target path`),
+			},
+			{
+				// The action and, on a capable cluster, the CrowdSec mode change
+				// in place; an empty list beside the mode stays empty.
+				Config:           config(svc{adminAction: `access_action = "bypass"`, adminPort: 8081, crowdsec: crowdsecNext, emptyCidrs: true}),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "bypass"),
+					resource.TestCheckResourceAttr(rNameFull, "access_restrictions.crowdsec_mode", crowdsecNext),
+					onServer("bypass", false, crowdsecNext),
+				),
+			},
+			{
+				// Left out, the action stays as it is: no change planned.
+				Config:   config(svc{adminPort: 8081, crowdsec: crowdsecNext, emptyCidrs: true}),
+				PlanOnly: true,
+			},
+			{
+				// Left out while the target changes: the update does not send
+				// it, and the server keeps the action of the target at /admin.
+				// crowdsec_mode = null clears the mode; the server then reports
+				// no restrictions, and the object that sets nothing stays.
+				Config:           config(svc{adminPort: 8082, crowdsec: "null"}),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "bypass"),
+					resource.TestCheckResourceAttr(rNameFull, "targets.1.port", "8082"),
+					resource.TestCheckNoResourceAttr(rNameFull, "access_restrictions.crowdsec_mode"),
+					onServer("bypass", false, ""),
+				),
+			},
+			{
+				Config:   config(svc{adminPort: 8082, crowdsec: "null"}),
+				PlanOnly: true,
+			},
+			{
+				// Turning the service private while /admin keeps bypass from
+				// the server is refused at plan time, left out or configured.
+				Config:      config(svc{adminPort: 8082, direct: true, crowdsec: crowdsec}),
+				ExpectError: regexp.MustCompile(`(?s)Bypass not allowed on a private service.*current target at this path`),
+			},
+			{
+				Config:      config(svc{adminAction: `access_action = "bypass"`, adminPort: 8082, direct: true, crowdsec: crowdsec}),
+				ExpectError: regexp.MustCompile(`Bypass not allowed on a private service`),
+			},
+			{
+				// A private service refuses bypass; block with a direct upstream
+				// target is fine on the harness cluster (private mode).
+				Config: config(svc{adminAction: private.adminAction, adminPort: 8082, direct: true, crowdsec: crowdsec,
+					extra: fmt.Sprintf(`
+data "netbird_reverse_proxy_service" "test" {
+  id = netbird_reverse_proxy_service.%s.id
+}`, rName)}),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("data.netbird_reverse_proxy_service.test", "targets.0.options.direct_upstream", "true"),
+					resource.TestCheckResourceAttr("data.netbird_reverse_proxy_service.test", "targets.1.access_action", "block"),
+					resource.TestCheckResourceAttr("data.netbird_reverse_proxy_service.test", "access_restrictions.crowdsec_mode", crowdsec),
+					resource.TestCheckResourceAttr(rNameFull, "targets.0.options.direct_upstream", "true"),
+					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "block"),
+					onServer("block", true, crowdsec),
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				// direct_upstream cleared outside Terraform: the refresh shows
+				// it, and the apply sets it again.
+				PreConfig: func() {
+					change := serviceChangedOutside{id: &createdID, change: func(req *api.ServiceRequest) {
+						for i := range *req.Targets {
+							if t := &(*req.Targets)[i]; normalizedPath(t.Path) == "/" && t.Options != nil {
+								off := false
+								t.Options.DirectUpstream = &off
+							}
+						}
+					}}
+					var resp plancheck.CheckPlanResponse
+					change.CheckPlan(context.Background(), plancheck.CheckPlanRequest{}, &resp)
+					if resp.Error != nil {
+						t.Fatalf("clear direct_upstream: %v", resp.Error)
+					}
+				},
+				Config:           config(private),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "targets.0.options.direct_upstream", "true"),
+					onServer("block", true, crowdsec),
+				),
+			},
+			{
+				// Outside HTTP mode only inherit is accepted.
+				Config:      config(private) + l4,
+				ExpectError: regexp.MustCompile(`Access action needs HTTP`),
+			},
+			{
+				// Dropping /admin (block) with no action set anywhere is refused
+				// by the server, so the plan refuses it.
+				Config:      config(svc{direct: true, crowdsec: crowdsec}),
+				ExpectError: regexp.MustCompile(`(?s)Access action needed when a controlled path goes.*Current target \d+ `),
+			},
+			{
+				// Also drops access_restrictions: the server then has none.
+				Config:           config(svc{firstAction: `access_action = "inherit"`, direct: true}),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "targets.#", "1"),
+					resource.TestCheckNoResourceAttr(rNameFull, "access_restrictions.crowdsec_mode"),
+					onServer("", true, ""),
+				),
+			},
+		},
+	})
+}
+
+// normalizedPath is the server's reading of a target path: left out is "/".
+func normalizedPath(p *string) string {
+	if p == nil || *p == "" {
+		return "/"
+	}
+	return *p
+}
+
 // serviceChangedOutside is a plan check that changes the service on the
 // server between plan and apply, as an operator would.
 type serviceChangedOutside struct {
@@ -1207,4 +1543,133 @@ func (c serviceChangedOutside) CheckPlan(ctx context.Context, _ plancheck.CheckP
 	}
 	c.change(&req)
 	_, resp.Error = testClient().ReverseProxyServices.Update(ctx, *c.id, req)
+}
+
+// Test_ReverseProxyService_SubnetHost covers the host of a subnet target,
+// which the server keeps as configured: a missing one is refused at plan
+// time, and a change made on the server shows in the next plan.
+func Test_ReverseProxyService_SubnetHost(t *testing.T) {
+	cluster := testRequireProxyCluster(t)
+	rName := "s" + acctest.RandStringFromCharSet(8, acctest.CharSetAlpha)
+	rNameFull := "netbird_reverse_proxy_service." + rName
+	var createdID string
+	// extra holds more target lines (path, port, access_action); the port
+	// defaults to 8080.
+	config := func(host string, extra ...string) string {
+		hostLine := ""
+		if host != "" {
+			hostLine = fmt.Sprintf("\n    host        = %q", host)
+		}
+		port := "8080"
+		for _, line := range extra {
+			if strings.HasPrefix(line, "port") {
+				port = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "port")), "="))
+				continue
+			}
+			hostLine += "\n    " + line
+		}
+		return fmt.Sprintf(`
+resource "netbird_reverse_proxy_service" %q {
+  name   = %q
+  domain = "%s.%s"
+  mode   = "http"
+  auth   = {}
+
+  targets = [{
+    target_id   = %q
+    target_type = "subnet"%s
+    port        = %s
+    protocol    = "http"
+    options     = { request_timeout = "5s", direct_upstream = false }
+  }]
+}`, rName, rName, rName, cluster.Address, e2eResourceSubnetID(), hostLine, port)
+	}
+	hostOnServer := func(want string) resource.TestCheckFunc {
+		return func(s *terraform.State) error {
+			svc, err := testClient().ReverseProxyServices.Get(context.Background(), s.RootModule().Resources[rNameFull].Primary.ID)
+			if err != nil {
+				return fmt.Errorf("get service: %w", err)
+			}
+			if len(svc.Targets) != 1 || svc.Targets[0].Host == nil || *svc.Targets[0].Host != want {
+				return fmt.Errorf("expected one target with host %q, found %+v", want, svc.Targets)
+			}
+			return nil
+		}
+	}
+	// pathOnServer checks the target's path as the server has it ("" none).
+	pathOnServer := func(want string) resource.TestCheckFunc {
+		return func(s *terraform.State) error {
+			svc, err := testClient().ReverseProxyServices.Get(context.Background(), s.RootModule().Resources[rNameFull].Primary.ID)
+			if err != nil {
+				return fmt.Errorf("get service: %w", err)
+			}
+			got := ""
+			if len(svc.Targets) == 1 && svc.Targets[0].Path != nil {
+				got = *svc.Targets[0].Path
+			}
+			if len(svc.Targets) != 1 || got != want {
+				return fmt.Errorf("expected one target with path %q, found %+v", want, svc.Targets)
+			}
+			return nil
+		}
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().ReverseProxyServices.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config:      config(""),
+				ExpectError: regexp.MustCompile(`(?s)Host not usable.*a subnet target needs a host`),
+			},
+			{
+				Config: config("192.168.10.5"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "targets.0.host", "192.168.10.5"),
+					hostOnServer("192.168.10.5"),
+				),
+			},
+			{
+				// Changed on the server: the refresh shows it and the apply
+				// sets the configured host again.
+				PreConfig: func() {
+					change := serviceChangedOutside{id: &createdID, change: func(req *api.ServiceRequest) {
+						other := "192.168.10.6"
+						(*req.Targets)[0].Host = &other
+					}}
+					var resp plancheck.CheckPlanResponse
+					change.CheckPlan(context.Background(), plancheck.CheckPlanRequest{}, &resp)
+					if resp.Error != nil {
+						t.Fatalf("change the host: %v", resp.Error)
+					}
+				},
+				Config:           config("192.168.10.5"),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check:            hostOnServer("192.168.10.5"),
+			},
+			{
+				Config: config("192.168.10.5", `path = "/admin"`),
+				Check:  pathOnServer("/admin"),
+			},
+			{
+				// Left out, the path is not sent: the plan shows null, the
+				// server keeps none and the next plan is empty.
+				Config: config("192.168.10.5", "port = 8081", `access_action = "inherit"`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					testExpectUpdateInPlace(rNameFull),
+					plancheck.ExpectKnownValue(rNameFull, tfjsonpath.New("targets").AtSliceIndex(0).AtMapKey("path"), knownvalue.Null()),
+				}},
+				Check: pathOnServer(""),
+			},
+			{
+				// The server keeps a subnet host as written, so an import
+				// recovers it without prior state; direct_upstream = false,
+				// which the server does not report, reads as false.
+				ResourceName:      rNameFull,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
 }
