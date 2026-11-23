@@ -832,7 +832,8 @@ func (w *specWalk) checkScalar(typeName, key string, prop specProperty, a attrIn
 			w.seen[member] = true
 			continue
 		}
-		if !props[name].readOnly && !prop.readOnly && !(prop.array && prop.itemReadOnly) {
+		readOnly := props[name].readOnly || prop.readOnly || (prop.array && prop.itemReadOnly)
+		if !readOnly {
 			w.t.Errorf("%s: %s is not represented by %q, which holds only %s; model it or list it in specUnmodelled", typeName, member, a.name, leaf)
 		}
 	}
