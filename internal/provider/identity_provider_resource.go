@@ -293,6 +293,8 @@ func issuerProblem(issuer string) string {
 	switch {
 	case err != nil || u.Host == "" || u.Hostname() == "":
 		return "The issuer must be an absolute URL with a host."
+	case strings.ContainsAny(u.Hostname(), "[]") || (strings.Contains(u.Host, "]") && !strings.HasPrefix(u.Host, "[")):
+		return "The issuer's host has misplaced brackets; only an IPv6 address goes in brackets."
 	case !validPort(u.Port()):
 		return "The issuer's port must be between 1 and 65535."
 	case u.Scheme != "https":

@@ -199,6 +199,11 @@ func Test_IdentityProvider_TypeChangeReplaces(t *testing.T) {
 				ExpectError: regexp.MustCompile(`(?s)Invalid issuer.*host`),
 			},
 			{
+				// So does an issuer with a stray bracket in its host.
+				Config:      testIdentityProviderResource(rName, "migrated", "keycloak", "client-id", "client-secret", "https://sso.example.com]/realms/main"),
+				ExpectError: regexp.MustCompile(`(?s)Invalid issuer.*brackets`),
+			},
+			{
 				// So does an issuer the server refuses (http).
 				Config:      testIdentityProviderResource(rName, "migrated", "keycloak", "client-id", "client-secret", "http://sso.example.test/realms/main"),
 				ExpectError: regexp.MustCompile(`(?s)Invalid issuer.*https`),
