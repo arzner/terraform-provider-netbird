@@ -356,26 +356,50 @@ func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, r
 		return
 	}
 	known := func(v types.String) bool { return !v.IsNull() && !v.IsUnknown() }
+	missing := func(v types.String) bool { return v.IsNull() || (known(v) && v.ValueString() == "") }
 	configuredService := config.IsServiceUser.Equal(types.BoolValue(true))
 	// Left out, a new user is a regular user.
 	configuredRegular := config.IsServiceUser.IsNull() || config.IsServiceUser.Equal(types.BoolValue(false))
 
-	// A new user, or one replaced because its kind changes, is created as
-	// the configuration says.
-	creates := req.State.Raw.IsNull()
-	kindChanges := !creates && !config.IsServiceUser.IsNull() && !config.IsServiceUser.IsUnknown() && !config.IsServiceUser.Equal(state.IsServiceUser)
-	if creates || kindChanges {
-		if configuredRegular {
-			missing := func(v types.String) bool { return v.IsNull() || (known(v) && v.ValueString() == "") }
-			if missing(config.Email) || missing(config.Name) {
-				resp.Diagnostics.AddError("Name and email required",
-					"A regular user is created as an invitation, which needs a name and an email; set both, or is_service_user = true for a service user.")
-			}
+	// newUser checks the fields of a user created as the configuration says:
+	// a regular user is an invitation, which needs a name and an email; a
+	// service user is created without an email.
+	newUser := func() {
+		switch {
+		case configuredRegular && (missing(config.Email) || missing(config.Name)):
+			resp.Diagnostics.AddError("Name and email required",
+				"A regular user is created as an invitation, which needs a name and an email; set both, or is_service_user = true for a service user.")
+		case configuredService && known(config.Email) && config.Email.ValueString() != "":
+			resp.Diagnostics.AddAttributeError(path.Root("email"), "Service users have no email",
+				"NetBird creates service users without an email; leave email out for a service user.")
 		}
+	}
+	if req.State.Raw.IsNull() {
+		newUser()
 		return
 	}
 
-	if known(config.Email) && !config.Email.Equal(state.Email) {
+	if config.IsServiceUser.IsUnknown() {
+		resp.Diagnostics.AddAttributeError(path.Root("is_service_user"), "User kind not known",
+			"A different is_service_user replaces the user and deletes its tokens, so the plan needs the value to decide; it is not known until apply.")
+		return
+	}
+	if !config.IsServiceUser.IsNull() && !config.IsServiceUser.Equal(state.IsServiceUser) {
+		// The kind changes: the user is replaced by a new one.
+		if state.IsCurrent.ValueBool() {
+			resp.Diagnostics.AddAttributeError(path.Root("is_service_user"), "Cannot replace the current user",
+				"Changing is_service_user replaces the user, and this is the user the provider authenticates as, which NetBird refuses to delete.")
+			return
+		}
+		newUser()
+		return
+	}
+
+	// The same user is updated: name and email cannot change.
+	if config.Email.IsUnknown() {
+		resp.Diagnostics.AddAttributeError(path.Root("email"), "Email not known",
+			"NetBird does not change a user's email, so the plan needs the value to tell it is unchanged; it is not known until apply.")
+	} else if known(config.Email) && !config.Email.Equal(state.Email) {
 		resp.Diagnostics.AddAttributeError(path.Root("email"), "Email cannot be changed",
 			fmt.Sprintf("NetBird does not change a user's email (%q). Keep the current email in the configuration, or leave it out.", state.Email.ValueString()))
 	}
@@ -383,14 +407,12 @@ func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, r
 		return
 	}
 	switch {
-	case !state.IsServiceUser.ValueBool() && config.Name.IsUnknown():
-		// Whether it changes is known only at apply.
+	case config.Name.IsUnknown():
+		resp.Diagnostics.AddAttributeError(path.Root("name"), "Name not known",
+			"NetBird does not change a user's name (a service user's new name replaces it), so the plan needs the value to decide; it is not known until apply.")
 	case !state.IsServiceUser.ValueBool():
 		resp.Diagnostics.AddAttributeError(path.Root("name"), "Name cannot be changed",
 			fmt.Sprintf("A regular user's name (%q) comes from the identity provider and NetBird does not change it. Keep the current name in the configuration, or leave it out.", state.Name.ValueString()))
-	case config.Name.IsUnknown():
-		resp.Diagnostics.AddAttributeError(path.Root("name"), "Service user name not known",
-			"A service user's new name replaces the user, so the plan needs the name to decide; it is not known until apply.")
 	case !configuredService:
 		resp.Diagnostics.AddAttributeError(path.Root("is_service_user"), "Service user kind required",
 			"Renaming a service user replaces it, and the new user is created as the configuration says: set is_service_user = true, or keep the current name.")

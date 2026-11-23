@@ -164,11 +164,17 @@ func Test_User_ServiceUserNameAndKind(t *testing.T) {
 					},
 				),
 			},
-			// Imported with the kind left out, it plans no change.
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 			{
-				Config:   config(rName+"-renamed", ""),
-				PlanOnly: true,
+				// An import block with the kind left out plans the import and
+				// nothing else.
+				Config:          config(rName+"-renamed", ""),
+				ResourceName:    rNameFull,
+				ImportState:     true,
+				ImportStateKind: resource.ImportBlockWithID,
+				ImportPlanChecks: resource.ImportPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionNoop),
+				}},
 			},
 		},
 	})

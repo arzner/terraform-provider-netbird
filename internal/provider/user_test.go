@@ -111,7 +111,12 @@ func Test_user_modifyPlanNameEmail(t *testing.T) {
 		wantError     string
 	}{
 		"service rename, kind left out":    {object("ci", "", true), object("ci2", nil, nil), "Service user kind required"},
-		"service rename, name unknown":     {object("ci", "", true), object(tftypes.UnknownValue, nil, true), "Service user name not known"},
+		"service rename, name unknown":     {object("ci", "", true), object(tftypes.UnknownValue, nil, true), "Name not known"},
+		"kind not known":                   {object("ci", "", true), object("ci", nil, tftypes.UnknownValue), "User kind not known"},
+		"email not known":                  {object("alice", "a@example.com", false), object("alice", tftypes.UnknownValue, false), "Email not known"},
+		"regular to service with an email": {object("Alice", "a@example.com", false), object("ci", "a@example.com", true), "Service users have no email"},
+		"current user changes kind":        {current(object("ci", "", true)), object("Alice", "a@example.com", false), "Cannot replace the current user"},
+		"new service user with an email":   {tftypes.NewValue(typ, nil), object("ci", "ci@example.com", true), "Service users have no email"},
 		"current user renamed":             {current(object("ci", "", true)), object("ci2", nil, true), "Cannot replace the current user"},
 		"new regular user without email":   {tftypes.NewValue(typ, nil), object("Alice", nil, nil), "Name and email required"},
 		"new service user without email":   {tftypes.NewValue(typ, nil), object("ci", nil, true), ""},
@@ -123,7 +128,7 @@ func Test_user_modifyPlanNameEmail(t *testing.T) {
 		"service user renamed":             {object("ci", "", true), object("ci2", nil, true), ""}, // replaced instead
 		"unchanged name":                   {object("alice", "a@example.com", false), object("alice", "a@example.com", false), ""},
 		"name and email left out":          {object("alice", "a@example.com", false), object(nil, nil, false), ""},
-		"name from an expression":          {object("alice", "a@example.com", false), object(tftypes.UnknownValue, nil, false), ""},
+		"name from an expression":          {object("alice", "a@example.com", false), object(tftypes.UnknownValue, nil, false), "Name not known"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			req := resource.ModifyPlanRequest{
@@ -162,5 +167,18 @@ func Test_user_modifyPlanNameEmail(t *testing.T) {
 		if resp.RequiresReplace != tc.want {
 			t.Errorf("service user %v: expected replacement %v, found %v", tc.service, tc.want, resp.RequiresReplace)
 		}
+	}
+}
+
+// The resource reads a response without the service-user flag as a regular
+// user (compatibility; current servers always send it), whatever the prior
+// value.
+func Test_userResourceAPIToTerraform_absentFlag(t *testing.T) {
+	data := UserModel{IsServiceUser: types.BoolValue(true), AutoGroups: types.ListNull(types.StringType)}
+	if d := userResourceAPIToTerraform(context.Background(), &api.User{Id: "u1", Role: "user", Status: api.UserStatusActive}, &data); d.HasError() {
+		t.Fatal(d)
+	}
+	if !data.IsServiceUser.Equal(types.BoolValue(false)) {
+		t.Errorf("expected false for an absent flag, found %v", data.IsServiceUser)
 	}
 }
