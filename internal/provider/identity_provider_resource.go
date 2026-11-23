@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -80,7 +81,7 @@ func (r *IdentityProvider) Schema(ctx context.Context, req resource.SchemaReques
 				Sensitive:           true,
 			},
 			"issuer": schema.StringAttribute{
-				MarkdownDescription: "OIDC issuer URL. `\"\"` uses the built-in issuer of google and microsoft; the other types need a URL, checked at plan time.",
+				MarkdownDescription: "OIDC issuer URL: https, with a host and without user info, query or fragment. `\"\"` uses the built-in issuer of google and microsoft; the other types need a URL. Both are checked at plan time.",
 				Required:            true,
 			},
 		},
@@ -233,4 +234,29 @@ func (r *IdentityProvider) ValidateConfig(ctx context.Context, req resource.Vali
 		resp.Diagnostics.AddAttributeError(path.Root("issuer"), "Issuer required",
 			fmt.Sprintf("type %q has no built-in issuer; set issuer to the provider's issuer URL. Only google and microsoft work with issuer = \"\".", idpType.ValueString()))
 	}
+	if problem := issuerProblem(issuer.ValueString()); problem != "" {
+		resp.Diagnostics.AddAttributeError(path.Root("issuer"), "Invalid issuer", problem)
+	}
+}
+
+// issuerProblem applies the server's syntax rules for a non-empty issuer
+// (v0.83, v0.82: IdentityProvider.Validate): an https URL with a host, no
+// user info, query or fragment. Whether the issuer answers is checked by the
+// server only.
+func issuerProblem(issuer string) string {
+	if issuer == "" {
+		return ""
+	}
+	u, err := url.Parse(issuer)
+	switch {
+	case err != nil || u.Host == "":
+		return "The issuer must be an absolute URL with a host."
+	case u.Scheme != "https":
+		return "The issuer must use https."
+	case u.User != nil:
+		return "The issuer must not contain user info."
+	case strings.ContainsAny(issuer, "?#"):
+		return "The issuer must not contain a query or a fragment."
+	}
+	return ""
 }

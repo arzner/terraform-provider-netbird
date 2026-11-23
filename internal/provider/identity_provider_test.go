@@ -163,38 +163,13 @@ func Test_identityProviderTypes(t *testing.T) {
 			if id, ok := d.Recv.List[0].Type.(*ast.Ident); !ok || id.Name != "IdentityProviderType" {
 				continue
 			}
+			// The functions must keep the shapes read here; any other shape
+			// fails, so a change in how the server decides is looked at.
 			switch d.Name.Name {
 			case "IsValid":
-				// Expected shape: switch t { case A, B, ...: return true }
-				// then return false. Anything else fails, so a change in
-				// how the server decides is looked at.
-				ast.Inspect(d.Body, func(n ast.Node) bool {
-					cc, ok := n.(*ast.CaseClause)
-					if !ok {
-						return true
-					}
-					if len(cc.Body) != 1 || !returnsBool(cc.Body[0], "true") || len(cc.List) == 0 {
-						t.Fatalf("IsValid has a case that does not just return true; update this test")
-					}
-					for _, e := range cc.List {
-						id, ok := e.(*ast.Ident)
-						if !ok {
-							t.Fatalf("IsValid has a case value that is not a constant name; update this test")
-						}
-						accepted = append(accepted, id.Name)
-					}
-					return true
-				})
+				accepted = isValidCases(t, d)
 			case "HasBuiltInIssuer":
-				// Expected shape: return t == A || t == B.
-				ast.Inspect(d.Body, func(n ast.Node) bool {
-					if be, ok := n.(*ast.BinaryExpr); ok && be.Op == token.EQL {
-						if id, ok := be.Y.(*ast.Ident); ok {
-							builtIn = append(builtIn, id.Name)
-						}
-					}
-					return true
-				})
+				builtIn = builtInIssuerTypes(t, d)
 			}
 		}
 	}
@@ -228,6 +203,71 @@ func Test_identityProviderTypes(t *testing.T) {
 	}
 }
 
+// isValidCases reads `switch t { case A, B: return true }; return false`.
+func isValidCases(t *testing.T, d *ast.FuncDecl) []string {
+	t.Helper()
+	recv := d.Recv.List[0].Names
+	if len(d.Body.List) != 2 || len(recv) != 1 || !returnsBool(d.Body.List[1], "false") {
+		t.Fatal("IsValid is not a switch followed by return false; update this test")
+	}
+	sw, ok := d.Body.List[0].(*ast.SwitchStmt)
+	if tag, isIdent := sw.Tag.(*ast.Ident); !ok || sw.Init != nil || !isIdent || tag.Name != recv[0].Name {
+		t.Fatal("IsValid does not switch on its receiver; update this test")
+	}
+	var names []string
+	for _, stmt := range sw.Body.List {
+		cc, ok := stmt.(*ast.CaseClause)
+		if !ok || len(cc.List) == 0 || len(cc.Body) != 1 || !returnsBool(cc.Body[0], "true") {
+			t.Fatal("IsValid has a case that does not just return true, or a default; update this test")
+		}
+		for _, e := range cc.List {
+			id, ok := e.(*ast.Ident)
+			if !ok {
+				t.Fatal("IsValid has a case value that is not a constant name; update this test")
+			}
+			names = append(names, id.Name)
+		}
+	}
+	return names
+}
+
+// builtInIssuerTypes reads `return t == A || t == B ...`.
+func builtInIssuerTypes(t *testing.T, d *ast.FuncDecl) []string {
+	t.Helper()
+	recv := d.Recv.List[0].Names
+	if len(d.Body.List) != 1 || len(recv) != 1 {
+		t.Fatal("HasBuiltInIssuer is not a single return; update this test")
+	}
+	ret, ok := d.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		t.Fatal("HasBuiltInIssuer is not a single return; update this test")
+	}
+	var names []string
+	var walk func(e ast.Expr)
+	walk = func(e ast.Expr) {
+		be, ok := e.(*ast.BinaryExpr)
+		if !ok {
+			t.Fatal("HasBuiltInIssuer returns something other than comparisons; update this test")
+		}
+		switch be.Op {
+		case token.LOR:
+			walk(be.X)
+			walk(be.Y)
+		case token.EQL:
+			x, xok := be.X.(*ast.Ident)
+			y, yok := be.Y.(*ast.Ident)
+			if !xok || !yok || x.Name != recv[0].Name {
+				t.Fatal("HasBuiltInIssuer compares something other than its receiver with a constant; update this test")
+			}
+			names = append(names, y.Name)
+		default:
+			t.Fatal("HasBuiltInIssuer uses an operator other than || and ==; update this test")
+		}
+	}
+	walk(ret.Results[0])
+	return names
+}
+
 // returnsBool reports whether stmt is `return <value>` for a bool literal.
 func returnsBool(stmt ast.Stmt, value string) bool {
 	ret, ok := stmt.(*ast.ReturnStmt)
@@ -257,6 +297,12 @@ func Test_identityProviderValidateConfig(t *testing.T) {
 		"oidc without an issuer":             {idpType: "oidc", issuer: "", wantError: true},
 		"keycloak with an issuer":            {idpType: "keycloak", issuer: "https://id.example.com/realms/x"},
 		"issuer not known yet":               {idpType: "keycloak", issuer: tftypes.UnknownValue},
+		"http issuer":                        {idpType: "keycloak", issuer: "http://sso.example.test/realms/main", wantError: true},
+		"issuer without a host":              {idpType: "oidc", issuer: "https:///realms/main", wantError: true},
+		"issuer with user info":              {idpType: "oidc", issuer: "https://u:p@sso.example.test/", wantError: true},
+		"issuer with a query":                {idpType: "oidc", issuer: "https://sso.example.test/?a=b", wantError: true},
+		"issuer with a fragment":             {idpType: "oidc", issuer: "https://sso.example.test/#x", wantError: true},
+		"google with an explicit issuer":     {idpType: "google", issuer: "https://accounts.google.com"},
 		"type not known yet":                 {idpType: tftypes.UnknownValue, issuer: ""},
 	} {
 		t.Run(name, func(t *testing.T) {
