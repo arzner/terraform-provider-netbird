@@ -66,6 +66,11 @@ it is based on.
 
 ### Fixed
 
+- Docs: the examples of the `netbird_dns_settings`, `netbird_network` and `netbird_network_router`
+  data sources declared resources instead of data sources; a unit test now checks every data
+  source example (#65; upstream
+  [#113](https://github.com/netbirdio/terraform-provider-netbird/issues/113),
+  [#114](https://github.com/netbirdio/terraform-provider-netbird/pull/114)).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the

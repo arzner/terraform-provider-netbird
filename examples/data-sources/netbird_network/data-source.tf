@@ -1,9 +1,9 @@
 # retrieve by name
-resource "netbird_network" "example" {
+data "netbird_network" "by_name" {
   name = "TF Test"
 }
 
-# retrieve by name
-resource "netbird_network" "example" {
+# retrieve by ID
+data "netbird_network" "by_id" {
   id = "cvit5sjl0ubs73aslrkg"
 }
