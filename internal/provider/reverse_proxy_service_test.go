@@ -1627,3 +1627,27 @@ func Test_matchPlanTargets_hostDecides(t *testing.T) {
 		t.Errorf("create: expected pairs by host, found %v", got)
 	}
 }
+
+// Targets equal in every compared field pair in list order; a survivor whose
+// port changed still pairs on its host.
+func Test_matchPlanTargets_duplicatesAndMovedPort(t *testing.T) {
+	target := func(port int64, host types.String, tag string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("x"), Port: types.Int64Value(port), Protocol: types.StringValue("http"),
+			Path: types.StringValue("/"), Host: host, TargetType: types.StringValue(tag),
+		}
+	}
+	null := types.StringNull()
+	got := matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target(80, null, "first"), target(80, null, "second")},
+		[]ReverseProxyServiceTargetModel{target(80, types.StringValue("100.0.0.1"), ""), target(80, types.StringValue("100.0.0.1"), "")})
+	if len(got) != 2 || got[0].TargetType.ValueString() != "first" || got[1].TargetType.ValueString() != "second" {
+		t.Errorf("duplicates: expected pairs in list order, found %v", got)
+	}
+	got = matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target(80, types.StringValue("10.0.0.1"), "A"), target(80, types.StringValue("10.0.0.2"), "B")},
+		[]ReverseProxyServiceTargetModel{target(81, types.StringValue("10.0.0.2"), "")})
+	if len(got) != 1 || got[0].TargetType.ValueString() != "B" {
+		t.Errorf("moved port: expected the survivor to pair with B, found %v", got)
+	}
+}

@@ -985,16 +985,17 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 			}
 		}
 	}
-	pair(func(p, l ReverseProxyServiceTargetModel) bool {
-		return samePath(p, l) && sameEndpoint(p, l) && sameHost(p, l)
-	}, false)
-	pair(func(p, l ReverseProxyServiceTargetModel) bool { return samePath(p, l) && sameEndpoint(p, l) }, true)
-	pair(samePath, true)
-	pair(func(p, l ReverseProxyServiceTargetModel) bool {
-		return unknownPath(p, l) && sameEndpoint(p, l) && sameHost(p, l)
-	}, true)
-	pair(func(p, l ReverseProxyServiceTargetModel) bool { return unknownPath(p, l) && sameEndpoint(p, l) }, true)
-	pair(unknownPath, true)
+	// From the most specific match to the least. Targets equal in everything
+	// compared pair in list order; a looser match pairs only when it is the
+	// one candidate left.
+	for _, known := range []func(p, l ReverseProxyServiceTargetModel) bool{samePath, unknownPath} {
+		pair(func(p, l ReverseProxyServiceTargetModel) bool {
+			return known(p, l) && sameEndpoint(p, l) && sameHost(p, l)
+		}, false)
+		pair(func(p, l ReverseProxyServiceTargetModel) bool { return known(p, l) && sameEndpoint(p, l) }, false)
+		pair(func(p, l ReverseProxyServiceTargetModel) bool { return known(p, l) && sameHost(p, l) }, true)
+		pair(known, true)
+	}
 	return out
 }
 
