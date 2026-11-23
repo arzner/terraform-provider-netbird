@@ -412,20 +412,14 @@ func Test_Account_RemainingSettings(t *testing.T) {
 	env := testE2E(t)
 	rName := "acc" + acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum)
 	rNameFull := "netbird_account_settings." + rName
-	original, err := testAccountSettings(env.AccountID)
+	// Restore these keys exactly as the server had them, absent ones included.
+	keys := []string{"metrics_push_enabled", "auto_update_always", "peer_hostname_collision_rejected", "agent_network_only", "dashboard_features"}
+	snapshot, err := snapshotAccountSettingsRaw(env.AccountID)
 	if err != nil {
 		t.Fatalf("could not read the account's settings: %v", err)
 	}
 	t.Cleanup(func() {
-		off := false
-		restore := api.AccountSettings{
-			MetricsPushEnabled:            valOr2(original.MetricsPushEnabled, &off),
-			AutoUpdateAlways:              valOr2(original.AutoUpdateAlways, &off),
-			PeerHostnameCollisionRejected: valOr2(original.PeerHostnameCollisionRejected, &off),
-			AgentNetworkOnly:              valOr2(original.AgentNetworkOnly, &off),
-			DashboardFeatures:             original.DashboardFeatures,
-		}
-		if err := setAccountSettingsRaw(env.AccountID, restore); err != nil {
+		if err := restoreAccountSettingsRaw(env.AccountID, snapshot, keys); err != nil {
 			t.Errorf("could not restore the account settings: %v", err)
 		}
 	})
@@ -488,10 +482,46 @@ data "netbird_account_settings" "test" {
 	})
 }
 
-// valOr2 returns p, or fallback when p is nil.
-func valOr2(p, fallback *bool) *bool {
-	if p == nil {
-		return fallback
+// snapshotAccountSettingsRaw returns the account's settings as the server sent them.
+func snapshotAccountSettingsRaw(accountID string) (map[string]json.RawMessage, error) {
+	accounts, err := listAccountsRaw(context.Background(), testClient())
+	if err != nil {
+		return nil, err
 	}
-	return p
+	current, err := selectAccount(accounts, accountID)
+	if err != nil {
+		return nil, err
+	}
+	return maps.Clone(current.settings), nil
+}
+
+// restoreAccountSettingsRaw puts keys back as they are in snapshot: present
+// keys with their raw value, absent keys removed from the request, which the
+// server reads as unset.
+func restoreAccountSettingsRaw(accountID string, snapshot map[string]json.RawMessage, keys []string) error {
+	client := testClient()
+	current, err := snapshotAccountSettingsRaw(accountID)
+	if err != nil {
+		return err
+	}
+	for _, k := range readOnlySettings {
+		delete(current, k)
+	}
+	for _, k := range keys {
+		if v, ok := snapshot[k]; ok {
+			current[k] = v
+		} else {
+			delete(current, k)
+		}
+	}
+	body, err := json.Marshal(map[string]any{"settings": current})
+	if err != nil {
+		return err
+	}
+	resp, err := client.NewRequest(context.Background(), http.MethodPut, "/api/accounts/"+accountID, bytes.NewReader(body), nil)
+	if err != nil {
+		return err
+	}
+	_, err = readBody(resp)
+	return err
 }

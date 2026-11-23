@@ -543,7 +543,7 @@ func Test_accountSettings_validateAgentNetworkOnly(t *testing.T) {
 		wantError bool
 	}{
 		"off":                  {only: valPtr(false), dashboard: tftypes.NewValue(dashboardObjectType(), nil)},
-		"on without dashboard": {only: valPtr(true), dashboard: tftypes.NewValue(dashboardObjectType(), nil), wantError: true},
+		"on without dashboard": {only: valPtr(true), dashboard: tftypes.NewValue(dashboardObjectType(), nil)},
 		"on with menu hidden":  {only: valPtr(true), dashboard: dashboardObject(false), wantError: true},
 		"on with menu shown":   {only: valPtr(true), dashboard: dashboardObject(true)},
 		"on with unknown menu": {only: valPtr(true), dashboard: tftypes.NewValue(dashboardObjectType(), tftypes.UnknownValue)},
@@ -577,4 +577,32 @@ func dashboardObjectType() tftypes.Object {
 
 func dashboardObject(agentNetwork bool) tftypes.Value {
 	return tftypes.NewValue(dashboardObjectType(), map[string]tftypes.Value{"agent_network": tftypes.NewValue(tftypes.Bool, agentNetwork)})
+}
+
+func Test_nullUnconfigured(t *testing.T) {
+	plan := AccountSettingsModel{
+		Id:                 types.StringValue("a"),
+		MetricsPushEnabled: types.BoolValue(true),
+		AutoUpdateAlways:   types.BoolValue(false),
+		JwtAllowGroups:     types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g")}),
+	}
+	config := AccountSettingsModel{
+		Id:                 types.StringNull(),
+		MetricsPushEnabled: types.BoolNull(),
+		AutoUpdateAlways:   types.BoolValue(false),
+		JwtAllowGroups:     types.ListNull(types.StringType),
+	}
+	got := nullUnconfigured(plan, config)
+	if got.Id.ValueString() != "a" {
+		t.Errorf("id must stay from the plan, found %v", got.Id)
+	}
+	if !got.MetricsPushEnabled.IsNull() || !got.JwtAllowGroups.IsNull() {
+		t.Errorf("unconfigured attributes must be null, found %v %v", got.MetricsPushEnabled, got.JwtAllowGroups)
+	}
+	if got.AutoUpdateAlways.IsNull() || got.AutoUpdateAlways.ValueBool() {
+		t.Errorf("a configured attribute must keep the plan value, found %v", got.AutoUpdateAlways)
+	}
+	if plan.MetricsPushEnabled.IsNull() {
+		t.Error("the plan must not be modified")
+	}
 }

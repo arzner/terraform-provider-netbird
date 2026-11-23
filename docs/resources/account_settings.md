@@ -36,7 +36,7 @@ resource "netbird_account_settings" "example" {
 
 ### Optional
 
-- `agent_network_only` (Boolean) Limits the dashboard to the Agent Network surface. Requires `dashboard_features.agent_network` to be true.
+- `agent_network_only` (Boolean) Limits the dashboard to the Agent Network surface. Requires the Agent Network menu (`dashboard_features.agent_network`) to be shown on the account; setting it false together with this is rejected at plan time.
 - `auto_update_always` (Boolean) When true, client updates are installed automatically in the background; when false, they require user interaction in the client UI. Applies when `auto_update_version` is not `disabled`.
 - `auto_update_version` (String) Set Clients auto-update version. "latest", "disabled", or a specific version (e.g "0.64.5")
 - `dashboard_features` (Attributes) Per-account dashboard section visibility overrides. Left out, the account's current overrides are kept. (see [below for nested schema](#nestedatt--dashboard_features))

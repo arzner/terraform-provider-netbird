@@ -12,8 +12,14 @@ it is based on.
 
 - `netbird_account_settings`: `metrics_push_enabled`, `auto_update_always`,
   `peer_hostname_collision_rejected`, `agent_network_only` and `dashboard_features`, also in
-  the data source (#23). `agent_network_only = true` requires
-  `dashboard_features.agent_network = true`, checked at plan time.
+  the data source (#23). `agent_network_only = true` together with
+  `dashboard_features.agent_network = false` is rejected at plan time.
+
+### Changed
+
+- `netbird_account_settings` sends only the settings the configuration sets; the others keep
+  the server's current values even if they changed between plan and apply (previously the
+  planned prior state was sent back).
 
 ## [0.1.0] - 2026-11-23
 

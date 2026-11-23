@@ -236,7 +236,7 @@ func (r *AccountSettings) Schema(ctx context.Context, req resource.SchemaRequest
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"agent_network_only": schema.BoolAttribute{
-				MarkdownDescription: "Limits the dashboard to the Agent Network surface. Requires `dashboard_features.agent_network` to be true.",
+				MarkdownDescription: "Limits the dashboard to the Agent Network surface. Requires the Agent Network menu (`dashboard_features.agent_network`) to be shown on the account; setting it false together with this is rejected at plan time.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
@@ -408,7 +408,13 @@ func (r *AccountSettings) Create(ctx context.Context, req resource.CreateRequest
 		return
 	}
 
-	account, err := updateAccountSettings(ctx, r.client, "", data)
+	var config AccountSettingsModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	account, err := updateAccountSettings(ctx, r.client, "", nullUnconfigured(data, config))
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating AccountSettings", err.Error())
 		return
@@ -470,7 +476,13 @@ func (r *AccountSettings) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
-	account, err := updateAccountSettings(ctx, r.client, data.Id.ValueString(), data)
+	var config AccountSettingsModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	account, err := updateAccountSettings(ctx, r.client, data.Id.ValueString(), nullUnconfigured(data, config))
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating AccountSettings", err.Error())
 		return
@@ -517,23 +529,21 @@ func dashboardFeaturesRequest(planned types.Object, current *api.AccountDashboar
 	return &out
 }
 
-// ValidateConfig rejects agent_network_only without the Agent Network menu,
-// which the server refuses at apply time.
+// ValidateConfig rejects agent_network_only together with an explicitly hidden
+// Agent Network menu, which the server refuses. A menu the configuration does
+// not set may already be shown on the account; the server checks that case.
 func (r *AccountSettings) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var data AccountSettingsModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() || data.AgentNetworkOnly.IsNull() || data.AgentNetworkOnly.IsUnknown() || !data.AgentNetworkOnly.ValueBool() {
 		return
 	}
-	if data.DashboardFeatures.IsUnknown() {
+	if data.DashboardFeatures.IsNull() || data.DashboardFeatures.IsUnknown() {
 		return
 	}
-	if !data.DashboardFeatures.IsNull() {
-		v, ok := data.DashboardFeatures.Attributes()["agent_network"].(types.Bool)
-		if ok && (v.IsUnknown() || (!v.IsNull() && v.ValueBool())) {
-			return
-		}
+	v, ok := data.DashboardFeatures.Attributes()["agent_network"].(types.Bool)
+	if ok && !v.IsNull() && !v.IsUnknown() && !v.ValueBool() {
+		resp.Diagnostics.AddAttributeError(path.Root("agent_network_only"), "Agent Network menu required",
+			"agent_network_only = true cannot be combined with dashboard_features.agent_network = false.")
 	}
-	resp.Diagnostics.AddAttributeError(path.Root("agent_network_only"), "Agent Network menu required",
-		"agent_network_only = true requires dashboard_features.agent_network = true in the same configuration.")
 }

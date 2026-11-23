@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -261,4 +262,25 @@ func knownCount(vals ...attr.Value) int {
 		}
 	}
 	return ret
+}
+
+// nullUnconfigured returns plan with every attribute that is null in config
+// set to that null value, except id. Optional+Computed attributes with
+// UseStateForUnknown carry the prior state into the plan; sending that value
+// would write back a setting someone changed between plan and apply. With
+// the configured attributes only, an update leaves the rest to the server.
+func nullUnconfigured[T any](plan, config T) T {
+	out := plan
+	pv := reflect.ValueOf(&out).Elem()
+	cv := reflect.ValueOf(config)
+	for i := 0; i < pv.NumField(); i++ {
+		if pv.Type().Field(i).Name == "Id" {
+			continue
+		}
+		c, ok := cv.Field(i).Interface().(attr.Value)
+		if ok && c.IsNull() && pv.Field(i).CanSet() {
+			pv.Field(i).Set(cv.Field(i))
+		}
+	}
+	return out
 }
