@@ -40,3 +40,54 @@ func Test_canonicalPrefix(t *testing.T) {
 		t.Errorf("null must be accepted")
 	}
 }
+
+func Test_canonicalAddress(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		ok    bool
+	}{
+		{"fd00:1234:5678::7", true},
+		{"FD00:1234:5678::7", false},
+		{"fd00:1234:5678:0:0::7", false},
+		{"fd00::1%eth0", false},
+		{"100.64.0.7", false},
+		{"::ffff:100.64.0.7", false},
+		{"fd00::/64", false},
+	} {
+		var resp validator.StringResponse
+		canonicalAddress{ipv6: true}.ValidateString(context.Background(),
+			validator.StringRequest{ConfigValue: types.StringValue(tc.value)}, &resp)
+		if ok := !resp.Diagnostics.HasError(); ok != tc.ok {
+			t.Errorf("%q: expected valid %v, found %v %v", tc.value, tc.ok, ok, resp.Diagnostics)
+		}
+	}
+}
+
+func Test_peerIPv6Request(t *testing.T) {
+	cur := "fd00::7"
+	if got := peerIPv6Request(types.StringNull(), &cur); got != nil {
+		t.Errorf("null plan: expected nil, found %v", *got)
+	}
+	if got := peerIPv6Request(types.StringUnknown(), &cur); got != nil {
+		t.Errorf("unknown plan: expected nil, found %v", *got)
+	}
+	if got := peerIPv6Request(types.StringValue("fd00::7"), &cur); got != nil {
+		t.Errorf("same address: expected nil, found %v", *got)
+	}
+	if got := peerIPv6Request(types.StringValue("fd00::8"), &cur); got == nil || *got != "fd00::8" {
+		t.Errorf("new address: expected fd00::8, found %v", got)
+	}
+	if got := peerIPv6Request(types.StringValue("fd00::8"), nil); got == nil || *got != "fd00::8" {
+		t.Errorf("no current address: expected fd00::8, found %v", got)
+	}
+}
+
+func Test_configuredOnly(t *testing.T) {
+	if got := configuredOnly(types.StringValue("fd00::7"), types.StringNull()); !got.IsNull() {
+		t.Errorf("left out of the configuration: expected null, found %v", got)
+	}
+	// ignore_changes keeps the live address in the plan while HCL says otherwise.
+	if got := configuredOnly(types.StringValue("fd00::7"), types.StringValue("fd00::9")); got.ValueString() != "fd00::7" {
+		t.Errorf("configured: expected the planned value, found %v", got)
+	}
+}

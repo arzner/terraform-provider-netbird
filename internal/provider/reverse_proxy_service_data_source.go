@@ -34,6 +34,8 @@ type ReverseProxyServiceDataSourceModel struct {
 	PassHostHeader     types.Bool   `tfsdk:"pass_host_header"`
 	RewriteRedirects   types.Bool   `tfsdk:"rewrite_redirects"`
 	ProxyCluster       types.String `tfsdk:"proxy_cluster"`
+	Private            types.Bool   `tfsdk:"private"`
+	AccessGroups       types.List   `tfsdk:"access_groups"`
 	Targets            types.List   `tfsdk:"targets"`
 	Auth               types.Object `tfsdk:"auth"`
 	AccessRestrictions types.Object `tfsdk:"access_restrictions"`
@@ -90,6 +92,15 @@ func (d *ReverseProxyServiceDataSource) Schema(ctx context.Context, req datasour
 				MarkdownDescription: "The proxy cluster handling this service",
 				Computed:            true,
 			},
+			"private": schema.BoolAttribute{
+				MarkdownDescription: "Whether the service is reachable only over the NetBird tunnel",
+				Computed:            true,
+			},
+			"access_groups": schema.ListAttribute{
+				MarkdownDescription: "Group IDs whose peers may reach the private service",
+				ElementType:         types.StringType,
+				Computed:            true,
+			},
 			"targets": schema.ListNestedAttribute{
 				MarkdownDescription: "List of target backends for this service",
 				Computed:            true,
@@ -123,6 +134,10 @@ func (d *ReverseProxyServiceDataSource) Schema(ctx context.Context, req datasour
 							MarkdownDescription: "Whether this target is enabled",
 							Computed:            true,
 						},
+						"access_action": schema.StringAttribute{
+							MarkdownDescription: "Access action once this target's path prefix is selected: inherit, bypass or block",
+							Computed:            true,
+						},
 						"options": schema.SingleNestedAttribute{
 							MarkdownDescription: "Per-target options",
 							Computed:            true,
@@ -151,6 +166,10 @@ func (d *ReverseProxyServiceDataSource) Schema(ctx context.Context, req datasour
 								},
 								"session_idle_timeout": schema.StringAttribute{
 									MarkdownDescription: "Idle timeout before a UDP session is reaped (UDP only)",
+									Computed:            true,
+								},
+								"direct_upstream": schema.BoolAttribute{
+									MarkdownDescription: "Whether the target is set to be dialed through the proxy host's network instead of its embedded NetBird client (honoured for HTTP services; NetBird v0.83 stores but does not apply it for TCP/UDP)",
 									Computed:            true,
 								},
 							},
@@ -257,6 +276,10 @@ func (d *ReverseProxyServiceDataSource) Schema(ctx context.Context, req datasour
 						Computed:            true,
 						ElementType:         types.StringType,
 					},
+					"crowdsec_mode": schema.StringAttribute{
+						MarkdownDescription: "CrowdSec IP reputation mode: off, enforce or observe",
+						Computed:            true,
+					},
 				},
 			},
 		},
@@ -335,6 +358,8 @@ func (d *ReverseProxyServiceDataSource) Read(ctx context.Context, req datasource
 		PassHostHeader:     match.PassHostHeader,
 		RewriteRedirects:   match.RewriteRedirects,
 		ProxyCluster:       match.ProxyCluster,
+		Private:            match.Private,
+		AccessGroups:       match.AccessGroups,
 		Targets:            match.Targets,
 		Auth:               match.Auth,
 		AccessRestrictions: match.AccessRestrictions,

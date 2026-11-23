@@ -81,10 +81,10 @@ const (
 // device, a second test reaching for the same fixture finds nothing there.
 // peer1 and peer2 are shared and read-only, addressed by name by the group,
 // route, peers and reverse-proxy tests and expected to survive the whole run.
-// peer3 to peer6 are consumable, one per test that manages a peer: create,
-// delete, update, drift. One each rather than sharing, since sharing would make
-// the later test depend on the order Go compiles the files in.
-var e2ePeerNames = []string{"peer1", "peer2", "peer3", "peer4", "peer5", "peer6"}
+// peer3 to peer7 are consumable, one per test that manages a peer: create,
+// delete, update, drift, IPv6. One each rather than sharing, since sharing would
+// make the later test depend on the order Go compiles the files in.
+var e2ePeerNames = []string{"peer1", "peer2", "peer3", "peer4", "peer5", "peer6", "peer7"}
 
 // e2eStack is the live deployment plus the IDs of the fixtures created on it.
 type e2eStack struct {
