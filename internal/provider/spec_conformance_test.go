@@ -41,13 +41,13 @@ func Test_SpecConformance(t *testing.T) {
 	walk := &specWalk{t: t, spec: spec, seen: seenAllowlist, checked: checked, expanded: map[string]bool{}}
 	// A flattened child schema of a read-only parent is read-only throughout;
 	// the child is checked as its own entry, so the flag is carried over.
-	readOnlyChild := map[string]bool{}
+	readOnlyChild := map[string]bool{} // resource type + "/" + child schema
 	for _, rm := range specResources {
 		for _, sm := range rm.schemas {
 			props, _ := spec.properties(sm.schema)
 			for name, child := range sm.flatten {
 				if props[name].readOnly {
-					readOnlyChild[child] = true
+					readOnlyChild[rm.typeName+"/"+child] = true
 				}
 			}
 		}
@@ -60,7 +60,7 @@ func Test_SpecConformance(t *testing.T) {
 				t.Errorf("%s: schema %s is not in the spec", rm.typeName, sm.schema)
 				continue
 			}
-			if readOnlyChild[sm.schema] {
+			if readOnlyChild[rm.typeName+"/"+sm.schema] {
 				for name, prop := range props {
 					prop.readOnly = true
 					props[name] = prop
@@ -415,6 +415,20 @@ func (s openAPISpec) property(d schemaDoc, depth int) (specProperty, bool) {
 	return out, true
 }
 
+// members returns a schema whose members are the property's own: its inline
+// schema, or a reference to its component; nil when it has neither.
+func (p specProperty) members() *schemaDoc {
+	switch {
+	case p.inline != nil:
+		return p.inline
+	case p.array && p.items != "":
+		return &schemaDoc{Ref: "#/components/schemas/" + p.items}
+	case !p.array && p.ref != "":
+		return &schemaDoc{Ref: "#/components/schemas/" + p.ref}
+	}
+	return nil
+}
+
 // objectParts reports whether a composition has a part with members: a
 // reference to a component or an inline object.
 func objectParts(parts []schemaDoc) bool {
@@ -445,10 +459,10 @@ func (s openAPISpec) propertiesOf(doc schemaDoc) (map[string]specProperty, bool)
 		}
 		if d.Ref != "" {
 			inner, ok := s.schemas[refName(d.Ref)]
-			if !ok {
+			if !ok || !walk(inner, depth+1) {
 				return false
 			}
-			return walk(inner, depth+1)
+			// Members beside the reference count too.
 		}
 		for _, part := range d.AllOf {
 			if !walk(part, depth+1) {
@@ -469,12 +483,12 @@ func (s openAPISpec) propertiesOf(doc schemaDoc) (map[string]specProperty, bool)
 				if prop.items == "" {
 					prop.items = prev.items
 				}
-				switch {
-				case prop.inline == nil:
+				// Both parts may define members (inline or by reference): keep
+				// the union of the two.
+				if a, b := prev.members(), prop.members(); a != nil && b != nil {
+					prop.inline = &schemaDoc{AllOf: []schemaDoc{*a, *b}}
+				} else if prop.inline == nil {
 					prop.inline = prev.inline
-				case prev.inline != nil:
-					// Both parts define members: keep the union.
-					prop.inline = &schemaDoc{AllOf: []schemaDoc{*prev.inline, *prop.inline}}
 				}
 				prop.array = prop.array || prev.array
 			}
@@ -525,6 +539,7 @@ schemas:
         type: object
         properties:
           y: {type: string}
+      twoRefs: {$ref: '#/components/schemas/Other'}
   Request:
     allOf:
       - $ref: '#/components/schemas/Base'
@@ -588,6 +603,22 @@ schemas:
                 properties:
                   e: {type: string}
           namedArray: {$ref: '#/components/schemas/ChildList'}
+          refAndSiblings:
+            $ref: '#/components/schemas/Child'
+            properties:
+              g: {type: string}
+          itemsRefAndSiblings:
+            type: array
+            items:
+              allOf:
+                - $ref: '#/components/schemas/Child'
+              properties:
+                h: {type: string}
+          twoRefs: {$ref: '#/components/schemas/Child'}
+  Other:
+    type: object
+    properties:
+      o: {type: string}
   ChildList:
     type: array
     items:
@@ -627,6 +658,12 @@ schemas:
 		"merged": {[]string{"x", "y"}, false},
 		// A single reference with members beside it.
 		"refWithMembers": {[]string{"a", "f"}, false},
+		// A direct reference with members beside it.
+		"refAndSiblings": {[]string{"a", "g"}, false},
+		// Items composed of a reference and members beside it.
+		"itemsRefAndSiblings": {[]string{"a", "h"}, true},
+		// Two allOf parts referring to different components.
+		"twoRefs": {[]string{"a", "o"}, false},
 	}
 	for name, w := range inline {
 		got := props[name]
@@ -638,7 +675,7 @@ schemas:
 		if !ok || !slices.Equal(sortedKeys(members), w.members) {
 			t.Errorf("%s: expected the members %v, found %v", name, w.members, members)
 		}
-		want[name] = specProperty{inline: got.inline, array: w.array, ref: got.ref}
+		want[name] = specProperty{inline: got.inline, array: w.array, ref: got.ref, items: got.items}
 	}
 	for name, w := range want {
 		if got := props[name]; got != w {
@@ -679,11 +716,12 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 	var props map[string]specProperty
 	var ok bool
 	switch {
+	case prop.array && prop.inline != nil:
+		// Inline items, or items composed of a reference and more members.
+		props, ok = w.spec.propertiesOf(*prop.inline)
 	case prop.array && prop.items != "":
 		label = prop.items
 		props, ok = w.spec.properties(prop.items)
-	case prop.array && prop.inline != nil:
-		props, ok = w.spec.propertiesOf(*prop.inline)
 	case prop.array:
 		return // an array of scalars
 	case prop.inline != nil && (len(prop.inline.AllOf) > 0 || prop.inline.Ref != ""):
