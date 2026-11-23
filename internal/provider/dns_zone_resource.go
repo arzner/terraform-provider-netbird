@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
@@ -328,7 +329,9 @@ func (r *DNSZone) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest
 		if !ok || id.IsNull() || id.IsUnknown() {
 			continue
 		}
-		group, err := r.client.Groups.Get(ctx, id.ValueString())
+		// The client puts the ID into the URL path as it is: escape it, so
+		// the authenticated GET stays on the group endpoint.
+		group, err := r.client.Groups.Get(ctx, url.PathEscape(id.ValueString()))
 		switch {
 		case err != nil && netbird.IsNotFound(err):
 			resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Distribution group not found",

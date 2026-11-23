@@ -2,13 +2,21 @@ package provider
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
+	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
 
@@ -86,5 +94,54 @@ func Test_zoneDomain(t *testing.T) {
 		if resp.Diagnostics.HasError() == ok {
 			t.Errorf("%q: expected valid %v, found %v", d, ok, resp.Diagnostics)
 		}
+	}
+}
+
+// Test_dnsZone_groupLookupStaysOnEndpoint: a malformed group ID with path
+// segments is looked up as one escaped segment of /api/groups/.
+func Test_dnsZone_groupLookupStaysOnEndpoint(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.EscapedPath())
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"not found","code":404}`)
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+	r := &DNSZone{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	value := func(domain string, groups ...string) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["id"] = tftypes.NewValue(tftypes.String, "z1")
+		values["name"] = tftypes.NewValue(tftypes.String, "z")
+		values["domain"] = tftypes.NewValue(tftypes.String, domain)
+		var g []tftypes.Value
+		for _, id := range groups {
+			g = append(g, tftypes.NewValue(tftypes.String, id))
+		}
+		values["distribution_groups"] = tftypes.NewValue(tftypes.Set{ElementType: tftypes.String}, g)
+		return tftypes.NewValue(typ, values)
+	}
+	config := value("after.local", "../../api/users")
+	req := resource.ModifyPlanRequest{
+		Config: tfsdk.Config{Schema: sch.Schema, Raw: config},
+		Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: config},
+		State:  tfsdk.State{Schema: sch.Schema, Raw: value("before.local", "g1")},
+	}
+	resp := resource.ModifyPlanResponse{Plan: req.Plan}
+	r.ModifyPlan(ctx, req, &resp)
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected the missing group to be refused")
+	}
+	if len(paths) != 1 || !strings.HasPrefix(paths[0], "/api/groups/") || strings.Count(paths[0], "/") != 3 {
+		t.Errorf("expected one request for a single segment under /api/groups/, found %v", paths)
 	}
 }
