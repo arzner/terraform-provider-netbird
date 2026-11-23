@@ -304,7 +304,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Computed:            true,
 			},
 			"private": schema.BoolAttribute{
-				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity and the server generates an access policy from `access_groups` to the cluster's proxy peers. The proxy then skips the service's other authentication (SSO, password, PIN, header auth), even where `auth` still enables it. CIDR access restrictions still apply, matched against the peer's NetBird address; country restrictions do not. Peers reach it only through a proxy of the cluster that has private access enabled (`NB_PROXY_PRIVATE=true` or `--private`, off by default); the server accepts the setting without one. A target with the `bypass` access action must be changed before a service can become private. Requires `mode = \"http\"`, at least one access group and no bearer auth. Left out, a new service is public and an existing one keeps its setting.",
+				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity and the server generates an access policy from `access_groups` to the cluster's proxy peers. The proxy then skips the service's other authentication (SSO, password, PIN, header auth), even where `auth` still enables it. CIDR access restrictions still apply, matched against the peer's NetBird address; country restrictions do not. Peers reach it only through a proxy of the cluster that has private access enabled (`NB_PROXY_PRIVATE=true` or `--private`, off by default); the server accepts the setting without one. Requires `mode = \"http\"`, at least one access group, no bearer auth and no target with the `bypass` access action, including one a target keeps from the server while its `access_action` is left out. Left out, a new service is public and an existing one keeps its setting.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseNonNullStateForUnknown()},
@@ -964,14 +964,8 @@ func serverResolvesHost(targetType string) bool {
 // so a change made outside Terraform (a moved path, a removed target) shows
 // in the next plan.
 func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]ReverseProxyServiceTargetModel {
-	path := func(v types.String) string {
-		if v.IsNull() || v.ValueString() == "" {
-			return "/"
-		}
-		return v.ValueString()
-	}
 	samePath := func(p, l ReverseProxyServiceTargetModel) bool {
-		return !p.Path.IsUnknown() && path(p.Path) == path(l.Path)
+		return !p.Path.IsUnknown() && targetLocation(p.Path) == targetLocation(l.Path)
 	}
 	unknownPath := func(p, _ ReverseProxyServiceTargetModel) bool { return p.Path.IsUnknown() }
 	sameEndpoint := func(p, l ReverseProxyServiceTargetModel) bool {
@@ -1461,8 +1455,8 @@ var (
 )
 
 // ValidateConfig checks the private-service contract the server enforces
-// (HTTP mode, at least one access group, no bearer auth) on the configured
-// values; ModifyPlan checks the values a service keeps from its state.
+// (HTTP mode, at least one access group, no bearer auth, no bypass target)
+// on the configured values; ModifyPlan checks the values a service keeps from its state.
 func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var data ReverseProxyServiceModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
@@ -1472,11 +1466,13 @@ func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.V
 	// A left-out list may be adopted from an existing service; ModifyPlan
 	// refuses it for a new one.
 	resp.Diagnostics.Append(privateServiceProblems(data.Mode, data.AccessGroups, data.Auth, true)...)
+	resp.Diagnostics.Append(bypassTargetProblems(ctx, data.Targets, types.ListNull(ReverseProxyServiceTargetModel{}.TFType()))...)
 }
 
 // ModifyPlan refuses a private service the server would reject when the
 // configuration alone does not show it: a new one without access groups, or
-// one whose groups, mode or auth come from state or the plan. Access settings
+// one whose groups, mode, auth or target access actions come from state or
+// the plan. Access settings
 // absent from state (written before they existed, planned without a refresh)
 // stay unknown on a real update through UseNonNullStateForUnknown, and the
 // update sends their live values.
@@ -1484,7 +1480,8 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	if req.Plan.Raw.IsNull() {
 		return
 	}
-	var plan, config ReverseProxyServiceModel
+	var plan, config, state ReverseProxyServiceModel
+	state.Targets = types.ListNull(ReverseProxyServiceTargetModel{}.TFType())
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
@@ -1516,7 +1513,6 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 			// not this plan's problem.
 			return
 		}
-		var state ReverseProxyServiceModel
 		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 		if resp.Diagnostics.HasError() {
 			return
@@ -1538,12 +1534,64 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	// A configuration error stops at ValidateConfig, so this reports only
 	// problems with values kept from state.
 	problems := privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth, checkBlank)
+	problems.Append(bypassTargetProblems(ctx, plan.Targets, state.Targets)...)
 	if config.Private.IsNull() && problems.HasError() {
 		problems.AddAttributeError(path.Root("private"), "Service is private from its state",
 			"private is left out, so the service stays private and the errors above apply. Set private = false to make it "+
 				"public; that is also needed for -replace, which plans against the existing service first.")
 	}
 	resp.Diagnostics.Append(problems...)
+}
+
+// bypassTargetProblems refuses a target whose access action would be bypass
+// on a private service. A target that leaves its action out gets, on an
+// update, the action the server has for a target at the same path (v0.83,
+// v0.82: preserveTargetAccessActions), so state stands in for it; without
+// state such a target is inherit. Unknown actions and paths are not checked.
+func bypassTargetProblems(ctx context.Context, planned, state types.List) diag.Diagnostics {
+	var diags diag.Diagnostics
+	if planned.IsNull() || planned.IsUnknown() {
+		return diags
+	}
+	var targets, existing []ReverseProxyServiceTargetModel
+	diags.Append(planned.ElementsAs(ctx, &targets, false)...)
+	if !state.IsNull() && !state.IsUnknown() {
+		diags.Append(state.ElementsAs(ctx, &existing, false)...)
+	}
+	if diags.HasError() {
+		return diags
+	}
+	byPath := map[string]string{}
+	for _, t := range existing {
+		if !t.Path.IsUnknown() && !t.AccessAction.IsUnknown() {
+			byPath[targetLocation(t.Path)] = t.AccessAction.ValueString()
+		}
+	}
+	for i, t := range targets {
+		at := path.Root("targets").AtListIndex(i).AtName("access_action")
+		switch {
+		case !t.AccessAction.IsNull() && !t.AccessAction.IsUnknown():
+			if t.AccessAction.ValueString() == "bypass" {
+				diags.AddAttributeError(at, "Bypass not allowed on a private service",
+					"private = true cannot be combined with access_action = \"bypass\" on a target; use \"inherit\" or \"block\".")
+			}
+		case t.Path.IsUnknown():
+		case byPath[targetLocation(t.Path)] == "bypass":
+			diags.AddAttributeError(at, "Bypass not allowed on a private service",
+				fmt.Sprintf("The target at path %q has access_action = \"bypass\" on the server and keeps it while access_action "+
+					"is left out, but a private service cannot have it. Set access_action = \"inherit\" or \"block\".",
+					targetLocation(t.Path)))
+		}
+	}
+	return diags
+}
+
+// targetLocation is the server's reading of a target path: left out is "/".
+func targetLocation(p types.String) string {
+	if p.IsNull() || p.ValueString() == "" {
+		return "/"
+	}
+	return p.ValueString()
 }
 
 // privateRequestProblem checks the access groups the update would send for a

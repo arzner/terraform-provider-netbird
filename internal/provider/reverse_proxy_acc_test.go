@@ -1309,6 +1309,16 @@ resource "netbird_reverse_proxy_service" %q {
 				),
 			},
 			{
+				// Turning the service private while /admin keeps bypass from
+				// the server is refused at plan time, left out or configured.
+				Config:      config("", 8082, true),
+				ExpectError: regexp.MustCompile(`(?s)Bypass not allowed on a private service.*path "/admin"`),
+			},
+			{
+				Config:      config(`access_action = "bypass"`, 8082, true),
+				ExpectError: regexp.MustCompile(`Bypass not allowed on a private service`),
+			},
+			{
 				// A private service refuses bypass; block with a direct upstream
 				// target is fine on the harness cluster (private mode).
 				Config: config(`access_action = "block"`, 8082, true) + fmt.Sprintf(`

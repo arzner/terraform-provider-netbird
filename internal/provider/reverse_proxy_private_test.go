@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -412,5 +413,145 @@ func Test_reverseProxyService_accessPlanModifiers(t *testing.T) {
 	g1 := types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g1")})
 	if got := planList(g1); !got.Equal(g1) {
 		t.Errorf("access_groups from state: expected [g1], found %v", got)
+	}
+}
+
+func Test_reverseProxyService_bypassOnPrivate(t *testing.T) {
+	ctx := context.Background()
+	r := &ReverseProxyService{}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	listType, ok := typ.AttributeTypes["targets"].(tftypes.List)
+	if !ok {
+		t.Fatal("targets is not a list")
+	}
+	targetType, ok := listType.ElementType.(tftypes.Object)
+	if !ok {
+		t.Fatal("a target is not an object")
+	}
+	unknown := tftypes.UnknownValue
+	// target builds a target at path ("" leaves it out) with an access action
+	// (nil leaves it out, unknown is not known yet).
+	target := func(path, action any) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range targetType.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["target_id"] = tftypes.NewValue(tftypes.String, "p1")
+		switch p := path.(type) {
+		case tftypes.Value:
+			values["path"] = p
+		case string:
+			if p != "" {
+				values["path"] = tftypes.NewValue(tftypes.String, p)
+			}
+		}
+		values["access_action"] = tftypes.NewValue(tftypes.String, action)
+		return tftypes.NewValue(targetType, values)
+	}
+	targets := func(ts ...tftypes.Value) tftypes.Value { return tftypes.NewValue(listType, ts) }
+	groups := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{tftypes.NewValue(tftypes.String, "g1")})
+	on := tftypes.NewValue(tftypes.Bool, true)
+	off := tftypes.NewValue(tftypes.Bool, false)
+	http := tftypes.NewValue(tftypes.String, "http")
+	type vals map[string]tftypes.Value
+	object := func(v vals) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		for n, x := range v {
+			values[n] = x
+		}
+		return tftypes.NewValue(typ, values)
+	}
+	bypassAtAdmin := targets(target("", "inherit"), target("/admin", "bypass"))
+	for name, tc := range map[string]struct {
+		state, config, plan vals
+		wantError           string
+	}{
+		"new, configured bypass": {
+			config:    vals{"private": on, "access_groups": groups, "targets": targets(target("/a", "bypass"))},
+			plan:      vals{"private": on, "access_groups": groups, "targets": targets(target("/a", "bypass"))},
+			wantError: "targets[0].access_action",
+		},
+		"new, left out": {
+			config: vals{"private": on, "access_groups": groups, "targets": targets(target("/a", nil))},
+			plan:   vals{"private": on, "access_groups": groups, "targets": targets(target("/a", unknown))},
+		},
+		"made private, bypass kept from state": {
+			state:     vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config:    vals{"private": on, "targets": targets(target("", nil), target("/admin", nil))},
+			plan:      vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/admin", unknown))},
+			wantError: "targets[1].access_action",
+		},
+		"made private, bypass at / kept for a target without a path": {
+			state:     vals{"private": off, "mode": http, "access_groups": groups, "targets": targets(target("/", "bypass"))},
+			config:    vals{"private": on, "targets": targets(target("", nil))},
+			plan:      vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown))},
+			wantError: "targets[0].access_action",
+		},
+		"made private, bypass replaced": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config: vals{"private": on, "targets": targets(target("", nil), target("/admin", "block"))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/admin", "block"))},
+		},
+		"made private, target moved off the bypass path": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config: vals{"private": on, "targets": targets(target("", nil), target("/other", nil))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/other", unknown))},
+		},
+		"made private, path not known yet": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
+			config: vals{"private": on, "targets": targets(target("", nil), target(tftypes.NewValue(tftypes.String, unknown), nil))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target(tftypes.NewValue(tftypes.String, unknown), unknown))},
+		},
+		"stays public with bypass": {
+			state:  vals{"private": off, "mode": http, "targets": bypassAtAdmin},
+			config: vals{"name": tftypes.NewValue(tftypes.String, "new")},
+			plan:   vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target("", unknown), target("/admin", unknown))},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := tftypes.NewValue(typ, nil)
+			if tc.state != nil {
+				state = object(tc.state)
+			}
+			var diags diag.Diagnostics
+			var vresp resource.ValidateConfigResponse
+			r.ValidateConfig(ctx, resource.ValidateConfigRequest{Config: tfsdk.Config{Schema: sch.Schema, Raw: object(tc.config)}}, &vresp)
+			diags.Append(vresp.Diagnostics...)
+			if !diags.HasError() {
+				req := resource.ModifyPlanRequest{
+					Config: tfsdk.Config{Schema: sch.Schema, Raw: object(tc.config)},
+					Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: object(tc.plan)},
+					State:  tfsdk.State{Schema: sch.Schema, Raw: state},
+				}
+				resp := resource.ModifyPlanResponse{Plan: req.Plan}
+				r.ModifyPlan(ctx, req, &resp)
+				diags.Append(resp.Diagnostics...)
+			}
+			if tc.wantError == "" {
+				if diags.HasError() {
+					t.Fatalf("expected no error, found %v", diags)
+				}
+				return
+			}
+			found := false
+			for _, d := range diags.Errors() {
+				p := ""
+				if wp, ok := d.(diag.DiagnosticWithPath); ok {
+					p = wp.Path().String()
+				}
+				found = found || p == tc.wantError || d.Summary() == tc.wantError
+			}
+			if !found {
+				t.Fatalf("expected an error at %s, found %v", tc.wantError, diags)
+			}
+		})
 	}
 }

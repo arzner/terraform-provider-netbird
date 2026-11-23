@@ -35,7 +35,9 @@ it is based on.
 - `netbird_reverse_proxy_service`: `access_restrictions.crowdsec_mode` (CrowdSec IP reputation),
   `targets[].access_action` (`inherit`, `bypass` or `block` for a target's path; left out, the
   server keeps the current action) and `targets[].options.direct_upstream` (dial through the
-  proxy host's network). Also in the data source (#45).
+  proxy host's network). Also in the data source (#45). A private service with a `bypass` target
+  is refused at plan time, also when the target leaves `access_action` out and would keep `bypass`
+  from the server.
 
 ### Changed
 
