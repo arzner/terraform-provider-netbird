@@ -31,6 +31,7 @@ resource "netbird_scim" "example" {
 
 ### Optional
 
+- `connector_id` (String) Dex connector ID, for setups with the embedded identity provider. Left out, the server's value is kept.
 - `enabled` (Boolean) Indicates whether the integration is enabled
 - `group_prefixes` (List of String) List of start_with string patterns for groups to sync
 - `prefix` (String) The connection prefix used for the SCIM provider.

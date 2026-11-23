@@ -83,3 +83,28 @@ func Test_scimAPIToTerraform(t *testing.T) {
 		})
 	}
 }
+
+func Test_scim_connectorID(t *testing.T) {
+	ctx := context.Background()
+	id := "dex-okta"
+	var data ScimModel
+	if d := scimAPIToTerraform(ctx, &api.ScimIntegration{Id: 3, ConnectorId: &id}, &data); d.HasError() {
+		t.Fatal(d)
+	}
+	if data.ConnectorId.ValueString() != id {
+		t.Errorf("read: expected %s, found %v", id, data.ConnectorId)
+	}
+	var none ScimModel
+	if d := scimAPIToTerraform(ctx, &api.ScimIntegration{Id: 4}, &none); d.HasError() {
+		t.Fatal(d)
+	}
+	if !none.ConnectorId.IsNull() {
+		t.Errorf("read: expected null without a connector, found %v", none.ConnectorId)
+	}
+	if got := stringDefaultPointer(types.StringNull(), nil); got != nil {
+		t.Errorf("request: a null connector_id must be omitted, found %v", *got)
+	}
+	if got := stringDefaultPointer(types.StringValue(id), nil); got == nil || *got != id {
+		t.Errorf("request: expected %s, found %v", id, got)
+	}
+}

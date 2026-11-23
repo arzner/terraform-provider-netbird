@@ -8,6 +8,11 @@ it is based on.
 
 ## [Unreleased]
 
+### Added
+
+- `netbird_scim`: `connector_id`, the Dex connector for setups with the embedded identity
+  provider; also in the data source (#27).
+
 ## [0.1.0] - 2026-11-23
 
 First release of the fork. Based on upstream `4aa1f36` (v0.0.11 plus [#263](https://github.com/netbirdio/terraform-provider-netbird/pull/263)),
