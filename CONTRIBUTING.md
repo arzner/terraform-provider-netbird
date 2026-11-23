@@ -65,7 +65,7 @@ The fork started from
 and stays open to it.
 
 - **Merging upstream.** Upstream `main` is merged in through a pull request
-  (`git merge upstream/main`), never rebased.
+  (`git merge -S upstream/main`), never rebased.
 - **Porting an upstream pull request.** Check the fix against the NetBird source
   at the pinned version first; port only what holds. Cherry-pick with
   `git cherry-pick -S -x <commit>` so the commits keep their author, name their
