@@ -606,3 +606,20 @@ func Test_nullUnconfigured(t *testing.T) {
 		t.Error("the plan must not be modified")
 	}
 }
+
+func Test_nullUnconfigured_objectMembers(t *testing.T) {
+	plan := AccountSettingsModel{DashboardFeatures: types.ObjectValueMust(dashboardFeaturesTypes, map[string]attr.Value{"agent_network": types.BoolValue(true)})}
+	config := AccountSettingsModel{DashboardFeatures: types.ObjectValueMust(dashboardFeaturesTypes, map[string]attr.Value{"agent_network": types.BoolNull()})}
+	got := nullUnconfigured(plan, config)
+	if v, ok := got.DashboardFeatures.Attributes()["agent_network"].(types.Bool); !ok || !v.IsNull() {
+		t.Errorf("a member left out of a configured object must be null, found %v", got.DashboardFeatures)
+	}
+	current := true
+	req := dashboardFeaturesRequest(got.DashboardFeatures, &api.AccountDashboardFeatures{AgentNetwork: &current})
+	if req == nil || req.AgentNetwork == nil || !*req.AgentNetwork {
+		t.Errorf("the request must carry the live value for a left-out member, found %+v", req)
+	}
+	if v := plan.DashboardFeatures.Attributes()["agent_network"].(types.Bool); !v.ValueBool() { //nolint:forcetypeassert
+		t.Error("the plan must not be modified")
+	}
+}

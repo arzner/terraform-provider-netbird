@@ -278,8 +278,31 @@ func nullUnconfigured[T any](plan, config T) T {
 			continue
 		}
 		c, ok := cv.Field(i).Interface().(attr.Value)
-		if ok && c.IsNull() && pv.Field(i).CanSet() {
+		if !ok || !pv.Field(i).CanSet() {
+			continue
+		}
+		if c.IsNull() {
 			pv.Field(i).Set(cv.Field(i))
+			continue
+		}
+		// Within a configured object, members the configuration leaves out are
+		// adopted as well and must not be sent from the plan either.
+		if co, isObj := c.(types.Object); isObj && !co.IsUnknown() {
+			if po, ok := pv.Field(i).Interface().(types.Object); ok && !po.IsNull() && !po.IsUnknown() {
+				members := po.Attributes()
+				changed := false
+				for name, member := range co.Attributes() {
+					if member.IsNull() {
+						members[name] = member
+						changed = true
+					}
+				}
+				if changed {
+					if v, d := types.ObjectValue(po.AttributeTypes(context.Background()), members); !d.HasError() {
+						pv.Field(i).Set(reflect.ValueOf(v))
+					}
+				}
+			}
 		}
 	}
 	return out
