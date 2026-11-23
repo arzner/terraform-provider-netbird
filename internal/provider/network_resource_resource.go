@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
@@ -131,11 +132,7 @@ func networkResourceAPIToTerraform(ctx context.Context, networkResource *api.Net
 	data.Description = types.StringPointerValue(networkResource.Description)
 	data.Address = types.StringValue(networkResource.Address)
 	data.Enabled = types.BoolValue(networkResource.Enabled)
-	groups := make([]string, len(networkResource.Groups))
-	for i, k := range networkResource.Groups {
-		groups[i] = k.Id
-	}
-	data.Groups, d = types.SetValueFrom(ctx, types.StringType, groups)
+	data.Groups, d = types.SetValueFrom(ctx, types.StringType, resourceGroupIDs(networkResource.Groups))
 	ret.Append(d...)
 	return ret
 }
@@ -235,10 +232,7 @@ func (r *NetworkResource) Update(ctx context.Context, req resource.UpdateRequest
 			resp.Diagnostics.AddError("Error reading NetworkResource", err.Error())
 			return
 		}
-		groups = make([]string, len(live.Groups))
-		for i, g := range live.Groups {
-			groups[i] = g.Id
-		}
+		groups = resourceGroupIDs(live.Groups)
 		// A known planned set (a no-change value, or one kept by
 		// ignore_changes) must still be what the resource has: sending a
 		// different set would return a result the plan did not show.
@@ -299,4 +293,16 @@ func (r *NetworkResource) ImportState(ctx context.Context, req resource.ImportSt
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("network_id"), splitID[0])...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), splitID[1])...)
+}
+
+// resourceGroupIDs returns the IDs of a resource's groups, each once: a group
+// that lists the resource twice is returned twice by the server.
+func resourceGroupIDs(groups []api.GroupMinimum) []string {
+	ids := make([]string, 0, len(groups))
+	for _, g := range groups {
+		if !slices.Contains(ids, g.Id) {
+			ids = append(ids, g.Id)
+		}
+	}
+	return ids
 }

@@ -5,13 +5,16 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
@@ -150,6 +153,19 @@ func Test_NetworkResource_WithoutGroups(t *testing.T) {
 }
 %s`, rName, e2eNetworkID(), name, extra)
 	}
+	// ignored keeps groups out of the plan: a rename then carries the prior
+	// set as a known value.
+	ignored := func(name, extra string) string {
+		return fmt.Sprintf(`resource "netbird_network_resource" "%s" {
+  network_id = %q
+  address    = "10.77.0.0/24"
+  name       = %q
+  lifecycle {
+    ignore_changes = [groups]
+  }
+}
+%s`, rName, e2eNetworkID(), name, extra)
+	}
 	// groups attaches the resource to the first group; the second group
 	// starts without resources (left out, so the API may add some).
 	groups := func(firstResources, secondResources string) string {
@@ -161,6 +177,11 @@ resource "netbird_group" "%[1]s" {
 
 resource "netbird_group" "%[1]s_second" {
   name = "%[1]s-second"
+  %[3]s
+}
+
+resource "netbird_group" "%[1]s_third" {
+  name = "%[1]s-third"
   %[3]s
 }`, rName, firstResources, secondResources)
 	}
@@ -187,7 +208,7 @@ resource "netbird_group" "%[1]s_second" {
 			return nil
 		}
 	}
-	var secondID string
+	var secondID, thirdID string
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testEnsureManagementRunning(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -212,6 +233,7 @@ resource "netbird_group" "%[1]s_second" {
 				Config: config(rName, groups(attached, "")),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					testRecordID("netbird_group."+rName+"_second", &secondID),
+					testRecordID("netbird_group."+rName+"_third", &thirdID),
 					groupsOnServer("netbird_group."+rName),
 				),
 			},
@@ -226,8 +248,35 @@ resource "netbird_group" "%[1]s_second" {
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(rNameFull, "name", rName+"-renamed"),
 					resource.TestCheckResourceAttr(rNameFull, "groups.#", "2"),
+					resource.TestCheckTypeSetElemAttrPair(rNameFull, "groups.*", "netbird_group."+rName, "id"),
+					resource.TestCheckTypeSetElemAttrPair(rNameFull, "groups.*", "netbird_group."+rName+"_second", "id"),
 					groupsOnServer("netbird_group."+rName, "netbird_group."+rName+"_second"),
 				),
+			},
+			{
+				// With groups ignored the plan holds the known set; a group
+				// added through the API after the plan stops the rename
+				// before anything is written.
+				Config: ignored(rName+"-ignored", groups(attached, "")),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectKnownValue(rNameFull, tfjsonpath.New("groups"), knownvalue.SetSizeExact(2)),
+					groupGetsResource{group: &thirdID, name: rName + "-third", resource: &createdID},
+				}},
+				ExpectError: regexp.MustCompile(`groups changed after the plan`),
+			},
+			{
+				// Nothing was written: the old name stays and the new group
+				// is still attached.
+				PreConfig: func() {
+					res, err := testClient().Networks.Resources(e2eNetworkID()).Get(context.Background(), createdID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if res.Name != rName+"-renamed" || len(resourceGroupIDs(res.Groups)) != 3 {
+						t.Fatalf("expected the old name and three groups on the server, found %s and %v", res.Name, res.Groups)
+					}
+				},
+				Config: config(rName+"-renamed", groups(attached, "")),
 			},
 			{
 				// Detach before teardown: the server refuses to delete a
