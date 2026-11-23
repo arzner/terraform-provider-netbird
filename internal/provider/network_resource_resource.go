@@ -217,33 +217,36 @@ func (r *NetworkResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
-	// The server sets the resource's groups to exactly the ones sent. Left
-	// out of the configuration, they are not managed here, so the update
-	// sends the groups the resource has now (netbird_group may add some).
+	// The server sets the resource's groups to exactly the ones sent.
+	// Left out of the configuration and not known in the plan, they are not
+	// managed here, so the update sends the groups the resource has now
+	// (netbird_group may add some). A known planned set that the plan does
+	// not change (a configuration that matches, or one ignore_changes keeps)
+	// must still be what the resource has: sending it would silently detach
+	// a group added since the plan.
 	var configured types.Set
+	var prior NetworkResourceModel
 	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("groups"), &configured)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	groups := stringSetDefault(ctx, data.Groups, []string{})
-	if configured.IsNull() {
+	unmanaged := configured.IsNull() && data.Groups.IsUnknown()
+	unchanged := !data.Groups.IsUnknown() && data.Groups.Equal(prior.Groups)
+	if unmanaged || unchanged {
 		live, err := r.client.Networks.Resources(data.NetworkId.ValueString()).Get(ctx, data.Id.ValueString())
 		if err != nil {
 			resp.Diagnostics.AddError("Error reading NetworkResource", err.Error())
 			return
 		}
-		groups = resourceGroupIDs(live.Groups)
-		// A known planned set (a no-change value, or one kept by
-		// ignore_changes) must still be what the resource has: sending a
-		// different set would return a result the plan did not show.
-		if !data.Groups.IsUnknown() && !data.Groups.IsNull() {
-			planned := stringSetDefault(ctx, data.Groups, []string{})
-			if !sameStrings(planned, groups) {
-				resp.Diagnostics.AddError("Network resource groups changed after the plan",
-					fmt.Sprintf("The resource's groups were %v when planned and are %v now, changed outside this resource. Nothing was changed. Run plan again.", sortedCopy(planned), sortedCopy(groups)))
-				return
-			}
+		current := resourceGroupIDs(live.Groups)
+		if unchanged && !sameStrings(groups, current) {
+			resp.Diagnostics.AddError("Network resource groups changed after the plan",
+				fmt.Sprintf("The resource's groups were %v when planned and are %v now, changed outside this resource. Nothing was changed. Run plan again.", sortedCopy(groups), sortedCopy(current)))
+			return
 		}
+		groups = current
 	}
 
 	networkResourceReq := api.NetworkResourceRequest{

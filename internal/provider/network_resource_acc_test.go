@@ -153,13 +153,14 @@ func Test_NetworkResource_WithoutGroups(t *testing.T) {
 }
 %s`, rName, e2eNetworkID(), name, extra)
 	}
-	// ignored keeps groups out of the plan: a rename then carries the prior
-	// set as a known value.
+	// ignored configures groups = [] but keeps them out of the plan: a rename
+	// then carries the prior set as a known value, unchanged.
 	ignored := func(name, extra string) string {
 		return fmt.Sprintf(`resource "netbird_network_resource" "%s" {
   network_id = %q
   address    = "10.77.0.0/24"
   name       = %q
+  groups     = []
   lifecycle {
     ignore_changes = [groups]
   }
