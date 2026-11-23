@@ -454,4 +454,3 @@ func peerIPv6Request(planned types.String, current *string) *string {
 	}
 	return planned.ValueStringPointer()
 }
-
