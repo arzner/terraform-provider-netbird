@@ -235,6 +235,12 @@ func Test_User_CreateChecks(t *testing.T) {
 			{Config: config("is_service_user = true\n  role = \"owner\""), PlanOnly: true, ExpectError: regexp.MustCompile(`Cannot create an owner`)},
 			{Config: config("is_service_user = true\n  email = \"" + rName + "@example.com\""), PlanOnly: true, ExpectError: regexp.MustCompile(`Service users have no email`)},
 			{Config: config(""), PlanOnly: true, ExpectError: regexp.MustCompile(`Name and email required`)},
+			{
+				// An invitation with an email but no name.
+				Config:      fmt.Sprintf("resource \"netbird_user\" %q {\n  email = %q\n}", rName, rName+"@example.com"),
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`Name and email required`),
+			},
 		},
 	})
 }

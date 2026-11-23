@@ -72,13 +72,13 @@ func (r *User) Schema(ctx context.Context, req resource.SchemaRequest, resp *res
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"email": schema.StringAttribute{
-				MarkdownDescription: "User Email. NetBird does not change a user's email: a change is refused at plan time.",
+				MarkdownDescription: "User Email. NetBird does not change a user's email: a change is refused at plan time, or by the apply before it writes when the value is known only then.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "User Name. NetBird does not change a user's name, so a change is refused at plan time; for a service user under a new name, declare a new `netbird_user` (with new tokens) and remove the old one. A new regular user is an invitation and needs `name` and `email`.",
+				MarkdownDescription: "User Name. NetBird does not change a user's name, so a change is refused at plan time (or by the apply before it writes, for a value known only then); for a service user under a new name, declare a new `netbird_user` (with new tokens) and remove the old one. A new regular user is an invitation and needs `name` and `email`.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
@@ -363,8 +363,11 @@ func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, r
 			"NetBird creates users unblocked (the create request has no block flag); create the user first, then set is_blocked = true.")
 	}
 	if config.Role.Equal(types.StringValue("owner")) {
-		resp.Diagnostics.AddAttributeError(path.Root("role"), "Cannot create an owner",
-			"NetBird refuses the owner role for a new service user or an invitation; create the user with another role and transfer ownership in NetBird.")
+		detail := "NetBird does not invite an owner; invite the user with another role and transfer ownership in NetBird."
+		if service {
+			detail = "NetBird refuses the owner role for a service user, also by transfer; choose another role."
+		}
+		resp.Diagnostics.AddAttributeError(path.Root("role"), "Cannot create an owner", detail)
 	}
 	switch {
 	case regular && (missing(config.Email) || missing(config.Name)):
