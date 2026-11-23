@@ -67,7 +67,7 @@ func (r *IdentityProvider) Schema(ctx context.Context, req resource.SchemaReques
 				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"type": schema.StringAttribute{
-				MarkdownDescription: "Type of identity provider (adfs, authentik, entra, google, keycloak, microsoft, oidc, okta, pocketid, zitadel). google and microsoft have a built-in issuer, used with `issuer = \"\"`; the others need an issuer URL. The server does not change the type of an existing provider, so a new type replaces it: the old provider is deleted first, unless `lifecycle { create_before_destroy = true }` is set, which keeps the login available if the new provider fails to create (the server checks that the issuer answers only then).",
+				MarkdownDescription: "Type of identity provider (adfs, authentik, entra, google, keycloak, microsoft, oidc, okta, pocketid, zitadel). google and microsoft have a built-in issuer, used with `issuer = \"\"`; the others need an issuer URL. The server does not change the type of an existing provider, so a new type replaces it. The new provider has a new ID, which is part of each user's NetBird identity, so users who sign in through it are new users, without their old roles and groups. The old provider is deleted first, unless `lifecycle { create_before_destroy = true }` is set, which keeps the login available if the new provider fails to create.",
 				Required:            true,
 				Validators:          []validator.String{stringvalidator.OneOf(identityProviderTypes...)},
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
@@ -83,7 +83,7 @@ func (r *IdentityProvider) Schema(ctx context.Context, req resource.SchemaReques
 				Sensitive:           true,
 			},
 			"issuer": schema.StringAttribute{
-				MarkdownDescription: "OIDC issuer URL: https, with a host and without user info, query or fragment. `\"\"` uses the built-in issuer of google and microsoft; the other types need a URL. Both are checked at plan time.",
+				MarkdownDescription: "OIDC issuer URL: https, with a host and without user info, query or fragment; checked at plan time. google and microsoft need `\"\"` (their built-in issuer); the other types need a URL. The server also checks at apply time, on create and update, that the issuer answers.",
 				Required:            true,
 			},
 		},
@@ -239,9 +239,16 @@ func (r *IdentityProvider) ValidateConfig(ctx context.Context, req resource.Vali
 	if idpType.IsNull() || idpType.IsUnknown() {
 		return
 	}
-	if issuer.ValueString() == "" && !builtInIssuer[idpType.ValueString()] {
+	builtIn := builtInIssuer[idpType.ValueString()]
+	if issuer.ValueString() == "" && !builtIn {
 		resp.Diagnostics.AddAttributeError(path.Root("issuer"), "Issuer required",
 			fmt.Sprintf("type %q has no built-in issuer; set issuer to the provider's issuer URL. Only google and microsoft work with issuer = \"\".", idpType.ValueString()))
+	}
+	if issuer.ValueString() != "" && builtIn {
+		// The server builds these connectors without an issuer and reads
+		// back "", so any other value would show as a change on every plan.
+		resp.Diagnostics.AddAttributeError(path.Root("issuer"), "Issuer not used",
+			fmt.Sprintf("type %q uses its built-in issuer and the server does not store one; set issuer = \"\".", idpType.ValueString()))
 	}
 }
 

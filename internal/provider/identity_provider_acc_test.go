@@ -165,6 +165,11 @@ func Test_IdentityProvider_TypeChangeReplaces(t *testing.T) {
 				ExpectError: regexp.MustCompile(`Issuer required`),
 			},
 			{
+				// And an empty name, which the server refuses on create.
+				Config:      testIdentityProviderResource(rName, "", "keycloak", "client-id", "client-secret", "https://oauth.id.jumpcloud.com/"),
+				ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Length.*name`),
+			},
+			{
 				// And an empty client ID, which the server refuses on create.
 				Config:      testIdentityProviderResource(rName, "migrated", "keycloak", "", "client-secret", "https://oauth.id.jumpcloud.com/"),
 				ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Length.*client_id`),

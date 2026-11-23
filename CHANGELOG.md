@@ -69,10 +69,12 @@ it is based on.
 - `netbird_identity_provider`: the types `authentik`, `keycloak` and `adfs`, which the server
   accepts, are no longer refused at plan time; the accepted list is checked against the server
   source at the pinned version. Changing `type` replaces the provider, since the server refuses
-  to change it in place. What the server would refuse on create is refused at plan time (an empty
-  name or client ID, an empty issuer for a type without a built-in one, an issuer that is not
-  https or has user info, a query or a fragment); the server checks that the issuer answers only
-  on create, so `create_before_destroy` keeps the old provider until the new one exists (#54; upstream
+  to change it in place; users who sign in through the new provider are new NetBird users. What
+  the server would refuse on create is refused at plan time (an empty name or client ID, an empty
+  issuer for a type without a built-in one, an issuer that is not https or has user info, a query
+  or a fragment), as is an issuer for google or microsoft, which the server does not store. The
+  server checks at apply time that the issuer answers; `create_before_destroy` keeps the old
+  provider until the new one exists (#54; upstream
   [#163](https://github.com/netbirdio/terraform-provider-netbird/issues/163),
   [#255](https://github.com/netbirdio/terraform-provider-netbird/issues/255)).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
