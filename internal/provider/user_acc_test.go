@@ -5,10 +5,12 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
@@ -89,4 +91,57 @@ func testUserResource(rName, groups, blocked, role string) string {
   is_blocked      = %s
   role            = "%s"
 }`, rName, rName, groups, blocked, role)
+}
+
+// Test_User_ServiceUserNameAndKind: the API does not change a user's name or
+// email. A service user's new name replaces it, an email change is refused at
+// plan time, and is_service_user left out keeps what the user is.
+func Test_User_ServiceUserNameAndKind(t *testing.T) {
+	testE2E(t)
+	rName := "u" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_user." + rName
+	var firstID, createdID string
+	config := func(name, extra string) string {
+		return fmt.Sprintf(`resource "netbird_user" %q {
+  name = %q
+  role = "user"
+  %s
+}`, rName, name, extra)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckAbsentFromList(testClient().Users.List, func(u api.User) string { return u.Id }, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: config(rName, "is_service_user = true"),
+				Check:  testRecordID(rNameFull, &firstID),
+			},
+			{
+				// Left out, the user stays a service user.
+				Config:   config(rName, ""),
+				PlanOnly: true,
+			},
+			{
+				Config:      config(rName, `email = "someone@example.com"`),
+				ExpectError: regexp.MustCompile(`Email cannot be changed`),
+			},
+			{
+				Config: config(rName+"-renamed", "is_service_user = true"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionDestroyBeforeCreate),
+				}},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "name", rName+"-renamed"),
+					func(*terraform.State) error {
+						if createdID == firstID {
+							return fmt.Errorf("the service user kept its ID %s; expected a replacement", createdID)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
 }

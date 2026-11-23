@@ -30,6 +30,7 @@ import (
 // Ensure provider defined types fully satisfy framework interfaces.
 var _ resource.Resource = &User{}
 var _ resource.ResourceWithImportState = &User{}
+var _ resource.ResourceWithModifyPlan = &User{}
 
 func NewUser() resource.Resource {
 	return &User{}
@@ -71,16 +72,21 @@ func (r *User) Schema(ctx context.Context, req resource.SchemaRequest, resp *res
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"email": schema.StringAttribute{
-				MarkdownDescription: "User Email",
+				MarkdownDescription: "User Email. NetBird does not change a user's email: a change is refused at plan time.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "User Name",
+				MarkdownDescription: "User Name. NetBird does not change a user's name: for a service user a new name replaces the user (its tokens are deleted with it); for a regular user, whose name comes from the identity provider, a change is refused at plan time.",
 				Optional:            true,
 				Computed:            true,
-				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+					stringplanmodifier.RequiresReplaceIf(serviceUserRenamed,
+						"A service user's name cannot be changed, so a new name replaces the user.",
+						"A service user's name cannot be changed, so a new name replaces the user."),
+				},
 			},
 			"last_login": schema.StringAttribute{
 				MarkdownDescription: "User Last Login timedate",
@@ -123,9 +129,13 @@ func (r *User) Schema(ctx context.Context, req resource.SchemaRequest, resp *res
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"is_service_user": schema.BoolAttribute{
-				MarkdownDescription: "If set to true, creates a Service Account User",
-				Required:            true,
-				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.RequiresReplace()},
+				MarkdownDescription: "If set to true, creates a Service Account User. Left out, a new user is a regular user and an existing one keeps what it is, as for an imported identity provider user. A configured change replaces the user.",
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers: []planmodifier.Bool{
+					boolplanmodifier.UseStateForUnknown(),
+					boolplanmodifier.RequiresReplaceIfConfigured(),
+				},
 			},
 			"is_blocked": schema.BoolAttribute{
 				MarkdownDescription: "If set to true then user is blocked and can't use the system",
@@ -169,8 +179,9 @@ func userAPIToTerraform(ctx context.Context, user *api.User, data *UserModel) di
 	data.Email = types.StringValue(user.Email)
 	data.IsBlocked = types.BoolValue(user.IsBlocked)
 	data.IsCurrent = types.BoolPointerValue(user.IsCurrent)
-	// is_service_user is Required on netbird_user: keep the configured value
-	// when the API omits it. Fresh data source models are already null.
+	// is_service_user: keep the prior value when the API omits it. Fresh
+	// data source models are already null; the resource reads an absent
+	// value as a regular user (userResourceAPIToTerraform).
 	if user.IsServiceUser != nil {
 		data.IsServiceUser = types.BoolValue(*user.IsServiceUser)
 	}
@@ -207,7 +218,7 @@ func (r *User) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		return
 	}
 
-	resp.Diagnostics.Append(userAPIToTerraform(ctx, user, &data)...)
+	resp.Diagnostics.Append(userResourceAPIToTerraform(ctx, user, &data)...)
 
 	if resp.Diagnostics.HasError() {
 		return
@@ -234,7 +245,7 @@ func (r *User) Read(ctx context.Context, req resource.ReadRequest, resp *resourc
 	}
 	for _, u := range users {
 		if u.Id == data.Id.ValueString() {
-			resp.Diagnostics.Append(userAPIToTerraform(ctx, &u, &data)...)
+			resp.Diagnostics.Append(userResourceAPIToTerraform(ctx, &u, &data)...)
 
 			if resp.Diagnostics.HasError() {
 				return
@@ -275,7 +286,7 @@ func (r *User) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		return
 	}
 
-	resp.Diagnostics.Append(userAPIToTerraform(ctx, user, &data)...)
+	resp.Diagnostics.Append(userResourceAPIToTerraform(ctx, user, &data)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -310,4 +321,51 @@ func (r *User) Delete(ctx context.Context, req resource.DeleteRequest, resp *res
 
 func (r *User) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// serviceUserRenamed requires replacement when a service user's configured
+// name changes: UserRequest (v0.83, v0.82) carries no name, and a service
+// user's name is its own, so a new name means a new user.
+func serviceUserRenamed(ctx context.Context, req planmodifier.StringRequest, resp *stringplanmodifier.RequiresReplaceIfFuncResponse) {
+	if req.State.Raw.IsNull() || req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() || req.ConfigValue.Equal(req.StateValue) {
+		return
+	}
+	var service types.Bool
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("is_service_user"), &service)...)
+	resp.RequiresReplace = service.ValueBool()
+}
+
+// ModifyPlan refuses a change the API cannot make: UserRequest (v0.83, v0.82)
+// carries only role, auto_groups and is_blocked, so an email, or a regular
+// user's name, would be planned and silently not applied.
+func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() || req.State.Raw.IsNull() {
+		return
+	}
+	var config, state UserModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	changed := func(c, s types.String) bool { return !c.IsNull() && !c.IsUnknown() && !c.Equal(s) }
+	if changed(config.Email, state.Email) {
+		resp.Diagnostics.AddAttributeError(path.Root("email"), "Email cannot be changed",
+			fmt.Sprintf("NetBird does not change a user's email (%q). Keep the current email in the configuration, or leave it out.", state.Email.ValueString()))
+	}
+	if changed(config.Name, state.Name) && !state.IsServiceUser.ValueBool() {
+		resp.Diagnostics.AddAttributeError(path.Root("name"), "Name cannot be changed",
+			fmt.Sprintf("A regular user's name (%q) comes from the identity provider and NetBird does not change it. Keep the current name in the configuration, or leave it out.", state.Name.ValueString()))
+	}
+}
+
+// userResourceAPIToTerraform maps a user for the resource: an
+// is_service_user the API omits (identity provider users) and no prior value
+// for, as on import, is a regular user.
+func userResourceAPIToTerraform(ctx context.Context, user *api.User, data *UserModel) diag.Diagnostics {
+	d := userAPIToTerraform(ctx, user, data)
+	if data.IsServiceUser.IsNull() || data.IsServiceUser.IsUnknown() {
+		data.IsServiceUser = types.BoolValue(false)
+	}
+	return d
 }
