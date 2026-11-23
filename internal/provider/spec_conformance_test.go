@@ -4,6 +4,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 	"os"
@@ -144,7 +145,7 @@ func Test_SpecConformance(t *testing.T) {
 				if prop.readOnly && a.configurable {
 					t.Errorf("%s: %s is read-only in the spec but %q is configurable", rm.typeName, key, a.name)
 				}
-				walk.checkNested(rm.typeName, key, prop, a, 1)
+				walk.checkNested(rm.typeName, key, prop, a, 1, nil)
 			}
 		}
 	}
@@ -344,7 +345,7 @@ var specRenamedApplied = map[string]bool{}
 // claimAttr records which spec property an attribute models and reports a
 // second property mapped to the same attribute: each one would then be
 // compared with the same members and one of them checked nowhere.
-func claimAttr(t *testing.T, typeName string, claims map[string]string, key, attr string) {
+func claimAttr(t specReporter, typeName string, claims map[string]string, key, attr string) {
 	t.Helper()
 	if prev, dup := claims[attr]; dup && prev != key {
 		t.Errorf("%s: %s and %s both map to %q; fix specRenamed", typeName, prev, key, attr)
@@ -778,9 +779,16 @@ schemas:
 	}
 }
 
+// specReporter is what the walk reports to: *testing.T, or a recorder in the
+// walker's own tests.
+type specReporter interface {
+	Helper()
+	Errorf(format string, args ...any)
+}
+
 // specWalk carries the bookkeeping of one Test_SpecConformance run.
 type specWalk struct {
-	t         *testing.T
+	t         specReporter
 	spec      openAPISpec
 	seen      map[string]bool // specUnmodelled entries that matched
 	checked   map[string]bool // every property key compared
@@ -807,6 +815,9 @@ func (w *specWalk) checkScalar(typeName, key string, prop specProperty, a attrIn
 	if len(props) == 0 {
 		if projected {
 			w.t.Errorf("%s: %s is listed in specProjected but has no members in the spec", typeName, key)
+		}
+		if prop.array && prop.itemReadOnly && a.configurable {
+			w.t.Errorf("%s: the items of %s are read-only in the spec but %q is configurable", typeName, key, a.name)
 		}
 		return
 	}
@@ -847,7 +858,11 @@ const specMaxDepth = 12
 // models (a component, an array's item component, or an inline object) with
 // the attribute's own members, with the same rules as the top level. A
 // read-only parent makes every member read-only.
-func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrInfo, depth int) {
+//
+// claims are the attribute claims of the Terraform object a describes: nil
+// when descending into a new object, the caller's when flattening into the
+// same one.
+func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrInfo, depth int, claims map[string]string) {
 	w.t.Helper()
 	if a.children == nil {
 		w.checkScalar(typeName, key, prop, a)
@@ -885,7 +900,9 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 		w.t.Errorf("%s: nested walk reached depth %d at %s; a cycle in the spec or in specNestedFlattened?", typeName, depth, label)
 		return
 	}
-	claims := map[string]string{}
+	if claims == nil {
+		claims = map[string]string{}
+	}
 	for _, name := range sortedKeys(props) {
 		p := props[name]
 		p.readOnly = p.readOnly || prop.readOnly || (prop.array && prop.itemReadOnly)
@@ -900,7 +917,7 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 				continue
 			}
 			w.expanded[key] = true
-			w.checkNested(typeName, key, specProperty{readOnly: p.readOnly, items: p.items, inline: p.inline, array: true, itemReadOnly: p.itemReadOnly}, a, depth+1)
+			w.checkNested(typeName, key, specProperty{readOnly: p.readOnly, items: p.items, inline: p.inline, array: true, itemReadOnly: p.itemReadOnly}, a, depth+1, claims)
 			continue
 		}
 		if _, listed := specUnmodelled[key]; listed {
@@ -922,7 +939,7 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 			w.t.Errorf("%s: %s is read-only in the spec but %q is configurable", typeName, key, c.name)
 		}
 		claimAttr(w.t, typeName, claims, key, c.name)
-		w.checkNested(typeName, key, p, c, depth+1)
+		w.checkNested(typeName, key, p, c, depth+1, nil)
 	}
 }
 
@@ -936,4 +953,93 @@ func (w *specWalk) objectItems(p specProperty) bool {
 		props, ok = w.spec.properties(p.items)
 	}
 	return ok && len(props) > 0
+}
+
+// specRecorder collects what the walk reports, for the walker's own tests.
+type specRecorder struct{ errs []string }
+
+func (r *specRecorder) Helper() {}
+func (r *specRecorder) Errorf(format string, args ...any) {
+	r.errs = append(r.errs, fmt.Sprintf(format, args...))
+}
+
+// Test_specWalk checks that the comparison itself fails: a nested member the
+// Terraform schema lacks, read-only scalar items that are configurable, and
+// a flattened member claiming an attribute its parent already claims.
+func Test_specWalk(t *testing.T) {
+	var doc struct {
+		Schemas map[string]schemaDoc `yaml:"schemas"`
+	}
+	fixture := `
+schemas:
+  Rule:
+    type: object
+    properties:
+      port_ranges:
+        type: array
+        items: {$ref: '#/components/schemas/RulePortRange'}
+      frozen:
+        type: array
+        items: {$ref: '#/components/schemas/Frozen'}
+  RulePortRange:
+    type: object
+    properties:
+      start: {type: integer}
+      end: {type: integer}
+  Frozen:
+    readOnly: true
+    type: string
+  Check:
+    type: object
+    properties:
+      path: {type: string}
+      processes:
+        type: array
+        items: {$ref: '#/components/schemas/Proc'}
+  Proc:
+    type: object
+    properties:
+      path: {type: string}
+`
+	if err := yaml.Unmarshal([]byte(fixture), &doc); err != nil {
+		t.Fatal(err)
+	}
+	spec := openAPISpec{schemas: doc.Schemas}
+	leaf := func(name string) attrInfo { return attrInfo{name: name, configurable: true} }
+	run := func(schema, key string, a attrInfo) []string {
+		rec := &specRecorder{}
+		walk := &specWalk{t: rec, spec: spec, seen: map[string]bool{}, checked: map[string]bool{}, expanded: map[string]bool{}, projected: map[string]bool{}}
+		props, ok := spec.properties(schema)
+		if !ok {
+			t.Fatalf("%s did not resolve", schema)
+		}
+		walk.checkNested("test", schema+"."+key, props[key], a, 1, nil)
+		return rec.errs
+	}
+	expect := func(errs []string, want string) {
+		t.Helper()
+		for _, e := range errs {
+			if strings.Contains(e, want) {
+				return
+			}
+		}
+		t.Errorf("expected a finding containing %q, found %v", want, errs)
+	}
+	// port_ranges models end but not start.
+	expect(run("Rule", "port_ranges", attrInfo{name: "port_range", configurable: true, children: map[string]attrInfo{"end": leaf("end")}}), "RulePortRange.start")
+	// A configurable list of read-only items.
+	rec := &specRecorder{}
+	walk := &specWalk{t: rec, spec: spec, seen: map[string]bool{}, checked: map[string]bool{}, expanded: map[string]bool{}, projected: map[string]bool{}}
+	props, _ := spec.properties("Rule")
+	walk.checkScalar("test", "Rule.frozen", props["frozen"], leaf("frozen"))
+	expect(rec.errs, "items of Rule.frozen are read-only")
+	// Flattening Check.processes into the block that also models Check.path:
+	// Proc.path claims the same attribute.
+	specNestedFlattened["Check.processes"] = true
+	defer delete(specNestedFlattened, "Check.processes")
+	block := attrInfo{name: "check", configurable: true, children: map[string]attrInfo{"path": leaf("path")}}
+	rec = &specRecorder{}
+	walk = &specWalk{t: rec, spec: spec, seen: map[string]bool{}, checked: map[string]bool{}, expanded: map[string]bool{}, projected: map[string]bool{}}
+	walk.checkNested("test", "Top.check", specProperty{ref: "Check"}, block, 1, nil)
+	expect(rec.errs, "both map to \"path\"")
 }
