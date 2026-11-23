@@ -39,6 +39,19 @@ func Test_SpecConformance(t *testing.T) {
 	seenAllowlist := map[string]bool{}
 	checked := map[string]bool{}
 	walk := &specWalk{t: t, spec: spec, seen: seenAllowlist, checked: checked, expanded: map[string]bool{}}
+	// A flattened child schema of a read-only parent is read-only throughout;
+	// the child is checked as its own entry, so the flag is carried over.
+	readOnlyChild := map[string]bool{}
+	for _, rm := range specResources {
+		for _, sm := range rm.schemas {
+			props, _ := spec.properties(sm.schema)
+			for name, child := range sm.flatten {
+				if props[name].readOnly {
+					readOnlyChild[child] = true
+				}
+			}
+		}
+	}
 	for _, rm := range specResources {
 		attrs := resourceAttributes(t, rm.resource())
 		for _, sm := range rm.schemas {
@@ -46,6 +59,12 @@ func Test_SpecConformance(t *testing.T) {
 			if !ok {
 				t.Errorf("%s: schema %s is not in the spec", rm.typeName, sm.schema)
 				continue
+			}
+			if readOnlyChild[sm.schema] {
+				for name, prop := range props {
+					prop.readOnly = true
+					props[name] = prop
+				}
 			}
 			for _, name := range sortedKeys(sm.flatten) {
 				if _, ok := props[name]; !ok {
@@ -200,12 +219,28 @@ func objectMembers(types map[string]attr.Type, configurable bool) map[string]att
 	out := map[string]attrInfo{}
 	for name, typ := range types {
 		info := attrInfo{name: name, configurable: configurable}
-		if o, ok := typ.(basetypes.ObjectType); ok {
+		if o, ok := objectElem(typ); ok {
 			info.children = objectMembers(o.AttrTypes, configurable)
 		}
 		out[name] = info
 	}
 	return out
+}
+
+// objectElem returns the object type of an object, or of a list, set or map
+// of objects.
+func objectElem(typ attr.Type) (basetypes.ObjectType, bool) {
+	switch v := typ.(type) {
+	case basetypes.ObjectType:
+		return v, true
+	case basetypes.ListType:
+		return objectElem(v.ElemType)
+	case basetypes.SetType:
+		return objectElem(v.ElemType)
+	case basetypes.MapType:
+		return objectElem(v.ElemType)
+	}
+	return basetypes.ObjectType{}, false
 }
 
 func schemaMembers(attributes map[string]rschema.Attribute, blocks map[string]rschema.Block) map[string]attrInfo {
@@ -223,6 +258,14 @@ func schemaMembers(attributes map[string]rschema.Attribute, blocks map[string]rs
 			info.children = schemaMembers(n.NestedObject.Attributes, nil)
 		case rschema.ObjectAttribute:
 			info.children = objectMembers(n.AttributeTypes, info.configurable)
+		case rschema.ListAttribute:
+			if o, ok := objectElem(n.ElementType); ok {
+				info.children = objectMembers(o.AttrTypes, info.configurable)
+			}
+		case rschema.SetAttribute:
+			if o, ok := objectElem(n.ElementType); ok {
+				info.children = objectMembers(o.AttrTypes, info.configurable)
+			}
 		}
 		out[name] = info
 	}
@@ -426,8 +469,12 @@ func (s openAPISpec) propertiesOf(doc schemaDoc) (map[string]specProperty, bool)
 				if prop.items == "" {
 					prop.items = prev.items
 				}
-				if prop.inline == nil {
+				switch {
+				case prop.inline == nil:
 					prop.inline = prev.inline
+				case prev.inline != nil:
+					// Both parts define members: keep the union.
+					prop.inline = &schemaDoc{AllOf: []schemaDoc{*prev.inline, *prop.inline}}
 				}
 				prop.array = prop.array || prev.array
 			}
@@ -474,12 +521,25 @@ schemas:
     type: object
     properties:
       shared: {type: string}
+      merged:
+        type: object
+        properties:
+          y: {type: string}
   Request:
     allOf:
       - $ref: '#/components/schemas/Base'
       - type: object
         properties:
           shared: {type: string, readOnly: true}
+          merged:
+            type: object
+            properties:
+              x: {type: string}
+          refWithMembers:
+            allOf:
+              - $ref: '#/components/schemas/Child'
+            properties:
+              f: {type: string}
           child: {$ref: '#/components/schemas/Child'}
           wrapped:
             allOf:
@@ -563,6 +623,10 @@ schemas:
 		"inlineItems":  {[]string{"c"}, true},
 		"mixedItems":   {[]string{"a", "d"}, true},
 		"mixedObject":  {[]string{"a", "e"}, false},
+		// Defined in two allOf parts of Request: the members of both.
+		"merged": {[]string{"x", "y"}, false},
+		// A single reference with members beside it.
+		"refWithMembers": {[]string{"a", "f"}, false},
 	}
 	for name, w := range inline {
 		got := props[name]
@@ -622,8 +686,9 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 		props, ok = w.spec.propertiesOf(*prop.inline)
 	case prop.array:
 		return // an array of scalars
-	case prop.inline != nil && len(prop.inline.AllOf) > 1:
-		// A composition: the union of its parts, keyed by the parent.
+	case prop.inline != nil && (len(prop.inline.AllOf) > 0 || prop.inline.Ref != ""):
+		// A composition, or a reference with members of its own beside it:
+		// the union of every part, keyed by the parent.
 		props, ok = w.spec.propertiesOf(*prop.inline)
 	case prop.ref != "":
 		label = prop.ref
@@ -680,9 +745,12 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 
 // objectItems reports whether an array property's items have members.
 func (w *specWalk) objectItems(p specProperty) bool {
+	var props map[string]specProperty
+	ok := false
 	if p.inline != nil {
-		return true
+		props, ok = w.spec.propertiesOf(*p.inline)
+	} else {
+		props, ok = w.spec.properties(p.items)
 	}
-	props, ok := w.spec.properties(p.items)
 	return ok && len(props) > 0
 }
