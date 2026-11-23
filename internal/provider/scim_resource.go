@@ -141,12 +141,10 @@ func scimAPIToTerraform(ctx context.Context, scim *api.ScimIntegration, data *Sc
 	data.UserGroupPrefixes, d = sortedStringList(ctx, data.UserGroupPrefixes, scim.UserGroupPrefixes)
 	ret.Append(d...)
 	data.ConnectorId = types.StringPointerValue(scim.ConnectorId)
-	// The prefix is read when the response carries it, so a change outside
-	// Terraform shows and an import has it; an empty one keeps the prior
-	// value. auth_token is preserved from state by the callers.
-	if scim.Prefix != "" {
-		data.Prefix = types.StringValue(scim.Prefix)
-	}
+	// The prefix is read (a required response field, "" included), so a
+	// change outside Terraform shows and an import has it. auth_token is
+	// preserved from state by the callers.
+	data.Prefix = types.StringValue(scim.Prefix)
 	return ret
 }
 
@@ -264,6 +262,7 @@ func (r *Scim) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		ConnectorId: stringDefaultPointer(configuredOnly(data.ConnectorId, config.ConnectorId), nil),
 	}
 
+	planned := data
 	scim, err := r.client.SCIM.Update(ctx, data.Id.ValueString(), scimReq)
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating SCIM integration", err.Error())
@@ -283,8 +282,10 @@ func (r *Scim) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 	}
 
 	data.AuthToken = state.AuthToken
-	if data.Prefix.IsNull() || data.Prefix.IsUnknown() {
-		data.Prefix = state.Prefix
+	// The update does not send the prefix, so the result keeps the planned
+	// one; a change made on the server since shows at the next refresh.
+	if !planned.Prefix.IsNull() && !planned.Prefix.IsUnknown() {
+		data.Prefix = planned.Prefix
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)

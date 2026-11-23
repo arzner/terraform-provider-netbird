@@ -32,6 +32,7 @@ type ScimDataSource struct {
 type ScimDataSourceModel struct {
 	Id                types.String `tfsdk:"id"`
 	ProviderName      types.String `tfsdk:"provider_name"`
+	Prefix            types.String `tfsdk:"prefix"`
 	Enabled           types.Bool   `tfsdk:"enabled"`
 	GroupPrefixes     types.List   `tfsdk:"group_prefixes"`
 	UserGroupPrefixes types.List   `tfsdk:"user_group_prefixes"`
@@ -56,6 +57,10 @@ func (d *ScimDataSource) Schema(ctx context.Context, req datasource.SchemaReques
 			"provider_name": schema.StringAttribute{
 				MarkdownDescription: "Name of the SCIM identity provider",
 				Optional:            true,
+				Computed:            true,
+			},
+			"prefix": schema.StringAttribute{
+				MarkdownDescription: "The connection prefix used for the SCIM provider",
 				Computed:            true,
 			},
 			"enabled": schema.BoolAttribute{
@@ -143,6 +148,7 @@ func (d *ScimDataSource) Read(ctx context.Context, req datasource.ReadRequest, r
 
 	data.Id = types.StringValue(strconv.FormatInt(scim.Id, 10))
 	data.ProviderName = types.StringValue(scim.Provider)
+	data.Prefix = types.StringValue(scim.Prefix)
 	data.Enabled = types.BoolValue(scim.Enabled)
 	data.LastSyncedAt = types.StringValue(scim.LastSyncedAt.Format("2006-01-02T15:04:05Z"))
 	data.ConnectorId = types.StringPointerValue(scim.ConnectorId)

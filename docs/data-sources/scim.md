@@ -38,4 +38,5 @@ data "netbird_scim" "example" {
 - `enabled` (Boolean) Indicates whether the integration is enabled
 - `group_prefixes` (List of String) List of start_with string patterns for groups to sync
 - `last_synced_at` (String) Timestamp of when the integration was last synced
+- `prefix` (String) The connection prefix used for the SCIM provider
 - `user_group_prefixes` (List of String) List of start_with string patterns for groups which users to sync

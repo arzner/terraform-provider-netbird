@@ -67,7 +67,7 @@ it is based on.
 ### Fixed
 
 - `netbird_scim`: `prefix` is read from the server, so a change outside Terraform shows and an
-  import has it, and `enabled = false` on a new integration is applied (the create request has no
+  import has it (the data source has it too), and `enabled = false` on a new integration is applied (the create request has no
   `enabled`, so an update follows the create) (#63; found by the upstream audit
   [#256](https://github.com/netbirdio/terraform-provider-netbird/issues/256)).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
