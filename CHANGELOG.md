@@ -8,6 +8,11 @@ it is based on.
 
 ## [Unreleased]
 
+### Added
+
+- `netbird_account_settings` can be imported with the ID `current`: the account of the token,
+  when the token sees exactly one account (#19).
+
 ### Changed
 
 - NetBird 0.82 is supported too: the acceptance suite also runs against the newest release of the

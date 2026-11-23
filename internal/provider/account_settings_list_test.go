@@ -7,8 +7,10 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
 )
@@ -177,5 +179,47 @@ func TestAccountSettingsReadSelectsTheStateAccount(t *testing.T) {
 	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
 	if !resp.State.Raw.IsNull() {
 		t.Fatal("an account that is no longer listed must be removed from state")
+	}
+}
+
+func TestAccountSettingsImportCurrent(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		status  int
+		body    string
+		wantID  string
+		wantErr bool
+	}{
+		"one account":      {http.StatusOK, `[{"id":"acc1","settings":{}}]`, "acc1", false},
+		"several accounts": {http.StatusOK, `[{"id":"acc1","settings":{}},{"id":"acc2","settings":{}}]`, "", true},
+		"no account":       {http.StatusOK, `[]`, "", true},
+		"failed list":      {http.StatusNotFound, invalidTokenBody, "", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, schema := accountSettingsResource(t, accountsClient(t, tc.status, tc.body))
+			resp := resource.ImportStateResponse{State: tfsdk.State{Schema: schema.Schema, Raw: tftypes.NewValue(schema.Schema.Type().TerraformType(ctx), nil)}}
+			r.ImportState(ctx, resource.ImportStateRequest{ID: "current"}, &resp)
+			if resp.Diagnostics.HasError() != tc.wantErr {
+				t.Fatalf("expected error %v, found %v", tc.wantErr, resp.Diagnostics)
+			}
+			if tc.wantErr {
+				return
+			}
+			var id types.String
+			resp.Diagnostics.Append(resp.State.GetAttribute(ctx, path.Root("id"), &id)...)
+			if id.ValueString() != tc.wantID {
+				t.Fatalf("expected id %s, found %s", tc.wantID, id.ValueString())
+			}
+		})
+	}
+
+	// Any other ID is passed through unchanged; Read decides whether it exists.
+	r, schema := accountSettingsResource(t, accountsClient(t, http.StatusInternalServerError, `{}`))
+	resp := resource.ImportStateResponse{State: tfsdk.State{Schema: schema.Schema, Raw: tftypes.NewValue(schema.Schema.Type().TerraformType(ctx), nil)}}
+	r.ImportState(ctx, resource.ImportStateRequest{ID: "acc9"}, &resp)
+	var id types.String
+	resp.Diagnostics.Append(resp.State.GetAttribute(ctx, path.Root("id"), &id)...)
+	if resp.Diagnostics.HasError() || id.ValueString() != "acc9" {
+		t.Fatalf("expected passthrough of acc9, found %s %v", id.ValueString(), resp.Diagnostics)
 	}
 }
