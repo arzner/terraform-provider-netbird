@@ -141,7 +141,12 @@ func scimAPIToTerraform(ctx context.Context, scim *api.ScimIntegration, data *Sc
 	data.UserGroupPrefixes, d = sortedStringList(ctx, data.UserGroupPrefixes, scim.UserGroupPrefixes)
 	ret.Append(d...)
 	data.ConnectorId = types.StringPointerValue(scim.ConnectorId)
-	// auth_token and prefix are preserved from existing state
+	// The prefix is read when the response carries it, so a change outside
+	// Terraform shows and an import has it; an empty one keeps the prior
+	// value. auth_token is preserved from state by the callers.
+	if scim.Prefix != "" {
+		data.Prefix = types.StringValue(scim.Prefix)
+	}
 	return ret
 }
 
@@ -161,6 +166,7 @@ func (r *Scim) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		ConnectorId:       stringDefaultPointer(data.ConnectorId, nil),
 	}
 
+	plannedEnabled := data.Enabled
 	scim, err := r.client.SCIM.Create(ctx, scimReq)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating SCIM integration", err.Error())
@@ -173,7 +179,32 @@ func (r *Scim) Create(ctx context.Context, req resource.CreateRequest, resp *res
 	}
 
 	// Capture the full auth_token from the create response
-	data.AuthToken = types.StringValue(scim.AuthToken)
+	authToken := types.StringValue(scim.AuthToken)
+
+	// The create request has no enabled field, so a planned false is set by
+	// an update right after the create.
+	if !plannedEnabled.IsNull() && !plannedEnabled.IsUnknown() && !plannedEnabled.ValueBool() && scim.Enabled {
+		disabled := false
+		// The same fields as the create, so nothing else moves.
+		updated, err := r.client.SCIM.Update(ctx, data.Id.ValueString(), api.UpdateScimIntegrationRequest{
+			Enabled:           &disabled,
+			GroupPrefixes:     scimReq.GroupPrefixes,
+			UserGroupPrefixes: scimReq.UserGroupPrefixes,
+			ConnectorId:       scimReq.ConnectorId,
+		})
+		if err != nil {
+			// Keep the created integration in state so it is not orphaned.
+			data.AuthToken = authToken
+			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+			resp.Diagnostics.AddError("Error disabling the new SCIM integration", err.Error())
+			return
+		}
+		resp.Diagnostics.Append(scimAPIToTerraform(ctx, updated, &data)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+	data.AuthToken = authToken
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -196,9 +227,8 @@ func (r *Scim) Read(ctx context.Context, req resource.ReadRequest, resp *resourc
 		return
 	}
 
-	// Preserve auth_token and prefix from state
+	// Preserve auth_token from state
 	authToken := data.AuthToken
-	prefix := data.Prefix
 
 	resp.Diagnostics.Append(scimAPIToTerraform(ctx, scim, &data)...)
 	if resp.Diagnostics.HasError() {
@@ -206,7 +236,6 @@ func (r *Scim) Read(ctx context.Context, req resource.ReadRequest, resp *resourc
 	}
 
 	data.AuthToken = authToken
-	data.Prefix = prefix
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -254,7 +283,9 @@ func (r *Scim) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 	}
 
 	data.AuthToken = state.AuthToken
-	data.Prefix = state.Prefix
+	if data.Prefix.IsNull() || data.Prefix.IsUnknown() {
+		data.Prefix = state.Prefix
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }

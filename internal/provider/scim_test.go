@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -184,5 +186,77 @@ func Test_scim_connectorIDRequests(t *testing.T) {
 	}
 	if _, sent := bodies[1]["connector_id"]; sent {
 		t.Errorf("update: a left-out connector must not be sent, found %v", bodies[1]["connector_id"])
+	}
+}
+
+// Test_scim_disabledOnCreate: the create request has no enabled field, so a
+// planned enabled = false is sent by an update right after the create; the
+// prefix is read from the response.
+func Test_scim_disabledOnCreate(t *testing.T) {
+	ctx := context.Background()
+	var methods []string
+	var bodies []map[string]any
+	enabled := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		methods, bodies = append(methods, r.Method), append(bodies, body)
+		if v, ok := body["enabled"].(bool); ok {
+			enabled = v
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":7,"provider":"okta","prefix":"server-prefix","enabled":%t,"group_prefixes":[],"user_group_prefixes":[],"auth_token":"t","last_synced_at":"2026-01-01T00:00:00Z"}`, enabled)
+	}))
+	defer srv.Close()
+	r := &Scim{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	values := map[string]tftypes.Value{}
+	for n, at := range typ.AttributeTypes {
+		values[n] = tftypes.NewValue(at, nil)
+	}
+	values["provider_name"] = tftypes.NewValue(tftypes.String, "okta")
+	values["prefix"] = tftypes.NewValue(tftypes.String, tftypes.UnknownValue)
+	values["enabled"] = tftypes.NewValue(tftypes.Bool, false)
+	plan := tftypes.NewValue(typ, values)
+	create := resource.CreateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(typ, nil)}}
+	r.Create(ctx, resource.CreateRequest{Plan: tfsdk.Plan{Schema: sch.Schema, Raw: plan}, Config: tfsdk.Config{Schema: sch.Schema, Raw: plan}}, &create)
+	if create.Diagnostics.HasError() {
+		t.Fatal(create.Diagnostics)
+	}
+	if !slices.Equal(methods, []string{"POST", "PUT"}) || bodies[1]["enabled"] != false {
+		t.Fatalf("expected a create then an update with enabled false, found %v %v", methods, bodies)
+	}
+	var got ScimModel
+	if d := create.State.Get(ctx, &got); d.HasError() {
+		t.Fatal(d)
+	}
+	if got.Enabled.ValueBool() || got.Prefix.ValueString() != "server-prefix" || got.AuthToken.ValueString() != "t" {
+		t.Errorf("expected enabled false, the server's prefix and the token, found %v %v %v", got.Enabled, got.Prefix, got.AuthToken)
+	}
+}
+
+func Test_scimAPIToTerraform_prefix(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		prior    types.String
+		response string
+		want     types.String
+	}{
+		"changed on the server": {types.StringValue("old"), "new", types.StringValue("new")},
+		"import":                {types.StringNull(), "p", types.StringValue("p")},
+		"not reported":          {types.StringValue("old"), "", types.StringValue("old")},
+	} {
+		data := ScimModel{Prefix: tc.prior}
+		if d := scimAPIToTerraform(ctx, &api.ScimIntegration{Id: 1, Provider: "okta", Prefix: tc.response}, &data); d.HasError() {
+			t.Fatal(d)
+		}
+		if !data.Prefix.Equal(tc.want) {
+			t.Errorf("%s: expected %v, found %v", name, tc.want, data.Prefix)
+		}
 	}
 }
