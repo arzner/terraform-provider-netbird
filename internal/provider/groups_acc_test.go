@@ -35,6 +35,58 @@ data "netbird_groups" "%[1]s" {
 		checkGroupsAgainstAPI(ds, func(g api.Group) bool { return g.Name == rName }),
 	))
 
+	// Two groups sharing a name: the API refuses a duplicate name on create
+	// but not on an update, which keeps the group's ID, so the second group
+	// is created under its own name and renamed. Both are returned, by ID.
+	twins := func(second string) string {
+		return fmt.Sprintf(`
+resource "netbird_group" "%[1]s" {
+  name = %[1]q
+}
+
+resource "netbird_group" "%[1]s_twin" {
+  name = %[2]q
+}
+
+data "netbird_groups" "%[1]s" {
+  name       = %[1]q
+  depends_on = [netbird_group.%[1]s, netbird_group.%[1]s_twin]
+}
+`, rName, second)
+	}
+	bothIDs := func(s *terraform.State) error {
+		ids := []string{
+			s.RootModule().Resources["netbird_group."+rName].Primary.ID,
+			s.RootModule().Resources["netbird_group."+rName+"_twin"].Primary.ID,
+		}
+		slices.Sort(ids)
+		attrs := s.RootModule().Resources[ds].Primary.Attributes
+		for i, id := range ids {
+			if got := attrs["ids."+strconv.Itoa(i)]; got != id {
+				return fmt.Errorf("ids.%d: expected %s, found %s", i, id, got)
+			}
+			if got := attrs["groups."+strconv.Itoa(i)+".id"]; got != id {
+				return fmt.Errorf("groups.%d.id: expected %s, found %s", i, id, got)
+			}
+		}
+		return nil
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: twins(rName + "-other")},
+			{
+				Config: twins(rName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(ds, "ids.#", "2"),
+					resource.TestCheckResourceAttr(ds, "groups.#", "2"),
+					bothIDs,
+				),
+			},
+		},
+	})
+
 	// A name no group has is an empty result, where netbird_group fails with No match.
 	missing := fmt.Sprintf(`
 data "netbird_groups" "%[1]s" {

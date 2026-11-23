@@ -77,7 +77,7 @@ data "netbird_users" "%[1]s" {
   depends_on = [netbird_group.%[1]s]
 }
 `, rName),
-				ExpectError: regexp.MustCompile(`At least one attribute out of`),
+				ExpectError: regexp.MustCompile(`(?s)Missing Attribute Configuration.*At least one of these attributes must be configured`),
 			},
 		},
 	})
@@ -97,7 +97,10 @@ data "netbird_users" "%[1]s" {
   email = "%[1]s@never-created.invalid"
 }
 `, rName)
-	dsCase(t, missing, resource.TestCheckResourceAttr(ds, "ids.#", "0"))
+	dsCase(t, missing, resource.ComposeAggregateTestCheckFunc(
+		resource.TestCheckResourceAttr(ds, "ids.#", "0"),
+		resource.TestCheckResourceAttr(ds, "users.#", "0"),
+	))
 
 	// A role filter returns every user the server holds with that role.
 	byRole := fmt.Sprintf(`
@@ -127,7 +130,10 @@ func checkUsersAgainstAPI(ds string, keep func(api.User) bool) resource.TestChec
 		}
 		// The data source lists users by ID; auto groups are compared as a set.
 		slices.SortFunc(want, func(a, b api.User) int { return strings.Compare(a.Id, b.Id) })
-		checks := []resource.TestCheckFunc{resource.TestCheckResourceAttr(ds, "ids.#", strconv.Itoa(len(want)))}
+		checks := []resource.TestCheckFunc{
+			resource.TestCheckResourceAttr(ds, "ids.#", strconv.Itoa(len(want))),
+			resource.TestCheckResourceAttr(ds, "users.#", strconv.Itoa(len(want))),
+		}
 		for i, u := range want {
 			p := fmt.Sprintf("users.%d.", i)
 			var lastLogin *string

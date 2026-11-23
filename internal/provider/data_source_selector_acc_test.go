@@ -33,7 +33,7 @@ import (
 // noSelector is the shape of the provider's own refusal. The wording differs
 // between data sources — "Must add at least one of" against "Must set at least
 // one of" — which is worth matching loosely rather than pinning.
-var noSelector = regexp.MustCompile(`(?s)No selector|at least one of|At least one attribute out of`)
+var noSelector = regexp.MustCompile(`(?s)No selector|at least one of|At least one of these attributes must be configured`)
 
 // noMatch is the refusal when a filter is well formed and answers nothing. The
 // wording splits the same way — "matching parameters not found" against
