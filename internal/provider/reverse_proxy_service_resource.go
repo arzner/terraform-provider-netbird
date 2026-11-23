@@ -916,7 +916,10 @@ func preserveTargetPlanValues(ctx context.Context, planTargets, apiTargets types
 		if !ok {
 			continue
 		}
-		if !planModel.Host.IsNull() && !planModel.Host.IsUnknown() {
+		// For peer, host and domain targets the server reports the address it
+		// looked up, not the configured one; subnet and cluster targets keep
+		// theirs, so the server's value stands and a change shows.
+		if !planModel.Host.IsNull() && !planModel.Host.IsUnknown() && serverResolvesHost(apiModel.TargetType.ValueString()) {
 			apiModels[i].Host = planModel.Host
 		}
 		if !planModel.Path.IsNull() && !planModel.Path.IsUnknown() {
@@ -932,6 +935,16 @@ func preserveTargetPlanValues(ctx context.Context, planTargets, apiTargets types
 	result, d := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), apiModels)
 	ret.Append(d...)
 	return result, ret
+}
+
+// serverResolvesHost reports whether NetBird replaces a target's host with
+// the address it looks up for the target (v0.83: peer, host and domain).
+func serverResolvesHost(targetType string) bool {
+	switch targetType {
+	case "peer", "host", "domain":
+		return true
+	}
+	return false
 }
 
 // matchPlanTargets pairs each API target with at most one planned target, and
@@ -981,7 +994,14 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 				}
 			}
 			if len(found) == 1 || (!onlyOne && len(found) > 0) {
-				out[found[0]], used[j] = p, true
+				// Among equals, the target at the same position wins.
+				pick := found[0]
+				for _, i := range found {
+					if i == j {
+						pick = i
+					}
+				}
+				out[pick], used[j] = p, true
 			}
 		}
 	}

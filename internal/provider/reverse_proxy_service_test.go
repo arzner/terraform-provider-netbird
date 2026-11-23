@@ -1651,3 +1651,64 @@ func Test_matchPlanTargets_duplicatesAndMovedPort(t *testing.T) {
 		t.Errorf("moved port: expected the survivor to pair with B, found %v", got)
 	}
 }
+
+// A subnet target keeps the host the server has, so a host changed outside
+// Terraform shows; among equal targets the same position pairs.
+func Test_preserveTargetPlanValues_subnetHostAndPosition(t *testing.T) {
+	ctx := context.Background()
+	target := func(typ string, path types.String, host, timeout string) ReverseProxyServiceTargetModel {
+		opts := types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes)
+		if timeout != "" {
+			attrs := map[string]attr.Value{}
+			for name, at := range (ReverseProxyTargetOptionsModel{}).TFType().AttrTypes {
+				switch at {
+				case types.BoolType:
+					attrs[name] = types.BoolNull()
+				case types.StringType:
+					attrs[name] = types.StringNull()
+				default:
+					attrs[name] = types.MapNull(types.StringType)
+				}
+			}
+			attrs["request_timeout"] = types.StringValue(timeout)
+			opts = types.ObjectValueMust(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes, attrs)
+		}
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("x"), TargetType: types.StringValue(typ), Port: types.Int64Value(80),
+			Protocol: types.StringValue("http"), Enabled: types.BoolValue(true), Path: path,
+			Host: types.StringValue(host), AccessAction: types.StringValue("inherit"), Options: opts,
+		}
+	}
+	list := func(ts ...ReverseProxyServiceTargetModel) types.List {
+		l, _ := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), ts)
+		return l
+	}
+	root := types.StringValue("/")
+	got, d := preserveTargetPlanValues(ctx,
+		list(target("subnet", root, "10.0.0.1", ""), target("subnet", root, "10.0.0.2", "")),
+		list(target("subnet", root, "10.0.0.3", ""), target("subnet", root, "10.0.0.4", "")))
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	var out []ReverseProxyServiceTargetModel
+	got.ElementsAs(ctx, &out, false)
+	if out[0].Host.ValueString() != "10.0.0.3" || out[1].Host.ValueString() != "10.0.0.4" {
+		t.Errorf("subnet hosts changed outside Terraform must show, found %s, %s", out[0].Host.ValueString(), out[1].Host.ValueString())
+	}
+	// Create: the first path left out (unknown), the second "/", both on one
+	// peer; the API answers in request order.
+	got, d = preserveTargetPlanValues(ctx,
+		list(target("peer", types.StringUnknown(), "", "5s"), target("peer", root, "", "10s")),
+		list(target("peer", types.StringNull(), "100.0.0.1", ""), target("peer", root, "100.0.0.1", "")))
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	got.ElementsAs(ctx, &out, false)
+	timeout := func(m ReverseProxyServiceTargetModel) string {
+		v, _ := m.Options.Attributes()["request_timeout"].(types.String)
+		return v.ValueString()
+	}
+	if timeout(out[0]) != "5s" || timeout(out[1]) != "10s" {
+		t.Errorf("options must stay with their own target, found %s, %s", timeout(out[0]), timeout(out[1]))
+	}
+}
