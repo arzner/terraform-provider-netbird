@@ -13,11 +13,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/datasourcevalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
@@ -192,6 +194,14 @@ func (d *UsersDataSource) Configure(ctx context.Context, req datasource.Configur
 func filterUsers(ctx context.Context, users []api.User, data UsersModel) ([]api.User, diag.Diagnostics) {
 	var d diag.Diagnostics
 	filtered := make([]api.User, 0, len(users))
+	// Decoded once, not per user.
+	var wantGroups []string
+	if !data.AutoGroups.IsNull() && !data.AutoGroups.IsUnknown() {
+		d.Append(data.AutoGroups.ElementsAs(ctx, &wantGroups, false)...)
+		if d.HasError() {
+			return filtered, d
+		}
+	}
 	for _, u := range users {
 		issued := ""
 		if u.Issued != nil {
@@ -211,12 +221,10 @@ func filterUsers(ctx context.Context, users []api.User, data UsersModel) ([]api.
 			matchString(issued, data.Issued) +
 			serviceUser +
 			matchBool(u.IsBlocked, data.IsBlocked)
-		m, di := matchListString(ctx, u.AutoGroups, data.AutoGroups)
-		d.Append(di...)
-		if d.HasError() {
-			return filtered, d
+		if match < 0 {
+			continue
 		}
-		if match+m < 0 {
+		if wantGroups != nil && !containsAll(u.AutoGroups, wantGroups) {
 			continue
 		}
 		filtered = append(filtered, u)
@@ -235,6 +243,8 @@ func (d *UsersDataSource) Read(ctx context.Context, req datasource.ReadRequest, 
 		return
 	}
 
+	// ConfigValidators refuses a block without selectors at plan time; a
+	// selector known only at apply time can still turn out null.
 	if knownCount(
 		data.Name, data.Email, data.Role, data.Status, data.Issued,
 		data.IsServiceUser, data.IsBlocked, data.AutoGroups,
@@ -319,18 +329,31 @@ func listUsers(ctx context.Context, client *netbird.Client, serviceUser types.Bo
 	if len(body) > maxUsersResponse {
 		return nil, fmt.Errorf("users response larger than %d bytes", maxUsersResponse)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		var apiErr struct {
-			Message string `json:"message"`
-		}
-		if json.Unmarshal(body, &apiErr) == nil && apiErr.Message != "" {
-			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, apiErr.Message)
-		}
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
 	var users []api.User
 	if err := json.Unmarshal(body, &users); err != nil {
 		return nil, fmt.Errorf("decoding the users list: %w", err)
 	}
 	return users, nil
 }
+
+// containsAll reports whether have holds every element of want.
+func containsAll(have, want []string) bool {
+	for _, w := range want {
+		if !slices.Contains(have, w) {
+			return false
+		}
+	}
+	return true
+}
+
+// ConfigValidators refuses a block without any selector at plan time, also
+// when the read is deferred to apply; a selector whose value is not known
+// yet counts as set.
+func (d *UsersDataSource) ConfigValidators(context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{datasourcevalidator.AtLeastOneOf(
+		path.MatchRoot("name"), path.MatchRoot("email"), path.MatchRoot("role"), path.MatchRoot("status"),
+		path.MatchRoot("issued"), path.MatchRoot("is_service_user"), path.MatchRoot("is_blocked"), path.MatchRoot("auto_groups"),
+	)}
+}
+
+var _ datasource.DataSourceWithConfigValidators = &UsersDataSource{}

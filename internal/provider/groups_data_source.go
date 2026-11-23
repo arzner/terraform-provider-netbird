@@ -6,6 +6,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"github.com/hashicorp/terraform-plugin-framework-validators/datasourcevalidator"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"slices"
 	"strings"
 
@@ -190,3 +192,11 @@ func groupsAPIToTerraform(ctx context.Context, groups []api.Group, data *GroupsM
 	data.Ids = l
 	return ret
 }
+
+// ConfigValidators refuses a block without any selector at plan time, also
+// when the read is deferred to apply.
+func (d *GroupsDataSource) ConfigValidators(context.Context) []datasource.ConfigValidator {
+	return []datasource.ConfigValidator{datasourcevalidator.AtLeastOneOf(path.MatchRoot("name"), path.MatchRoot("issued"))}
+}
+
+var _ datasource.DataSourceWithConfigValidators = &GroupsDataSource{}

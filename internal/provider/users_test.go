@@ -2,12 +2,16 @@ package provider
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
 
@@ -146,5 +150,30 @@ func Test_usersAPIToTerraform_absentOptionalFields(t *testing.T) {
 	}
 	if u.Name.ValueString() != "Carol" || u.Status.ValueString() != "invited" {
 		t.Fatalf("Unexpected user mapping: %#v", u)
+	}
+}
+
+// Test_listUsers_serviceUserQuery checks that is_service_user reaches the
+// server as the service_user query, so the server does the filtering.
+func Test_listUsers_serviceUserQuery(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.Query().Get("service_user")+"|"+strconv.FormatBool(r.URL.Query().Has("service_user")))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"u1","name":"a","email":"","role":"user","status":"active","auto_groups":[],"is_blocked":false,"is_service_user":true}]`))
+	}))
+	defer srv.Close()
+	client := netbird.New(srv.URL, "token")
+	for _, sel := range []types.Bool{types.BoolValue(true), types.BoolValue(false), types.BoolNull()} {
+		users, err := listUsers(context.Background(), client, sel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(users) != 1 || users[0].Id != "u1" {
+			t.Fatalf("expected the server's user, found %+v", users)
+		}
+	}
+	if want := []string{"true|true", "false|true", "|false"}; !slices.Equal(got, want) {
+		t.Errorf("expected the queries %v, found %v", want, got)
 	}
 }

@@ -19,6 +19,8 @@ func Test_filterGroups(t *testing.T) {
 		{Id: "g3", Name: "NetbirdUsersRrdDyn", Issued: &jwt},
 		// A group read back without an issuer must not crash the filter.
 		{Id: "g4", Name: "Legacy"},
+		// IdP and JWT groups can share a name; every one is returned.
+		{Id: "g5", Name: "NetbirdUsersRrdDyn", Issued: &jwt},
 	}
 
 	cases := []struct {
@@ -29,12 +31,17 @@ func Test_filterGroups(t *testing.T) {
 		{
 			name:     "no filter returns every group",
 			filter:   GroupsModel{},
-			expected: []string{"g1", "g2", "g3", "g4"},
+			expected: []string{"g1", "g2", "g3", "g4", "g5"},
 		},
 		{
 			name:     "issued",
 			filter:   GroupsModel{Issued: types.StringValue("jwt")},
-			expected: []string{"g2", "g3"},
+			expected: []string{"g2", "g3", "g5"},
+		},
+		{
+			name:     "every group sharing a name",
+			filter:   GroupsModel{Name: types.StringValue("NetbirdUsersRrdDyn")},
+			expected: []string{"g3", "g5"},
 		},
 		{
 			name:     "name and issued are both required",

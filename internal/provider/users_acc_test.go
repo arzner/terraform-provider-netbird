@@ -65,6 +65,20 @@ data "netbird_users" "%s" {
 			refused(`auto_groups = []`, `(?s)Invalid Attribute Value.*auto_groups`),
 			refused(`auto_groups = [""]`, `(?s)Invalid Attribute Value Length.*auto_groups`),
 			refused(`role = "admn"`, `(?s)Invalid Attribute Value Match.*role`),
+			{
+				// A read deferred to apply by depends_on is still refused at
+				// plan time, before the dependency is created.
+				Config: fmt.Sprintf(`
+resource "netbird_group" "%[1]s" {
+  name = %[1]q
+}
+
+data "netbird_users" "%[1]s" {
+  depends_on = [netbird_group.%[1]s]
+}
+`, rName),
+				ExpectError: regexp.MustCompile(`At least one attribute out of`),
+			},
 		},
 	})
 
