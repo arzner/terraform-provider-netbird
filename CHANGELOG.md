@@ -8,6 +8,13 @@ it is based on.
 
 ## [Unreleased]
 
+### Added
+
+- `netbird_account_settings`: `metrics_push_enabled`, `auto_update_always`,
+  `peer_hostname_collision_rejected`, `agent_network_only` and `dashboard_features`, also in
+  the data source (#23). `agent_network_only = true` requires
+  `dashboard_features.agent_network = true`, checked at plan time.
+
 ## [0.1.0] - 2026-11-23
 
 First release of the fork. Based on upstream `4aa1f36` (v0.0.11 plus [#263](https://github.com/netbirdio/terraform-provider-netbird/pull/263)),

@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int32validator"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -15,6 +16,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int32planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
@@ -27,6 +29,10 @@ import (
 // Ensure provider defined types fully satisfy framework interfaces.
 var _ resource.Resource = &AccountSettings{}
 var _ resource.ResourceWithImportState = &AccountSettings{}
+var _ resource.ResourceWithValidateConfig = &AccountSettings{}
+
+// dashboardFeaturesTypes are the attributes of dashboard_features.
+var dashboardFeaturesTypes = map[string]attr.Type{"agent_network": types.BoolType}
 
 func NewAccountSettings() resource.Resource {
 	return &AccountSettings{}
@@ -60,6 +66,11 @@ type AccountSettingsModel struct {
 	Ipv6EnabledGroups                  types.List   `tfsdk:"ipv6_enabled_groups"`
 	LazyConnectionEnabled              types.Bool   `tfsdk:"lazy_connection_enabled"`
 	LocalMfaEnabled                    types.Bool   `tfsdk:"local_mfa_enabled"`
+	MetricsPushEnabled                 types.Bool   `tfsdk:"metrics_push_enabled"`
+	AutoUpdateAlways                   types.Bool   `tfsdk:"auto_update_always"`
+	PeerHostnameCollisionRejected      types.Bool   `tfsdk:"peer_hostname_collision_rejected"`
+	AgentNetworkOnly                   types.Bool   `tfsdk:"agent_network_only"`
+	DashboardFeatures                  types.Object `tfsdk:"dashboard_features"`
 	UserApprovalRequired               types.Bool   `tfsdk:"user_approval_required"`
 	NetworkTrafficLogsGroups           types.List   `tfsdk:"network_traffic_logs_groups"`
 	PeerExposeEnabled                  types.Bool   `tfsdk:"peer_expose_enabled"`
@@ -206,6 +217,44 @@ func (r *AccountSettings) Schema(ctx context.Context, req resource.SchemaRequest
 				Computed:            true,
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
+			"metrics_push_enabled": schema.BoolAttribute{
+				MarkdownDescription: "Enables or disables client metrics push for all peers in the account.",
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
+			"auto_update_always": schema.BoolAttribute{
+				MarkdownDescription: "When true, client updates are installed automatically in the background; when false, they require user interaction in the client UI. Applies when `auto_update_version` is not `disabled`.",
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
+			"peer_hostname_collision_rejected": schema.BoolAttribute{
+				MarkdownDescription: "When true, registering or renaming a peer to a hostname another peer of the account already uses fails, instead of the peer receiving an IP-based suffix. Applies to ephemeral peers as well.",
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
+			"agent_network_only": schema.BoolAttribute{
+				MarkdownDescription: "Limits the dashboard to the Agent Network surface. Requires `dashboard_features.agent_network` to be true.",
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+			},
+			"dashboard_features": schema.SingleNestedAttribute{
+				MarkdownDescription: "Per-account dashboard section visibility overrides. Left out, the account's current overrides are kept.",
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers:       []planmodifier.Object{objectplanmodifier.UseStateForUnknown()},
+				Attributes: map[string]schema.Attribute{
+					"agent_network": schema.BoolAttribute{
+						MarkdownDescription: "Shows (true) or hides (false) the Agent Network menu regardless of the deployment feature flag. Left out, the current value is kept; it cannot be reset to the server default from Terraform.",
+						Optional:            true,
+						Computed:            true,
+						PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+					},
+				},
+			},
 			"user_approval_required": schema.BoolAttribute{
 				MarkdownDescription: "Enables manual approval for new users joining via domain matching. When enabled, users are blocked with pending approval status until explicitly approved by an admin.",
 				Optional:            true,
@@ -281,6 +330,13 @@ func accountAPIToTerraform(ctx context.Context, account *api.Account, data *Acco
 	data.Ipv6EnabledGroups = ipv6Groups
 	data.LazyConnectionEnabled = types.BoolPointerValue(account.Settings.LazyConnectionEnabled)
 	data.LocalMfaEnabled = types.BoolPointerValue(account.Settings.LocalMfaEnabled)
+	data.MetricsPushEnabled = types.BoolPointerValue(account.Settings.MetricsPushEnabled)
+	data.AutoUpdateAlways = types.BoolPointerValue(account.Settings.AutoUpdateAlways)
+	data.PeerHostnameCollisionRejected = types.BoolPointerValue(account.Settings.PeerHostnameCollisionRejected)
+	data.AgentNetworkOnly = types.BoolPointerValue(account.Settings.AgentNetworkOnly)
+	features, df := dashboardFeaturesValue(account.Settings.DashboardFeatures)
+	ret.Append(df...)
+	data.DashboardFeatures = features
 	data.UserApprovalRequired = types.BoolValue(account.Settings.Extra.UserApprovalRequired)
 	logsGroups, d := sortedStringList(ctx, data.NetworkTrafficLogsGroups, account.Settings.Extra.NetworkTrafficLogsGroups)
 	ret.Append(d...)
@@ -331,6 +387,11 @@ func accountTerraformToAPI(ctx context.Context, account *api.Account, data Accou
 	settings.Ipv6EnabledGroups = stringListDefaultPointer(ctx, data.Ipv6EnabledGroups, account.Settings.Ipv6EnabledGroups)
 	settings.LazyConnectionEnabled = boolDefaultPointer(data.LazyConnectionEnabled, account.Settings.LazyConnectionEnabled)
 	settings.LocalMfaEnabled = boolDefaultPointer(data.LocalMfaEnabled, account.Settings.LocalMfaEnabled)
+	settings.MetricsPushEnabled = boolDefaultPointer(data.MetricsPushEnabled, account.Settings.MetricsPushEnabled)
+	settings.AutoUpdateAlways = boolDefaultPointer(data.AutoUpdateAlways, account.Settings.AutoUpdateAlways)
+	settings.PeerHostnameCollisionRejected = boolDefaultPointer(data.PeerHostnameCollisionRejected, account.Settings.PeerHostnameCollisionRejected)
+	settings.AgentNetworkOnly = boolDefaultPointer(data.AgentNetworkOnly, account.Settings.AgentNetworkOnly)
+	settings.DashboardFeatures = dashboardFeaturesRequest(data.DashboardFeatures, account.Settings.DashboardFeatures)
 	settings.PeerExposeEnabled = boolDefault(data.PeerExposeEnabled, account.Settings.PeerExposeEnabled)
 	settings.PeerExposeGroups = stringListDefault(ctx, data.PeerExposeGroups, account.Settings.PeerExposeGroups)
 
@@ -429,4 +490,50 @@ func (r *AccountSettings) Delete(ctx context.Context, req resource.DeleteRequest
 
 func (r *AccountSettings) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// dashboardFeaturesValue maps the API's dashboard overrides; a missing object
+// is null.
+func dashboardFeaturesValue(f *api.AccountDashboardFeatures) (types.Object, diag.Diagnostics) {
+	if f == nil {
+		return types.ObjectNull(dashboardFeaturesTypes), nil
+	}
+	return types.ObjectValue(dashboardFeaturesTypes, map[string]attr.Value{"agent_network": types.BoolPointerValue(f.AgentNetwork)})
+}
+
+// dashboardFeaturesRequest keeps the current overrides unless the plan sets
+// them; within the object a null or unknown member keeps its current value too.
+func dashboardFeaturesRequest(planned types.Object, current *api.AccountDashboardFeatures) *api.AccountDashboardFeatures {
+	if planned.IsNull() || planned.IsUnknown() {
+		return current
+	}
+	out := api.AccountDashboardFeatures{}
+	if current != nil {
+		out = *current
+	}
+	if v, ok := planned.Attributes()["agent_network"].(types.Bool); ok {
+		out.AgentNetwork = boolDefaultPointer(v, out.AgentNetwork)
+	}
+	return &out
+}
+
+// ValidateConfig rejects agent_network_only without the Agent Network menu,
+// which the server refuses at apply time.
+func (r *AccountSettings) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var data AccountSettingsModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() || data.AgentNetworkOnly.IsNull() || data.AgentNetworkOnly.IsUnknown() || !data.AgentNetworkOnly.ValueBool() {
+		return
+	}
+	if data.DashboardFeatures.IsUnknown() {
+		return
+	}
+	if !data.DashboardFeatures.IsNull() {
+		v, ok := data.DashboardFeatures.Attributes()["agent_network"].(types.Bool)
+		if ok && (v.IsUnknown() || (!v.IsNull() && v.ValueBool())) {
+			return
+		}
+	}
+	resp.Diagnostics.AddAttributeError(path.Root("agent_network_only"), "Agent Network menu required",
+		"agent_network_only = true requires dashboard_features.agent_network = true in the same configuration.")
 }

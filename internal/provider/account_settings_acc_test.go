@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"testing"
 
@@ -226,10 +227,13 @@ func setAccountSettingsRaw(accountID string, change api.AccountSettings) error {
 
 // pointerSettings are the optional settings setAccountSettingsRaw may change.
 var pointerSettings = map[string]struct{}{
-	"network_range_v6":     {},
-	"ipv6_enabled_groups":  {},
-	"metrics_push_enabled": {},
-	"auto_update_always":   {},
+	"network_range_v6":                 {},
+	"ipv6_enabled_groups":              {},
+	"metrics_push_enabled":             {},
+	"auto_update_always":               {},
+	"peer_hostname_collision_rejected": {},
+	"agent_network_only":               {},
+	"dashboard_features":               {},
 }
 
 func testAccountResource(rName string) string {
@@ -402,4 +406,92 @@ data "netbird_account_settings" "test" {
 			},
 		},
 	})
+}
+
+func Test_Account_RemainingSettings(t *testing.T) {
+	env := testE2E(t)
+	rName := "acc" + acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum)
+	rNameFull := "netbird_account_settings." + rName
+	original, err := testAccountSettings(env.AccountID)
+	if err != nil {
+		t.Fatalf("could not read the account's settings: %v", err)
+	}
+	t.Cleanup(func() {
+		off := false
+		restore := api.AccountSettings{
+			MetricsPushEnabled:            valOr2(original.MetricsPushEnabled, &off),
+			AutoUpdateAlways:              valOr2(original.AutoUpdateAlways, &off),
+			PeerHostnameCollisionRejected: valOr2(original.PeerHostnameCollisionRejected, &off),
+			AgentNetworkOnly:              valOr2(original.AgentNetworkOnly, &off),
+			DashboardFeatures:             original.DashboardFeatures,
+		}
+		if err := setAccountSettingsRaw(env.AccountID, restore); err != nil {
+			t.Errorf("could not restore the account settings: %v", err)
+		}
+	})
+	config := func(on, only, menu bool) string {
+		return fmt.Sprintf(`resource "netbird_account_settings" %q {
+  metrics_push_enabled             = %t
+  auto_update_always               = %t
+  peer_hostname_collision_rejected = %t
+  agent_network_only               = %t
+  dashboard_features = {
+    agent_network = %t
+  }
+}
+data "netbird_account_settings" "test" {
+  depends_on = [netbird_account_settings.%s]
+}`, rName, on, on, on, only, menu, rName)
+	}
+	checkAPI := func(on, only, menu bool) resource.TestCheckFunc {
+		return func(s *terraform.State) error {
+			settings, err := testAccountSettings(env.AccountID)
+			if err != nil {
+				return err
+			}
+			var gotMenu any
+			if settings.DashboardFeatures != nil {
+				gotMenu = valOr(settings.DashboardFeatures.AgentNetwork, !menu)
+			}
+			return matchPairs(map[string][]any{
+				"metrics_push_enabled":             {on, valOr(settings.MetricsPushEnabled, !on)},
+				"auto_update_always":               {on, valOr(settings.AutoUpdateAlways, !on)},
+				"peer_hostname_collision_rejected": {on, valOr(settings.PeerHostnameCollisionRejected, !on)},
+				"agent_network_only":               {only, valOr(settings.AgentNetworkOnly, !only)},
+				"dashboard_features.agent_network": {menu, gotMenu},
+			})
+		}
+	}
+	checkState := func(on, only, menu bool) resource.TestCheckFunc {
+		return resource.ComposeAggregateTestCheckFunc(
+			resource.TestCheckResourceAttr(rNameFull, "metrics_push_enabled", fmt.Sprint(on)),
+			resource.TestCheckResourceAttr(rNameFull, "auto_update_always", fmt.Sprint(on)),
+			resource.TestCheckResourceAttr(rNameFull, "peer_hostname_collision_rejected", fmt.Sprint(on)),
+			resource.TestCheckResourceAttr(rNameFull, "agent_network_only", fmt.Sprint(only)),
+			resource.TestCheckResourceAttr(rNameFull, "dashboard_features.agent_network", fmt.Sprint(menu)),
+			resource.TestCheckResourceAttr("data.netbird_account_settings.test", "metrics_push_enabled", fmt.Sprint(on)),
+			resource.TestCheckResourceAttr("data.netbird_account_settings.test", "dashboard_features.agent_network", fmt.Sprint(menu)),
+			checkAPI(on, only, menu),
+		)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: config(true, false, true), Check: checkState(true, false, true)},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{Config: config(false, false, false), ConfigPlanChecks: updatesInPlace(rNameFull), Check: checkState(false, false, false)},
+			{Config: config(false, true, true), Check: checkState(false, true, true)},
+			{Config: config(false, true, false), ExpectError: regexp.MustCompile(`Agent Network menu required`)},
+			{Config: config(false, false, true), Check: checkState(false, false, true)},
+		},
+	})
+}
+
+// valOr2 returns p, or fallback when p is nil.
+func valOr2(p, fallback *bool) *bool {
+	if p == nil {
+		return fallback
+	}
+	return p
 }

@@ -8,7 +8,9 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
 
@@ -124,6 +126,7 @@ func Test_accountAPIToTerraform(t *testing.T) {
 				NetworkRange:                       types.StringNull(),
 				NetworkRangeV6:                     types.StringNull(),
 				Ipv6EnabledGroups:                  types.ListNull(types.StringType),
+				DashboardFeatures:                  types.ObjectNull(dashboardFeaturesTypes),
 				LazyConnectionEnabled:              types.BoolNull(),
 				UserApprovalRequired:               types.BoolValue(false),
 				NetworkTrafficLogsGroups:           types.ListNull(types.StringType),
@@ -183,6 +186,7 @@ func Test_accountAPIToTerraform(t *testing.T) {
 				NetworkRange:                       types.StringValue("100.64.0.0/10"),
 				NetworkRangeV6:                     types.StringValue("fd00:1234::/64"),
 				Ipv6EnabledGroups:                  types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g1"), types.StringValue("g2")}),
+				DashboardFeatures:                  types.ObjectNull(dashboardFeaturesTypes),
 				LazyConnectionEnabled:              types.BoolValue(true),
 				LocalMfaEnabled:                    types.BoolValue(true),
 				UserApprovalRequired:               types.BoolValue(true),
@@ -469,4 +473,108 @@ func Test_accountTerraformToAPI_ipv6(t *testing.T) {
 	if set.Ipv6EnabledGroups == nil || len(*set.Ipv6EnabledGroups) != 0 {
 		t.Errorf("ipv6_enabled_groups: expected an explicit empty list, found %v", set.Ipv6EnabledGroups)
 	}
+}
+
+func Test_accountSettings_remainingSettings(t *testing.T) {
+	on, off := true, false
+	account := &api.Account{Id: "a", Settings: api.AccountSettings{
+		MetricsPushEnabled:            &on,
+		AutoUpdateAlways:              &off,
+		PeerHostnameCollisionRejected: &on,
+		AgentNetworkOnly:              &off,
+		DashboardFeatures:             &api.AccountDashboardFeatures{AgentNetwork: &on},
+		Extra:                         &api.AccountExtraSettings{},
+	}}
+
+	var read AccountSettingsModel
+	if d := accountAPIToTerraform(context.Background(), account, &read); d.HasError() {
+		t.Fatal(d)
+	}
+	if !read.MetricsPushEnabled.ValueBool() || read.AutoUpdateAlways.ValueBool() || !read.PeerHostnameCollisionRejected.ValueBool() || read.AgentNetworkOnly.ValueBool() {
+		t.Errorf("read: unexpected values %v %v %v %v", read.MetricsPushEnabled, read.AutoUpdateAlways, read.PeerHostnameCollisionRejected, read.AgentNetworkOnly)
+	}
+	if v, ok := read.DashboardFeatures.Attributes()["agent_network"].(types.Bool); !ok || !v.ValueBool() {
+		t.Errorf("read: dashboard_features.agent_network expected true, found %v", read.DashboardFeatures)
+	}
+
+	// Unset in the plan: the account's values are sent back.
+	kept := accountTerraformToAPI(context.Background(), account, AccountSettingsModel{
+		Id: types.StringValue("a"), DashboardFeatures: types.ObjectNull(dashboardFeaturesTypes),
+	}).Settings
+	if *kept.MetricsPushEnabled != true || *kept.AutoUpdateAlways != false || *kept.PeerHostnameCollisionRejected != true || *kept.AgentNetworkOnly != false || *kept.DashboardFeatures.AgentNetwork != true {
+		t.Errorf("unset: expected the account's values, found %+v", kept)
+	}
+
+	// Set in the plan: applied; a null member of dashboard_features keeps its value.
+	set := accountTerraformToAPI(context.Background(), account, AccountSettingsModel{
+		Id:                            types.StringValue("a"),
+		MetricsPushEnabled:            types.BoolValue(false),
+		AutoUpdateAlways:              types.BoolValue(true),
+		PeerHostnameCollisionRejected: types.BoolValue(false),
+		AgentNetworkOnly:              types.BoolValue(false),
+		DashboardFeatures:             types.ObjectValueMust(dashboardFeaturesTypes, map[string]attr.Value{"agent_network": types.BoolNull()}),
+	}).Settings
+	if *set.MetricsPushEnabled != false || *set.AutoUpdateAlways != true || *set.PeerHostnameCollisionRejected != false {
+		t.Errorf("set: unexpected values %+v", set)
+	}
+	if set.DashboardFeatures == nil || set.DashboardFeatures.AgentNetwork == nil || *set.DashboardFeatures.AgentNetwork != true {
+		t.Errorf("set: a null dashboard member must keep the current value, found %+v", set.DashboardFeatures)
+	}
+	if account.Settings.DashboardFeatures.AgentNetwork != &on {
+		t.Error("the current account must not be modified")
+	}
+
+	// No dashboard overrides on the server: null in state.
+	var none AccountSettingsModel
+	if d := accountAPIToTerraform(context.Background(), &api.Account{Id: "a", Settings: api.AccountSettings{Extra: &api.AccountExtraSettings{}}}, &none); d.HasError() {
+		t.Fatal(d)
+	}
+	if !none.DashboardFeatures.IsNull() {
+		t.Errorf("expected null dashboard_features, found %v", none.DashboardFeatures)
+	}
+}
+
+func Test_accountSettings_validateAgentNetworkOnly(t *testing.T) {
+	ctx := context.Background()
+	r, schema := accountSettingsResource(t, nil)
+	for name, tc := range map[string]struct {
+		only      *bool
+		dashboard tftypes.Value
+		wantError bool
+	}{
+		"off":                  {only: valPtr(false), dashboard: tftypes.NewValue(dashboardObjectType(), nil)},
+		"on without dashboard": {only: valPtr(true), dashboard: tftypes.NewValue(dashboardObjectType(), nil), wantError: true},
+		"on with menu hidden":  {only: valPtr(true), dashboard: dashboardObject(false), wantError: true},
+		"on with menu shown":   {only: valPtr(true), dashboard: dashboardObject(true)},
+		"on with unknown menu": {only: valPtr(true), dashboard: tftypes.NewValue(dashboardObjectType(), tftypes.UnknownValue)},
+		"unset":                {dashboard: tftypes.NewValue(dashboardObjectType(), nil)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			typ, ok := schema.Schema.Type().TerraformType(ctx).(tftypes.Object)
+			if !ok {
+				t.Fatal("schema type is not an object")
+			}
+			values := map[string]tftypes.Value{}
+			for n, at := range typ.AttributeTypes {
+				values[n] = tftypes.NewValue(at, nil)
+			}
+			if tc.only != nil {
+				values["agent_network_only"] = tftypes.NewValue(tftypes.Bool, *tc.only)
+			}
+			values["dashboard_features"] = tc.dashboard
+			var resp resource.ValidateConfigResponse
+			r.ValidateConfig(ctx, resource.ValidateConfigRequest{Config: tfsdk.Config{Schema: schema.Schema, Raw: tftypes.NewValue(typ, values)}}, &resp)
+			if resp.Diagnostics.HasError() != tc.wantError {
+				t.Fatalf("expected error %v, found %v", tc.wantError, resp.Diagnostics)
+			}
+		})
+	}
+}
+
+func dashboardObjectType() tftypes.Object {
+	return tftypes.Object{AttributeTypes: map[string]tftypes.Type{"agent_network": tftypes.Bool}}
+}
+
+func dashboardObject(agentNetwork bool) tftypes.Value {
+	return tftypes.NewValue(dashboardObjectType(), map[string]tftypes.Value{"agent_network": tftypes.NewValue(tftypes.Bool, agentNetwork)})
 }

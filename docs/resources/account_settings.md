@@ -36,7 +36,10 @@ resource "netbird_account_settings" "example" {
 
 ### Optional
 
+- `agent_network_only` (Boolean) Limits the dashboard to the Agent Network surface. Requires `dashboard_features.agent_network` to be true.
+- `auto_update_always` (Boolean) When true, client updates are installed automatically in the background; when false, they require user interaction in the client UI. Applies when `auto_update_version` is not `disabled`.
 - `auto_update_version` (String) Set Clients auto-update version. "latest", "disabled", or a specific version (e.g "0.64.5")
+- `dashboard_features` (Attributes) Per-account dashboard section visibility overrides. Left out, the account's current overrides are kept. (see [below for nested schema](#nestedatt--dashboard_features))
 - `dns_domain` (String) Allows to define a custom DNS domain for the account
 - `groups_propagation_enabled` (Boolean) Allows propagate the new user auto groups to peers that belongs to the user
 - `ipv6_enabled_groups` (List of String) List of group IDs whose peers receive IPv6 overlay addresses. Peers not in any of these groups are not allocated an IPv6 address.
@@ -45,6 +48,7 @@ resource "netbird_account_settings" "example" {
 - `jwt_groups_enabled` (Boolean) Allows extract groups from JWT claim and add it to account groups.
 - `lazy_connection_enabled` (Boolean) Enables or disables experimental lazy connection
 - `local_mfa_enabled` (Boolean) Enables or disables TOTP multi-factor authentication for local users. Only applicable when the embedded identity provider is enabled.
+- `metrics_push_enabled` (Boolean) Enables or disables client metrics push for all peers in the account.
 - `network_range` (String) Allows to define a custom network range for the account in CIDR format
 - `network_range_v6` (String) Allows to define a custom IPv6 overlay network range for the account in CIDR format
 - `network_traffic_logs_enabled` (Boolean) Enables or disables network traffic logging. If enabled, all network traffic events from peers will be stored.
@@ -53,6 +57,7 @@ resource "netbird_account_settings" "example" {
 - `peer_approval_enabled` (Boolean) (Cloud only) Enables or disables peer approval globally. If enabled, all peers added will be in pending state until approved by an admin.
 - `peer_expose_enabled` (Boolean) Enables or disables peer expose. If enabled, peers can expose local services through the reverse proxy using the CLI.
 - `peer_expose_groups` (List of String) Limits which peer groups are allowed to expose services. If empty, all peers are allowed when peer expose is enabled.
+- `peer_hostname_collision_rejected` (Boolean) When true, registering or renaming a peer to a hostname another peer of the account already uses fails, instead of the peer receiving an IP-based suffix. Applies to ephemeral peers as well.
 - `peer_inactivity_expiration` (Number) Period of time of inactivity after which peer session expires (seconds).
 - `peer_inactivity_expiration_enabled` (Boolean) Enables or disables peer inactivity expiration globally. After peer's session has expired the user has to log in (authenticate). Applies only to peers that were added by a user (interactive SSO login).
 - `peer_login_expiration` (Number) Period of time after which peer login expires (seconds).
@@ -64,3 +69,10 @@ resource "netbird_account_settings" "example" {
 ### Read-Only
 
 - `id` (String) The unique identifier of an account
+
+<a id="nestedatt--dashboard_features"></a>
+### Nested Schema for `dashboard_features`
+
+Optional:
+
+- `agent_network` (Boolean) Shows (true) or hides (false) the Agent Network menu regardless of the deployment feature flag. Left out, the current value is kept; it cannot be reset to the server default from Terraform.
