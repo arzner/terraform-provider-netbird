@@ -141,7 +141,10 @@ func scimAPIToTerraform(ctx context.Context, scim *api.ScimIntegration, data *Sc
 	data.UserGroupPrefixes, d = sortedStringList(ctx, data.UserGroupPrefixes, scim.UserGroupPrefixes)
 	ret.Append(d...)
 	data.ConnectorId = types.StringPointerValue(scim.ConnectorId)
-	// auth_token and prefix are preserved from existing state
+	// The prefix is read (a required response field, "" included), so a
+	// change outside Terraform shows and an import has it. auth_token is
+	// preserved from state by the callers.
+	data.Prefix = types.StringValue(scim.Prefix)
 	return ret
 }
 
@@ -161,6 +164,7 @@ func (r *Scim) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		ConnectorId:       stringDefaultPointer(data.ConnectorId, nil),
 	}
 
+	planned := data
 	scim, err := r.client.SCIM.Create(ctx, scimReq)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating SCIM integration", err.Error())
@@ -173,7 +177,44 @@ func (r *Scim) Create(ctx context.Context, req resource.CreateRequest, resp *res
 	}
 
 	// Capture the full auth_token from the create response
-	data.AuthToken = types.StringValue(scim.AuthToken)
+	authToken := types.StringValue(scim.AuthToken)
+
+	// The create request has no enabled field, so a planned false is set by
+	// an update right after the create.
+	if !planned.Enabled.IsNull() && !planned.Enabled.IsUnknown() && !planned.Enabled.ValueBool() && scim.Enabled {
+		disabled := false
+		// Only enabled: the create already set the rest, and sending it
+		// again could overwrite a change made in between.
+		updated, err := r.client.SCIM.Update(ctx, data.Id.ValueString(), api.UpdateScimIntegrationRequest{Enabled: &disabled})
+		if err != nil {
+			// Keep the created integration in state so it is not orphaned.
+			data.AuthToken = authToken
+			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+			resp.Diagnostics.AddError("Error disabling the new SCIM integration", err.Error())
+			return
+		}
+		// Known planned values stand as the create set them; values the plan
+		// did not know take the latest answer, and enabled comes from it.
+		latest := planned
+		resp.Diagnostics.Append(scimAPIToTerraform(ctx, updated, &latest)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		data.Enabled, data.LastSyncedAt = latest.Enabled, latest.LastSyncedAt
+		if planned.Prefix.IsUnknown() {
+			data.Prefix = latest.Prefix
+		}
+		if planned.GroupPrefixes.IsUnknown() {
+			data.GroupPrefixes = latest.GroupPrefixes
+		}
+		if planned.UserGroupPrefixes.IsUnknown() {
+			data.UserGroupPrefixes = latest.UserGroupPrefixes
+		}
+		if planned.ConnectorId.IsUnknown() {
+			data.ConnectorId = latest.ConnectorId
+		}
+	}
+	data.AuthToken = authToken
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -196,9 +237,8 @@ func (r *Scim) Read(ctx context.Context, req resource.ReadRequest, resp *resourc
 		return
 	}
 
-	// Preserve auth_token and prefix from state
+	// Preserve auth_token from state
 	authToken := data.AuthToken
-	prefix := data.Prefix
 
 	resp.Diagnostics.Append(scimAPIToTerraform(ctx, scim, &data)...)
 	if resp.Diagnostics.HasError() {
@@ -206,7 +246,6 @@ func (r *Scim) Read(ctx context.Context, req resource.ReadRequest, resp *resourc
 	}
 
 	data.AuthToken = authToken
-	data.Prefix = prefix
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -235,6 +274,7 @@ func (r *Scim) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		ConnectorId: stringDefaultPointer(configuredOnly(data.ConnectorId, config.ConnectorId), nil),
 	}
 
+	planned := data
 	scim, err := r.client.SCIM.Update(ctx, data.Id.ValueString(), scimReq)
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating SCIM integration", err.Error())
@@ -254,7 +294,11 @@ func (r *Scim) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 	}
 
 	data.AuthToken = state.AuthToken
-	data.Prefix = state.Prefix
+	// The update does not send the prefix, so the result keeps the planned
+	// one; a change made on the server since shows at the next refresh.
+	if !planned.Prefix.IsUnknown() {
+		data.Prefix = planned.Prefix
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
