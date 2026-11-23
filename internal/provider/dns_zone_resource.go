@@ -72,7 +72,7 @@ func (r *DNSZone) Schema(ctx context.Context, req resource.SchemaRequest, resp *
 				Validators:          []validator.String{stringvalidator.LengthBetween(1, 255)},
 			},
 			"domain": schema.StringAttribute{
-				MarkdownDescription: "Zone domain (FQDN, no wildcard, no trailing dot; checked at plan time the way the server does). The server does not change the domain of a zone, so a new domain replaces the zone. The server deletes the old zone with all its records. A `netbird_dns_record` in the same configuration whose `zone_id` refers to this zone is created again in the new zone (its name has to move to the new domain too); any other record, added outside Terraform, with a literal zone ID or in another state, is lost. The plan does not check that the new domain is free: one used by another zone or by the peer DNS domain fails after the old zone is deleted, unless `lifecycle { create_before_destroy = true }` is set.",
+				MarkdownDescription: "Zone domain (FQDN, no wildcard, no trailing dot; a known value is checked at plan time the way the server does). The server does not change the domain of a zone, so a new domain replaces the zone. The server deletes the old zone with all its records. A `netbird_dns_record` in the same configuration whose `zone_id` refers to this zone is created again in the new zone (its name has to move to the new domain too); any other record, added outside Terraform, with a literal zone ID or in another state, is lost. The plan does not check that the new domain is free: one used by another zone or by the peer DNS domain fails after the old zone is deleted, unless `lifecycle { create_before_destroy = true }` is set.",
 				Required:            true,
 				Validators:          []validator.String{zoneDomain{}},
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
@@ -294,18 +294,43 @@ func (r *DNSZone) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest
 	}
 	var configured types.Set
 	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("distribution_groups"), &configured)...)
-	if resp.Diagnostics.HasError() || !configured.IsNull() {
+	if resp.Diagnostics.HasError() {
 		return
 	}
 	creates := req.State.Raw.IsNull()
+	replaces := false
 	if !creates {
 		var planned, current types.String
 		resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("domain"), &planned)...)
 		resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("domain"), &current)...)
-		creates = !planned.IsUnknown() && !planned.Equal(current)
+		replaces = !planned.IsUnknown() && !planned.Equal(current)
 	}
-	if creates {
+	if !creates && !replaces {
+		return
+	}
+	if configured.IsNull() {
 		resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Distribution groups required",
 			"Creating the zone, also to replace it for a new domain, needs at least one group in distribution_groups.")
+		return
+	}
+	// A replacement deletes the old zone first, and the server refuses to
+	// create one with a group that does not exist: look the known ones up.
+	if !replaces || r.client == nil || configured.IsUnknown() {
+		return
+	}
+	for _, e := range configured.Elements() {
+		id, ok := e.(types.String)
+		if !ok || id.IsNull() || id.IsUnknown() {
+			continue
+		}
+		if _, err := r.client.Groups.Get(ctx, id.ValueString()); err != nil {
+			if netbird.IsNotFound(err) {
+				resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Distribution group not found",
+					fmt.Sprintf("Group %q does not exist, so the zone for the new domain could not be created after the old one is deleted.", id.ValueString()))
+				continue
+			}
+			resp.Diagnostics.AddAttributeWarning(path.Root("distribution_groups"), "Distribution group not checked",
+				fmt.Sprintf("Group %q could not be looked up before the replacement: %s", id.ValueString(), err))
+		}
 	}
 }

@@ -120,6 +120,11 @@ func Test_DNSZone_DomainReplaces(t *testing.T) {
 		CheckDestroy:             testCheckGone(testClient().DNSZones.GetZone, &zoneID),
 		Steps: []resource.TestStep{
 			{
+				// A new zone needs distribution_groups.
+				Config:      strings.Replace(testDNSRecordResource(zoneName, "before.local", rName, "www", "A", "192.168.1.1", 300), fmt.Sprintf("distribution_groups = [%q]", e2eGroupAllID()), "", 1),
+				ExpectError: regexp.MustCompile(`Distribution groups required`),
+			},
+			{
 				Config: testDNSRecordResource(zoneName, "before.local", rName, "www", "A", "192.168.1.1", 300),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					testRecordID(zoneFull, &firstZone),
@@ -149,6 +154,11 @@ func Test_DNSZone_DomainReplaces(t *testing.T) {
 			{
 				Config:      strings.Replace(testDNSRecordResource(zoneName, "after.local", rName, "www", "A", "192.168.1.1", 300), fmt.Sprintf("name                = %q", zoneName), fmt.Sprintf("name                = %q", strings.Repeat("n", 256)), 1),
 				ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Length.*name`),
+			},
+			{
+				// A group that does not exist is found before the replacement.
+				Config:      strings.Replace(testDNSRecordResource(zoneName, "after.local", rName, "www", "A", "192.168.1.1", 300), fmt.Sprintf("distribution_groups = [%q]", e2eGroupAllID()), `distribution_groups = ["nosuchgroup0000000000"]`, 1),
+				ExpectError: regexp.MustCompile(`Distribution group not found`),
 			},
 			{
 				// Left out on an in-place change, the groups are kept.
