@@ -1039,15 +1039,18 @@ func reconcileOptions(planned, live types.Object) (types.Object, diag.Diagnostic
 		if !ok {
 			liveValue = nullOf(plannedValue)
 		}
-		if !sameOption(plannedValue, liveValue) {
+		if !sameOption(name, plannedValue, liveValue) {
 			attrs[name] = liveValue
 		}
 	}
 	return types.ObjectValue(planned.AttributeTypes(context.Background()), attrs)
 }
 
+// durationOptions are the target options the server writes as Go durations.
+var durationOptions = map[string]bool{"request_timeout": true, "session_idle_timeout": true}
+
 // sameOption reports whether a planned option value means the server's one.
-func sameOption(planned, live attr.Value) bool {
+func sameOption(name string, planned, live attr.Value) bool {
 	if planned.IsUnknown() {
 		return false
 	}
@@ -1057,7 +1060,7 @@ func sameOption(planned, live attr.Value) bool {
 		return p.ValueBool() == l.ValueBool() // null reads as false
 	case types.String:
 		l, _ := live.(types.String)
-		if pd, err := time.ParseDuration(p.ValueString()); err == nil {
+		if pd, err := time.ParseDuration(p.ValueString()); err == nil && durationOptions[name] {
 			ld, lerr := time.ParseDuration(l.ValueString())
 			return (lerr == nil && pd == ld) || (pd == 0 && l.IsNull())
 		}
