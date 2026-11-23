@@ -33,7 +33,7 @@ import (
 // noSelector is the shape of the provider's own refusal. The wording differs
 // between data sources — "Must add at least one of" against "Must set at least
 // one of" — which is worth matching loosely rather than pinning.
-var noSelector = regexp.MustCompile(`(?s)No selector|at least one of`)
+var noSelector = regexp.MustCompile(`(?s)No selector|at least one of|At least one of these attributes must be configured`)
 
 // noMatch is the refusal when a filter is well formed and answers nothing. The
 // wording splits the same way — "matching parameters not found" against
@@ -235,11 +235,11 @@ func Test_DataSource_RejectsNoSelector(t *testing.T) {
 
 	// Every data source whose selectors are all optional, so that an empty block
 	// reaches the provider's guard rather than Terraform's own required-argument
-	// check. peers is in the list because it filters rather than looks up, and
-	// still refuses to return the whole account.
+	// check. peers, groups and users are in the list because they filter rather
+	// than look up, and still refuse to return the whole account.
 	for _, kind := range []string{
 		"group", "network", "setup_key", "user", "posture_check", "route",
-		"nameserver_group", "policy", "peers", "identity_provider", "scim",
+		"nameserver_group", "policy", "peers", "groups", "users", "identity_provider", "scim",
 		"agent_network_provider", "agent_network_policy", "agent_network_guardrail",
 	} {
 		t.Run(kind, func(t *testing.T) {

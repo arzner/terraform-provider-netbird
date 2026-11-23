@@ -1,0 +1,179 @@
+package provider
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/types"
+	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
+	"github.com/netbirdio/netbird/shared/management/http/api"
+)
+
+// Test_filterUsers checks each users filter in isolation and combined.
+func Test_filterUsers(t *testing.T) {
+	yes, no := true, false
+	apiIssued, integration := "api", "integration"
+	users := []api.User{
+		{Id: "u1", Name: "Alice", Email: "alice@example.com", Role: "admin", Status: api.UserStatusActive,
+			Issued: &apiIssued, IsServiceUser: &no, AutoGroups: []string{"g1", "g2"}},
+		{Id: "u2", Name: "Bob", Email: "bob@example.com", Role: "user", Status: api.UserStatusBlocked,
+			Issued: &integration, IsServiceUser: &no, IsBlocked: true, AutoGroups: []string{"g1"}},
+		{Id: "u3", Name: "ci", Role: "user", Status: api.UserStatusActive, Issued: &apiIssued, IsServiceUser: &yes},
+		// Optional pointers left unset must not crash the filter.
+		{Id: "u4", Name: "Carol", Role: "user", Status: api.UserStatusInvited},
+	}
+
+	cases := []struct {
+		name     string
+		filter   UsersModel
+		expected []string
+	}{
+		{
+			name:     "no filter returns every user",
+			filter:   UsersModel{},
+			expected: []string{"u1", "u2", "u3", "u4"},
+		},
+		{
+			name:     "service users",
+			filter:   UsersModel{IsServiceUser: types.BoolValue(true)},
+			expected: []string{"u3"},
+		},
+		{
+			name:     "a user without is_service_user matches neither selector",
+			filter:   UsersModel{IsServiceUser: types.BoolValue(false)},
+			expected: []string{"u1", "u2"},
+		},
+		{
+			name:     "role and is_blocked are both required",
+			filter:   UsersModel{Role: types.StringValue("user"), IsBlocked: types.BoolValue(false)},
+			expected: []string{"u3", "u4"},
+		},
+		{
+			name:     "status and issued",
+			filter:   UsersModel{Status: types.StringValue("active"), Issued: types.StringValue("api")},
+			expected: []string{"u1", "u3"},
+		},
+		{
+			name: "auto_groups contains all listed ids",
+			filter: UsersModel{
+				AutoGroups: types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g1")}),
+			},
+			expected: []string{"u1", "u2"},
+		},
+		{
+			name:     "name",
+			filter:   UsersModel{Name: types.StringValue("Bob")},
+			expected: []string{"u2"},
+		},
+		{
+			name:     "email",
+			filter:   UsersModel{Email: types.StringValue("alice@example.com")},
+			expected: []string{"u1"},
+		},
+		{
+			name: "auto_groups requires every listed id",
+			filter: UsersModel{
+				AutoGroups: types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g1"), types.StringValue("g2")}),
+			},
+			expected: []string{"u1"},
+		},
+		{
+			name:     "no match is an empty result",
+			filter:   UsersModel{Email: types.StringValue("nobody@example.com")},
+			expected: []string{},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out, d := filterUsers(context.Background(), users, c.filter)
+			if d.HasError() {
+				t.Fatalf("Expected no error diagnostics, found %d errors", d.ErrorsCount())
+			}
+			ids := make([]string, len(out))
+			for i, u := range out {
+				ids[i] = u.Id
+			}
+			if !slices.Equal(ids, c.expected) {
+				t.Fatalf("Expected:\n%#v\nFound:\n%#v", c.expected, ids)
+			}
+		})
+	}
+}
+
+// Test_usersAPIToTerraform checks API users map to the Terraform list.
+func Test_usersAPIToTerraform(t *testing.T) {
+	yes, no := true, false
+	issued := "api"
+	login := time.Date(2026, 9, 30, 8, 0, 0, 0, time.UTC)
+	users := []api.User{
+		{Id: "u1", Name: "Alice", Email: "alice@example.com", Role: "admin", Status: api.UserStatusActive,
+			Issued: &issued, IsServiceUser: &no, IsCurrent: &yes, LastLogin: &login, AutoGroups: []string{"g1"}},
+	}
+
+	var data UsersModel
+	if d := usersAPIToTerraform(context.Background(), users, &data); d.HasError() {
+		t.Fatalf("Expected no error diagnostics, found %d errors", d.ErrorsCount())
+	}
+
+	var ids []string
+	data.Ids.ElementsAs(context.Background(), &ids, false)
+	if !slices.Equal(ids, []string{"u1"}) {
+		t.Fatalf("Expected ids [u1], found %v", ids)
+	}
+	if len(data.Users) != 1 || data.Users[0].Email.ValueString() != "alice@example.com" ||
+		data.Users[0].LastLogin.ValueString() != "2026-09-30T08:00:00Z" || !data.Users[0].IsCurrent.ValueBool() {
+		t.Fatalf("Unexpected user mapping: %#v", data.Users)
+	}
+}
+
+// Test_usersAPIToTerraform_absentOptionalFields checks absent optional user fields become null.
+func Test_usersAPIToTerraform_absentOptionalFields(t *testing.T) {
+	// The optional pointers are omitempty in the API types: a user the filter
+	// accepts without them must map to nulls, not crash the provider.
+	users := []api.User{{Id: "u4", Name: "Carol", Role: "user", Status: api.UserStatusInvited}}
+
+	var data UsersModel
+	if d := usersAPIToTerraform(context.Background(), users, &data); d.HasError() {
+		t.Fatalf("Expected no error diagnostics, found %d errors", d.ErrorsCount())
+	}
+
+	u := data.Users[0]
+	if !u.LastLogin.IsNull() || !u.IsCurrent.IsNull() || !u.IsServiceUser.IsNull() || !u.Issued.IsNull() {
+		t.Fatalf("Expected nulls for the absent fields, found %#v", u)
+	}
+	if u.Name.ValueString() != "Carol" || u.Status.ValueString() != "invited" {
+		t.Fatalf("Unexpected user mapping: %#v", u)
+	}
+}
+
+// Test_listUsers_serviceUserQuery checks that is_service_user reaches the
+// server as the service_user query, so the server does the filtering.
+func Test_listUsers_serviceUserQuery(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.Query().Get("service_user")+"|"+strconv.FormatBool(r.URL.Query().Has("service_user")))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"u1","name":"a","email":"","role":"user","status":"active","auto_groups":[],"is_blocked":false,"is_service_user":true}]`))
+	}))
+	defer srv.Close()
+	client := netbird.New(srv.URL, "token")
+	for _, sel := range []types.Bool{types.BoolValue(true), types.BoolValue(false), types.BoolNull()} {
+		users, err := listUsers(context.Background(), client, sel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(users) != 1 || users[0].Id != "u1" {
+			t.Fatalf("expected the server's user, found %+v", users)
+		}
+	}
+	if want := []string{"true|true", "false|true", "|false"}; !slices.Equal(got, want) {
+		t.Errorf("expected the queries %v, found %v", want, got)
+	}
+}

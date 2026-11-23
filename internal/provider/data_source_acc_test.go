@@ -24,6 +24,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
@@ -57,6 +58,17 @@ func dsCase(t *testing.T, config string, check resource.TestCheckFunc) {
 		PreCheck:                 func() { testEnsureManagementRunning(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps:                    []resource.TestStep{{Config: config, Check: check}},
+	})
+}
+
+// dsCaseState is dsCase with typed state checks, which tell an empty list
+// from a null one.
+func dsCaseState(t *testing.T, config string, checks ...statecheck.StateCheck) {
+	t.Helper()
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps:                    []resource.TestStep{{Config: config, ConfigStateChecks: checks}},
 	})
 }
 

@@ -48,6 +48,10 @@ it is based on.
   target sets an action, a left-out action while two current targets share a path), is a plan
   warning, since the plan cannot tell an update from a replacement, and the update stops before
   writing.
+- Data sources `netbird_groups` and `netbird_users`, listing groups and users with optional
+  filters, sorted by ID (#7; upstream [#225](https://github.com/netbirdio/terraform-provider-netbird/pull/225)
+  by Benjamin Dupuis). `netbird_users` lets the server filter on `is_service_user`, and refuses
+  an unknown `role` and an empty group ID at plan time.
 
 ### Changed
 
