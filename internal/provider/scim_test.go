@@ -485,3 +485,60 @@ func Test_scimDataSource_prefix(t *testing.T) {
 		t.Errorf("expected the integration's prefix, found %v", got.Prefix)
 	}
 }
+
+// Test_scim_disableWithOptions: configured options reach the create and not
+// the disable; values the plan did not know take the disable's answer.
+func Test_scim_disableWithOptions(t *testing.T) {
+	ctx := context.Background()
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		bodies = append(bodies, body)
+		userPrefixes, token, enabled := `["created-"]`, "full-token", true
+		if r.Method == http.MethodPut {
+			userPrefixes, token, enabled = `["changed-"]`, "nbs_****", false
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":7,"provider":"okta","prefix":"p","enabled":%t,"group_prefixes":["eng-"],"user_group_prefixes":%s,"auth_token":%q,"last_synced_at":"2026-01-01T00:00:00Z","connector_id":"dex-okta"}`, enabled, userPrefixes, token)
+	}))
+	defer srv.Close()
+	r := &Scim{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	strs := func(v ...string) tftypes.Value {
+		var l []tftypes.Value
+		for _, s := range v {
+			l = append(l, tftypes.NewValue(tftypes.String, s))
+		}
+		return tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, l)
+	}
+	plan := scimValue(t, sch, map[string]tftypes.Value{
+		"provider_name":       tftypes.NewValue(tftypes.String, "okta"),
+		"prefix":              tftypes.NewValue(tftypes.String, "p"),
+		"enabled":             tftypes.NewValue(tftypes.Bool, false),
+		"connector_id":        tftypes.NewValue(tftypes.String, "dex-okta"),
+		"group_prefixes":      strs("eng-"),
+		"user_group_prefixes": tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, tftypes.UnknownValue),
+	})
+	create := resource.CreateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(plan.Type(), nil)}}
+	r.Create(ctx, resource.CreateRequest{Plan: tfsdk.Plan{Schema: sch.Schema, Raw: plan}, Config: tfsdk.Config{Schema: sch.Schema, Raw: plan}}, &create)
+	if create.Diagnostics.HasError() {
+		t.Fatal(create.Diagnostics)
+	}
+	if len(bodies) != 2 || bodies[0]["connector_id"] != "dex-okta" || bodies[0]["group_prefixes"] == nil {
+		t.Fatalf("expected the create to carry the connector and filters, found %v", bodies)
+	}
+	if len(bodies[1]) != 1 || bodies[1]["enabled"] != false {
+		t.Fatalf("expected the disable to carry only enabled false, found %v", bodies[1])
+	}
+	var got ScimModel
+	if d := create.State.Get(ctx, &got); d.HasError() {
+		t.Fatal(d)
+	}
+	var user []string
+	got.UserGroupPrefixes.ElementsAs(ctx, &user, false)
+	if !slices.Equal(user, []string{"changed-"}) || got.AuthToken.ValueString() != "full-token" {
+		t.Errorf("expected the disable's user group prefixes and the create's token, found %v %v", user, got.AuthToken)
+	}
+}

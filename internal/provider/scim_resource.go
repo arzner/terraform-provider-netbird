@@ -164,7 +164,7 @@ func (r *Scim) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		ConnectorId:       stringDefaultPointer(data.ConnectorId, nil),
 	}
 
-	plannedEnabled, plannedPrefix := data.Enabled, data.Prefix
+	planned := data
 	scim, err := r.client.SCIM.Create(ctx, scimReq)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating SCIM integration", err.Error())
@@ -181,7 +181,7 @@ func (r *Scim) Create(ctx context.Context, req resource.CreateRequest, resp *res
 
 	// The create request has no enabled field, so a planned false is set by
 	// an update right after the create.
-	if !plannedEnabled.IsNull() && !plannedEnabled.IsUnknown() && !plannedEnabled.ValueBool() && scim.Enabled {
+	if !planned.Enabled.IsNull() && !planned.Enabled.IsUnknown() && !planned.Enabled.ValueBool() && scim.Enabled {
 		disabled := false
 		// Only enabled: the create already set the rest, and sending it
 		// again could overwrite a change made in between.
@@ -193,11 +193,25 @@ func (r *Scim) Create(ctx context.Context, req resource.CreateRequest, resp *res
 			resp.Diagnostics.AddError("Error disabling the new SCIM integration", err.Error())
 			return
 		}
-		// The create's result stands for everything but enabled; later
-		// changes show at the next refresh.
-		data.Enabled = types.BoolValue(updated.Enabled)
-		if plannedPrefix.IsUnknown() {
-			data.Prefix = types.StringValue(updated.Prefix)
+		// Known planned values stand as the create set them; values the plan
+		// did not know take the latest answer, and enabled comes from it.
+		latest := planned
+		resp.Diagnostics.Append(scimAPIToTerraform(ctx, updated, &latest)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		data.Enabled, data.LastSyncedAt = latest.Enabled, latest.LastSyncedAt
+		if planned.Prefix.IsUnknown() {
+			data.Prefix = latest.Prefix
+		}
+		if planned.GroupPrefixes.IsUnknown() {
+			data.GroupPrefixes = latest.GroupPrefixes
+		}
+		if planned.UserGroupPrefixes.IsUnknown() {
+			data.UserGroupPrefixes = latest.UserGroupPrefixes
+		}
+		if planned.ConnectorId.IsUnknown() {
+			data.ConnectorId = latest.ConnectorId
 		}
 	}
 	data.AuthToken = authToken
