@@ -28,7 +28,6 @@ var specUnmodelled = map[string]string{
 	"PeerRequest.ipv6":             "not modelled yet (#24); the server keeps the peer's address when it is omitted",
 	"ServiceRequest.private":       "not modelled yet (#25)",
 	"ServiceRequest.access_groups": "not modelled yet (#25); only used with private",
-	"Checks.certificate_check":     "not modelled yet (#26)",
 
 	"CreateScimIntegrationRequest.connector_id": "not modelled yet (#27); embedded-IdP SCIM only",
 	"UpdateScimIntegrationRequest.connector_id": "not modelled yet (#27); embedded-IdP SCIM only",

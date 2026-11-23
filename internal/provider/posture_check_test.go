@@ -2,7 +2,9 @@ package provider
 
 import (
 	"context"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -117,6 +119,7 @@ func Test_postureCheckAPIToTerraform(t *testing.T) {
 					"action": types.StringValue("allow"),
 					"ranges": types.ListValueMust(types.StringType, []attr.Value{types.StringValue("1.1.1.1/24")}),
 				}),
+				CertificateCheck: types.ObjectNull(certificateCheckTypes),
 				ProcessCheck: types.ListValueMust(types.ObjectType{
 					AttrTypes: map[string]attr.Type{
 						"linux_path":   types.StringType,
@@ -285,6 +288,64 @@ func Test_postureCheckTerraformToAPI(t *testing.T) {
 
 		if !reflect.DeepEqual(out, c.expected) {
 			t.Fatalf("Expected:\n%#v\nFound:\n%#v", c.expected, out)
+		}
+	}
+}
+
+// testCA is a self-signed CA certificate generated for these tests only.
+const testCA = `-----BEGIN CERTIFICATE-----
+MIIBeDCCAR+gAwIBAgIUbVMLmIqAuteDlEQUDfd5iMJAfSowCgYIKoZIzj0EAwIw
+EjEQMA4GA1UEAwwHdGVzdC1jYTAeFw0yNjExMjMwMDQ5MzhaFw0zNjExMjAwMDQ5
+MzhaMBIxEDAOBgNVBAMMB3Rlc3QtY2EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNC
+AATGdKgpSbpqD+cbCE+LWu2wRBtEi672f5US6h7C3HiC6zrXgf/3suI8K71gjDNk
+/PQUR8r+drGoYxjHRwAueX0Eo1MwUTAdBgNVHQ4EFgQUqR6CJEmfM+G+PT88BhEO
+qL0yDcEwHwYDVR0jBBgwFoAUqR6CJEmfM+G+PT88BhEOqL0yDcEwDwYDVR0TAQH/
+BAUwAwEB/zAKBggqhkjOPQQDAgNHADBEAiA+VGZp9DLD/8XFE98j3rjs3SlJB9Yp
+6TUxqyKStiP7UgIgT5fOC2lAESn76SY3QJZWHhor9Jz7gkI1pHZQTSX91xE=
+-----END CERTIFICATE-----`
+
+func Test_postureCheck_certificateCheck(t *testing.T) {
+	ctx := context.Background()
+	other := strings.Replace(testCA, "-----END", "\n-----END", 1)
+	var data PostureCheckModel
+	pc := &api.PostureCheck{Id: "pc", Name: "n", Checks: api.Checks{CertificateCheck: &api.CertificateCheck{CaCertificates: []string{testCA}}}}
+	if d := postureCheckAPIToTerraform(ctx, pc, &data); d.HasError() {
+		t.Fatal(d)
+	}
+	var cas []string
+	if list, ok := data.CertificateCheck.Attributes()["ca_certificates"].(types.List); ok {
+		list.ElementsAs(ctx, &cas, false)
+	}
+	if !reflect.DeepEqual(cas, []string{testCA}) {
+		t.Fatalf("read: expected the CA, found %v", cas)
+	}
+	req, d := postureCheckTerraformToAPI(ctx, data)
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	if req.Checks.CertificateCheck == nil || !reflect.DeepEqual(req.Checks.CertificateCheck.CaCertificates, []string{testCA}) {
+		t.Fatalf("request: expected the CA, found %+v", req.Checks.CertificateCheck)
+	}
+
+	var none PostureCheckModel
+	if d := postureCheckAPIToTerraform(ctx, &api.PostureCheck{Id: "pc"}, &none); d.HasError() {
+		t.Fatal(d)
+	}
+	if !none.CertificateCheck.IsNull() {
+		t.Fatalf("expected a null certificate_check, found %v", none.CertificateCheck)
+	}
+
+	for value, ok := range map[string]bool{
+		testCA:                 true,
+		other:                  true,
+		"not pem":              false,
+		testCA + "\n" + testCA: false,
+		strings.Replace(testCA, "CERTIFICATE", "PRIVATE KEY", 2): false,
+	} {
+		var resp validator.StringResponse
+		pemCertificate{}.ValidateString(ctx, validator.StringRequest{ConfigValue: types.StringValue(value)}, &resp)
+		if !resp.Diagnostics.HasError() != ok {
+			t.Errorf("%.40q: expected valid %v, found %v", value, ok, resp.Diagnostics)
 		}
 	}
 }

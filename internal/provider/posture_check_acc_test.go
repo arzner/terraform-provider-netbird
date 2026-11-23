@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -202,4 +203,68 @@ func testPostureCheckResource(rName, desc, nbVersion, andVersion, iosVersion, ma
 		mac_path     = "%s"
   }
 }`, rName, rName, desc, nbVersion, andVersion, iosVersion, macVersion, linuxVersion, winVersion, country, city, geoAction, netRange, netRangeAction, processLinux, processWindows, processMac)
+}
+
+// Test_PostureCheck_CertificateCheck creates a posture check that requires a
+// peer certificate chaining to a test CA, checks the server, imports it, and
+// replaces the certificate check with a version check in place.
+func Test_PostureCheck_CertificateCheck(t *testing.T) {
+	testE2E(t)
+	rName := "pc" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_posture_check." + rName
+	var createdID string
+	withCert := fmt.Sprintf(`resource "netbird_posture_check" %q {
+  name = %q
+  certificate_check {
+    ca_certificates = [%q]
+  }
+}`, rName, rName, testCA)
+	withVersion := fmt.Sprintf(`resource "netbird_posture_check" %q {
+  name = %q
+  netbird_version_check {
+    min_version = "0.40.0"
+  }
+}`, rName, rName)
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().PostureChecks.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: withCert,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "certificate_check.ca_certificates.#", "1"),
+					func(s *terraform.State) error {
+						pc, err := testClient().PostureChecks.Get(context.Background(), createdID)
+						if err != nil {
+							return err
+						}
+						if pc.Checks.CertificateCheck == nil || len(pc.Checks.CertificateCheck.CaCertificates) != 1 ||
+							strings.TrimSpace(pc.Checks.CertificateCheck.CaCertificates[0]) != strings.TrimSpace(testCA) {
+							return fmt.Errorf("certificate check on the server: %+v", pc.Checks.CertificateCheck)
+						}
+						return nil
+					},
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				Config:           withVersion,
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					func(s *terraform.State) error {
+						pc, err := testClient().PostureChecks.Get(context.Background(), createdID)
+						if err != nil {
+							return err
+						}
+						if pc.Checks.CertificateCheck != nil {
+							return fmt.Errorf("certificate check still on the server: %+v", pc.Checks.CertificateCheck)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
 }

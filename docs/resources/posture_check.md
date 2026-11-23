@@ -70,6 +70,7 @@ resource "netbird_posture_check" "example" {
 
 ### Optional
 
+- `certificate_check` (Block, Optional) Requires a certificate held by the peer that chains to one of the given CA certificates. Not supported on iOS and Android, which always fail this check and are denied access. (see [below for nested schema](#nestedblock--certificate_check))
 - `description` (String) PostureCheck description
 - `geo_location_check` (Block, Optional) (see [below for nested schema](#nestedblock--geo_location_check))
 - `netbird_version_check` (Block, Optional) (see [below for nested schema](#nestedblock--netbird_version_check))
@@ -80,6 +81,14 @@ resource "netbird_posture_check" "example" {
 ### Read-Only
 
 - `id` (String) PostureCheck ID
+
+<a id="nestedblock--certificate_check"></a>
+### Nested Schema for `certificate_check`
+
+Optional:
+
+- `ca_certificates` (List of String) PEM-encoded CA certificates the peer's certificate must chain to.
+
 
 <a id="nestedblock--geo_location_check"></a>
 ### Nested Schema for `geo_location_check`

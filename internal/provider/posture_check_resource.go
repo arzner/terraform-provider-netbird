@@ -4,7 +4,10 @@
 package provider
 
 import (
+	"bytes"
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"regexp"
 	"strings"
@@ -48,6 +51,7 @@ type PostureCheckModel struct {
 	OSVersionCheck        types.Object `tfsdk:"os_version_check"`
 	GeoLocationCheck      types.Object `tfsdk:"geo_location_check"`
 	PeerNetworkRangeCheck types.Object `tfsdk:"peer_network_range_check"`
+	CertificateCheck      types.Object `tfsdk:"certificate_check"`
 	ProcessCheck          types.List   `tfsdk:"process_check"`
 }
 
@@ -126,6 +130,17 @@ func (r *PostureCheck) Schema(ctx context.Context, req resource.SchemaRequest, r
 					"action": schema.StringAttribute{
 						Optional:   true,
 						Validators: []validator.String{stringvalidator.OneOf("allow", "deny")},
+					},
+				},
+			},
+			"certificate_check": schema.SingleNestedBlock{
+				MarkdownDescription: "Requires a certificate held by the peer that chains to one of the given CA certificates. Not supported on iOS and Android, which always fail this check and are denied access.",
+				Attributes: map[string]schema.Attribute{
+					"ca_certificates": schema.ListAttribute{
+						MarkdownDescription: "PEM-encoded CA certificates the peer's certificate must chain to.",
+						ElementType:         types.StringType,
+						Optional:            true,
+						Validators:          []validator.List{listvalidator.SizeAtLeast(1), listvalidator.ValueStringsAre(pemCertificate{})},
 					},
 				},
 			},
@@ -341,6 +356,15 @@ func postureCheckAPIToTerraform(ctx context.Context, postureCheck *api.PostureCh
 		})
 	}
 
+	if postureCheck.Checks.CertificateCheck != nil {
+		cas, cd := sortedStringList(ctx, objectListAttr(data.CertificateCheck, "ca_certificates"), postureCheck.Checks.CertificateCheck.CaCertificates)
+		ret.Append(cd...)
+		data.CertificateCheck, d = types.ObjectValue(certificateCheckTypes, map[string]attr.Value{"ca_certificates": cas})
+		ret.Append(d...)
+	} else {
+		data.CertificateCheck = types.ObjectNull(certificateCheckTypes)
+	}
+
 	if postureCheck.Checks.ProcessCheck != nil {
 		var processData []struct {
 			LinuxPath   *string `tfsdk:"linux_path"`
@@ -503,6 +527,17 @@ func postureCheckTerraformToAPI(ctx context.Context, data PostureCheckModel) (ap
 				MinKernelVersion: windowsMinKernelVersion.ValueString(),
 			}
 		}
+	}
+
+	if !data.CertificateCheck.IsNull() && !data.CertificateCheck.IsUnknown() {
+		cas, ok := data.CertificateCheck.Attributes()["ca_certificates"].(types.List)
+		if !ok {
+			ret.AddError("Unexpected Value", fmt.Sprintf("data.certificate_check.ca_certificates expected to be types.List, found %T", data.CertificateCheck.Attributes()["ca_certificates"]))
+			return postureCheckReq, ret
+		}
+		check := &api.CertificateCheck{CaCertificates: []string{}}
+		ret.Append(cas.ElementsAs(ctx, &check.CaCertificates, false)...)
+		postureCheckReq.Checks.CertificateCheck = check
 	}
 
 	if !data.PeerNetworkRangeCheck.IsNull() && !data.PeerNetworkRangeCheck.IsUnknown() {
@@ -674,4 +709,30 @@ func (r *PostureCheck) Delete(ctx context.Context, req resource.DeleteRequest, r
 
 func (r *PostureCheck) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// certificateCheckTypes are the attributes of certificate_check.
+var certificateCheckTypes = map[string]attr.Type{"ca_certificates": types.ListType{ElemType: types.StringType}}
+
+// pemCertificate accepts a PEM-encoded X.509 certificate.
+type pemCertificate struct{}
+
+func (pemCertificate) Description(context.Context) string {
+	return "must be a PEM-encoded X.509 certificate"
+}
+
+func (v pemCertificate) MarkdownDescription(ctx context.Context) string { return v.Description(ctx) }
+
+func (pemCertificate) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	block, rest := pem.Decode([]byte(req.ConfigValue.ValueString()))
+	if block == nil || block.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid CA certificate", "Expected exactly one PEM block of type CERTIFICATE.")
+		return
+	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid CA certificate", fmt.Sprintf("The certificate does not parse: %v", err))
+	}
 }
