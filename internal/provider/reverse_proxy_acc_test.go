@@ -1010,6 +1010,11 @@ resource "netbird_reverse_proxy_service" %q {
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 			{Config: config(true, true), ExpectError: regexp.MustCompile(`Bearer auth not allowed`)},
 			{
+				// A null group entry is refused at plan time.
+				Config:      strings.Replace(config(true, false), fmt.Sprintf("access_groups = [%q]", groupID), "access_groups = [null]", 1),
+				ExpectError: regexp.MustCompile(`(?s)access_groups.*null`),
+			},
+			{
 				Config:           config(false, false),
 				ConfigPlanChecks: updatesInPlace(rNameFull),
 				Check: resource.ComposeAggregateTestCheckFunc(
