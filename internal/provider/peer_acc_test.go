@@ -175,7 +175,7 @@ func testPeerResource(rName, id, name string) string {
 // missing address fails the test rather than skipping it. It consumes peer7:
 // the destroy at the end deregisters the device.
 func Test_Peer_IPv6(t *testing.T) {
-	testE2E(t)
+	env := testE2E(t)
 	rName := "p" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
 	rNameFull := "netbird_peer." + rName
 	peerID := testPeerID(t, "peer7")
@@ -190,6 +190,19 @@ func Test_Peer_IPv6(t *testing.T) {
 	moved := testUnusedPeerIPv6(t, original)
 	movedAgain := testUnusedPeerIPv6(t, original, moved)
 	outside := testOutsideAccountIPv6(t)
+	settings, err := testAccountSettings(env.AccountID)
+	if err != nil || settings.NetworkRangeV6 == nil {
+		t.Fatalf("read the account IPv6 range: %v", err)
+	}
+	originalRange := *settings.NetworkRangeV6
+	t.Cleanup(func() {
+		if err := setAccountSettingsRaw(env.AccountID, api.AccountSettings{NetworkRangeV6: &originalRange}); err != nil {
+			t.Errorf("restore the account IPv6 range: %v", err)
+		}
+	})
+	// A disjoint range of the same size, and a fixed address in it.
+	otherRange, fixed := testOtherIPv6Range(t, originalRange)
+	other := testPeerID(t, "peer1")
 	named := func(name, ipv6 string) string {
 		if ipv6 == "" {
 			return fmt.Sprintf(`resource "netbird_peer" %q {
@@ -204,6 +217,25 @@ func Test_Peer_IPv6(t *testing.T) {
 }`, rName, peerID, name, ipv6)
 	}
 	config := func(ipv6 string) string { return named(peer.Name, ipv6) }
+	// The peer's address set in the same apply as the account range, after it.
+	withRange := func(v6Range, ipv6 string) string {
+		return fmt.Sprintf(`resource "netbird_account_settings" "range" {
+  network_range_v6 = %q
+}
+resource "netbird_peer" %q {
+  id         = %q
+  name       = %q
+  ipv6       = %q
+  depends_on = [netbird_account_settings.range]
+}`, v6Range, rName, peerID, peer.Name, ipv6)
+	}
+	retargeted := func(id, ipv6 string) string {
+		return fmt.Sprintf(`resource "netbird_peer" %q {
+  id   = %q
+  name = %q
+  ipv6 = %q
+}`, rName, id, peer.Name, ipv6)
+	}
 	withExpiry := func(ipv6 string, loginExpiration bool) string {
 		return fmt.Sprintf(`resource "netbird_peer" %q {
   id                       = %q
@@ -254,13 +286,23 @@ func Test_Peer_IPv6(t *testing.T) {
 			// status and last-seen time move on between the apply and the import.
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true,
 				ImportStateVerifyIgnore: []string{"connected", "last_seen"}},
-			// Left out, the address is kept.
-			{Config: config(""), Check: resource.ComposeAggregateTestCheckFunc(
+			// Left out, the address is kept, also by updates that change
+			// something else.
+			{Config: named(peer.Name+"-k", ""), ConfigPlanChecks: updatesInPlace(rNameFull), Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr(rNameFull, "ipv6", moved), onServer(moved),
+				resource.TestCheckResourceAttr(rNameFull, "name", peer.Name+"-k"))},
+			{Config: config(""), ConfigPlanChecks: updatesInPlace(rNameFull), Check: resource.ComposeAggregateTestCheckFunc(
 				resource.TestCheckResourceAttr(rNameFull, "ipv6", moved), onServer(moved))},
 			{Config: config(strings.ToUpper(moved)), ExpectError: regexp.MustCompile(`not in canonical form`)},
 			// A rename together with an address the server refuses: the server
 			// checks the address first, so the refusal leaves the name as it was.
 			{Config: named(peer.Name+"-x", outside), ExpectError: regexp.MustCompile(`(?i)not within the account IPv6 range`)},
+			// Adopting another peer fails: the state keeps managing this one
+			// (the next step plans nothing), and the other peer is untouched.
+			{PreConfig: onServerBefore(peer.Name, moved), Config: retargeted(other, outside),
+				ExpectError: regexp.MustCompile(`(?i)not within the account IPv6 range`)},
+			{PreConfig: onServerBefore(peer.Name, moved), Config: config(moved),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
 			// Renamed outside Terraform between plan and apply while the plan
 			// keeps the name and moves the address: the apply stops before
 			// writing anything, and the outside change survives.
@@ -269,6 +311,13 @@ func Test_Peer_IPv6(t *testing.T) {
 					testExpectUpdateInPlace(rNameFull), testPeerRenamedOutside(peerID, peer.Name+"-o")}},
 				ExpectError: regexp.MustCompile(`Peer changed after the plan`)},
 			{PreConfig: onServerBefore(peer.Name+"-o", moved), Config: config(original), Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr(rNameFull, "ipv6", original), onServer(original))},
+			// A new account range and a fixed address in it, in one apply: the
+			// server first moves the peer into the new range, then the planned
+			// address is set (the plan changes it, so this is no stale plan).
+			{Config: withRange(otherRange, fixed), Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr(rNameFull, "ipv6", fixed), onServer(fixed))},
+			{Config: withRange(originalRange, original), Check: resource.ComposeAggregateTestCheckFunc(
 				resource.TestCheckResourceAttr(rNameFull, "ipv6", original), onServer(original))},
 		},
 	})
@@ -291,6 +340,22 @@ func testOutsideAccountIPv6(t *testing.T) string {
 	b[bit/8] ^= 0x80 >> (bit % 8)
 	b[15] = 1
 	return netip.AddrFrom16(b).String()
+}
+
+// testOtherIPv6Range returns a range of the same size next to v6Range (its
+// last prefix bit flipped) and an address in it.
+func testOtherIPv6Range(t *testing.T, v6Range string) (string, string) {
+	t.Helper()
+	prefix, err := netip.ParsePrefix(v6Range)
+	if err != nil || prefix.Bits() == 0 {
+		t.Fatalf("parse the account IPv6 range %q: %v", v6Range, err)
+	}
+	b := prefix.Masked().Addr().As16()
+	bit := prefix.Bits() - 1
+	b[bit/8] ^= 0x80 >> (bit % 8)
+	other := netip.PrefixFrom(netip.AddrFrom16(b), prefix.Bits())
+	b[15] = 0x42
+	return other.String(), netip.AddrFrom16(b).String()
 }
 
 // testPeerRenamedOutside is a plan check that renames the peer through the API
