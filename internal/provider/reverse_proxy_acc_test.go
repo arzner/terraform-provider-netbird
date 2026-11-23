@@ -1567,6 +1567,7 @@ resource "netbird_reverse_proxy_service" %q {
     target_type = "subnet"%s
     port        = 8080
     protocol    = "http"
+    options     = { request_timeout = "5s", direct_upstream = false }
   }]
 }`, rName, rName, rName, cluster.Address, e2eResourceSubnetID(), hostLine)
 	}
@@ -1619,7 +1620,8 @@ resource "netbird_reverse_proxy_service" %q {
 			},
 			{
 				// The server keeps a subnet host as written, so an import
-				// recovers it without prior state.
+				// recovers it without prior state; direct_upstream = false,
+				// which the server does not report, reads as false.
 				ResourceName:      rNameFull,
 				ImportState:       true,
 				ImportStateVerify: true,

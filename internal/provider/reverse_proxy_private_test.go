@@ -623,6 +623,11 @@ func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
 			config: vals{"name": tftypes.NewValue(tftypes.String, "b"), "targets": targets(target("", nil))},
 			plan:   vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "b"), "targets": targets(target("/", "inherit"), target("/admin", "block"))},
 		},
+		"targets ignored, bypass changed outside, made private": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": targets(target("", "inherit"), target("/admin", "inherit"))},
+			config: vals{"private": on, "targets": targets(target("", nil), target("/admin", "bypass"))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", "inherit"), target("/admin", "inherit"))},
+		},
 		"replaced by a tcp service while / keeps block": {
 			state:     vals{"private": off, "mode": http, "targets": targets(target("", "block"))},
 			config:    vals{"mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", nil))},
@@ -1110,5 +1115,20 @@ func Test_keptActionProblems(t *testing.T) {
 	}
 	if d := keptActionProblems(ctx, only(api.ServiceTarget{TargetId: "p1", Enabled: true, AccessAction: &inherit}), live); d.HasError() {
 		t.Errorf("an action in the request lets the server drop /admin, found %v", d)
+	}
+}
+
+func Test_targetOptionsDirectUpstreamDefault(t *testing.T) {
+	ctx := context.Background()
+	timeout := "5s"
+	obj, d := targetOptionsAPIToTerraform(ctx, &api.ServiceTargetOptions{RequestTimeout: &timeout})
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	if v := obj.Attributes()["direct_upstream"]; !v.Equal(types.BoolValue(false)) {
+		t.Errorf("the server omits false; with other options it must read as false, found %v", v)
+	}
+	if obj, _ := targetOptionsAPIToTerraform(ctx, &api.ServiceTargetOptions{}); !obj.IsNull() {
+		t.Errorf("no options read as none, found %v", obj)
 	}
 }

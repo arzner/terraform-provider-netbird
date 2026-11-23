@@ -405,6 +405,11 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 								"direct_upstream": schema.BoolAttribute{
 									MarkdownDescription: "Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services). The server refuses a loopback, multicast or link-local IP address as the host (except for a subnet target of a TCP, UDP or TLS service, where it only requires a host), and a proxy started with `NB_PROXY_DIRECT_UPSTREAM_BLOCK_PRIVATE` refuses, when it connects, addresses in a fixed list of special-use ranges (private, CGNAT, loopback, link-local, unique local, documentation, multicast and similar); any other address is dialled, publicly reachable or not. Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Applies to HTTP services only: for TCP, UDP and TLS services NetBird stores the flag but does not pass it to the proxy, and the plan warns. Defaults to false.",
 									Optional:            true,
+									// The server omits false; reading it as false wherever
+									// options exist keeps an import or a refresh in line with
+									// a configuration that writes false or leaves it out.
+									Computed: true,
+									Default:  booldefault.StaticBool(false),
 								},
 							},
 						},
@@ -558,17 +563,15 @@ func targetOptionsAPIToTerraform(ctx context.Context, opts *api.ServiceTargetOpt
 		proxyProtocol = opts.ProxyProtocol
 	}
 
-	// direct_upstream=false is the server default, treated like proxy_protocol.
-	var directUpstream *bool
-	if opts.DirectUpstream != nil && *opts.DirectUpstream {
-		directUpstream = opts.DirectUpstream
-	}
+	// direct_upstream=false is the server default and not reported; the
+	// attribute defaults to false, so read it as false.
+	directUpstream := opts.DirectUpstream != nil && *opts.DirectUpstream
 
 	model := ReverseProxyTargetOptionsModel{
 		SkipTLSVerify:  types.BoolPointerValue(opts.SkipTlsVerify),
 		RequestTimeout: types.StringPointerValue(opts.RequestTimeout),
 		ProxyProtocol:  types.BoolPointerValue(proxyProtocol),
-		DirectUpstream: types.BoolPointerValue(directUpstream),
+		DirectUpstream: types.BoolValue(directUpstream),
 	}
 
 	if opts.PathRewrite != nil {
@@ -1505,9 +1508,9 @@ var (
 )
 
 // ValidateConfig checks the private-service contract the server enforces
-// (HTTP mode, at least one access group, no bearer auth, no bypass target)
-// and the target access actions on the configured values; ModifyPlan checks
-// the values a service keeps from its state.
+// (HTTP mode, at least one access group, no bearer auth) on the configured
+// values; ModifyPlan checks the values a service keeps from its state and
+// the target access actions.
 func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var data ReverseProxyServiceModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
@@ -1515,16 +1518,9 @@ func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.V
 		return
 	}
 	private := !data.Private.IsUnknown() && data.Private.ValueBool()
-	mode := ""
-	if !data.Mode.IsNull() && !data.Mode.IsUnknown() {
-		mode = data.Mode.ValueString()
-	}
-	// Without state a left-out action reads as inherit, so only configured
-	// actions can fail here.
-	actions := targetActions(data.Targets, data.Targets, nil, false)
-	privacy, other, _ := actions.problems(private, mode)
-	resp.Diagnostics.Append(privacy...)
-	resp.Diagnostics.Append(other...)
+	// The target checks run in ModifyPlan on the planned targets, which are
+	// what the request sends: with ignore_changes they can differ from the
+	// configuration.
 	if !private {
 		return
 	}
