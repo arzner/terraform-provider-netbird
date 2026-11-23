@@ -17,7 +17,6 @@ var specRenamed = map[string]string{
 // reviewer can check; a property that later gets modelled or leaves the spec
 // fails Test_SpecConformance until it is removed here.
 var specUnmodelled = map[string]string{
-	"PeerRequest.ipv6":             "not modelled yet (#24); the server keeps the peer's address when it is omitted",
 	"ServiceRequest.private":       "not modelled yet (#25)",
 	"ServiceRequest.access_groups": "not modelled yet (#25); only used with private",
 }

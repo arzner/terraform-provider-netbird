@@ -22,6 +22,9 @@ it is based on.
   source (#26).
 - `netbird_scim`: `connector_id`, the Dex connector for setups with the embedded identity
   provider; also in the data source (#27).
+- `netbird_peer`: `ipv6`, the peer's IPv6 overlay address; left out, the server-assigned address
+  is kept, set, the peer moves to it (canonical form only). Also in the `netbird_peer` data
+  source (#24).
 
 ### Changed
 
@@ -30,6 +33,13 @@ it is based on.
 - `netbird_account_settings` sends only the settings the configuration sets; the others keep
   the server's current values even if they changed between plan and apply (previously the
   planned prior state was sent back).
+- `netbird_peer` updates start from the live peer and change only the attributes the
+  configuration sets. When a setting the plan shows unchanged changed after the plan, an
+  in-place update stops before writing anything and asks for a new plan (#74 extends this to
+  the other resources). An
+  address the server refuses (outside the account range, peer not in an IPv6-enabled group,
+  already in use) changes nothing else, and changing login or inactivity expiration on a peer
+  added with a setup key is refused before anything is sent.
 
 ## [0.1.0] - 2026-11-23
 

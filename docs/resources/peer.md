@@ -38,6 +38,7 @@ resource "netbird_peer" "example" {
 
 - `approval_required` (Boolean) Indicates whether peer needs approval
 - `inactivity_expiration_enabled` (Boolean) Enable inactivity expiration for peer
+- `ipv6` (String) Peer IPv6 overlay address, inside the account's `network_range_v6`. Null when the server has not assigned the peer an IPv6 address (an assigned address does not mean the agent uses IPv6; it can disable it locally). Left out, the server-assigned address is kept; set, it is moved to this address. Canonical form only (lower case, shortest form), the way the server returns it.
 - `login_expiration_enabled` (Boolean) Indicates whether login expiration is enabled for peer
 - `name` (String) Peer Name
 - `ssh_enabled` (Boolean) Enable SSH to Peer
