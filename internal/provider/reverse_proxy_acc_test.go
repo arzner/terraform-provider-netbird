@@ -1042,7 +1042,9 @@ func Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream(t *testing.T) {
 	rNameFull := "netbird_reverse_proxy_service." + rName
 	var createdID string
 	peerID1 := testPeerID(t, "peer1")
-	peerID2 := testPeerID(t, "peer3")
+	// peer1 and peer2 are the shared read-only fixtures; peer3 to peer6 are
+	// consumed by the peer lifecycle tests.
+	peerID2 := testPeerID(t, "peer2")
 	groupID := e2eGroupAllID()
 	crowdsec := "off"
 	if cluster.SupportsCrowdsec != nil && *cluster.SupportsCrowdsec {
