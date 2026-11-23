@@ -8,6 +8,13 @@ it is based on.
 
 ## [Unreleased]
 
+### Added
+
+- `netbird_reverse_proxy_service`: `private` and `access_groups` for NetBird-only services
+  (reachable over the tunnel by the given groups, with a server-generated access policy);
+  the private-service rules (HTTP mode, at least one group, no bearer auth) are checked at
+  plan time. Also in the data source (#25).
+
 ## [0.1.0] - 2026-11-23
 
 First release of the fork. Based on upstream `4aa1f36` (v0.0.11 plus [#263](https://github.com/netbirdio/terraform-provider-netbird/pull/263)),

@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -934,4 +935,86 @@ func testAccountSettingsPeerExpose(enabled bool, groupID string) string {
   peer_expose_enabled = %t
   peer_expose_groups  = %s
 }`, enabled, groups)
+}
+
+// Test_ReverseProxyService_Private creates a NetBird-only service for a group,
+// checks the server, imports it, makes it public again, and expects the
+// plan-time error for a private service with bearer auth.
+func Test_ReverseProxyService_Private(t *testing.T) {
+	cluster := testRequireProxyCluster(t)
+	rName := "s" + acctest.RandStringFromCharSet(8, acctest.CharSetAlpha)
+	domain := rName + "." + cluster.Address
+	rNameFull := "netbird_reverse_proxy_service." + rName
+	var createdID string
+	peerID := testPeerID(t, "peer1")
+	groupID := e2eGroupAllID()
+	config := func(private bool, bearer bool) string {
+		auth := ""
+		if bearer {
+			auth = fmt.Sprintf(`
+  auth = {
+    bearer_auth = {
+      enabled             = true
+      distribution_groups = [%q]
+    }
+  }`, groupID)
+		}
+		return fmt.Sprintf(`
+resource "netbird_reverse_proxy_service" %q {
+  name          = %q
+  domain        = %q
+  mode          = "http"
+  private       = %t
+  access_groups = [%q]
+
+  targets = [{
+    target_id   = %q
+    target_type = "peer"
+    port        = 8080
+    protocol    = "http"
+  }]%s
+}`, rName, rName, domain, private, groupID, peerID, auth)
+	}
+	onServer := func(private bool) resource.TestCheckFunc {
+		return func(s *terraform.State) error {
+			svc, err := testClient().ReverseProxyServices.Get(context.Background(), s.RootModule().Resources[rNameFull].Primary.Attributes["id"])
+			if err != nil {
+				return fmt.Errorf("get service: %w", err)
+			}
+			if got := svc.Private != nil && *svc.Private; got != private {
+				return fmt.Errorf("private on the server: expected %t, found %t", private, got)
+			}
+			if private && (svc.AccessGroups == nil || len(*svc.AccessGroups) != 1 || (*svc.AccessGroups)[0] != groupID) {
+				return fmt.Errorf("access groups on the server: expected [%s], found %v", groupID, svc.AccessGroups)
+			}
+			return nil
+		}
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().ReverseProxyServices.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: config(true, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "private", "true"),
+					resource.TestCheckResourceAttr(rNameFull, "access_groups.#", "1"),
+					resource.TestCheckResourceAttr(rNameFull, "access_groups.0", groupID),
+					onServer(true),
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{Config: config(true, true), ExpectError: regexp.MustCompile(`Bearer auth not allowed`)},
+			{
+				Config:           config(false, false),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "private", "false"),
+					onServer(false),
+				),
+			},
+		},
+	})
 }

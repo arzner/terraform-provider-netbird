@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
@@ -22,6 +23,8 @@ import (
 )
 
 // NewReverseProxyService creates a new reverse proxy service resource.
+var _ resource.ResourceWithValidateConfig = &ReverseProxyService{}
+
 func NewReverseProxyService() resource.Resource {
 	return &ReverseProxyService{}
 }
@@ -43,6 +46,8 @@ type ReverseProxyServiceModel struct {
 	PassHostHeader     types.Bool   `tfsdk:"pass_host_header"`
 	RewriteRedirects   types.Bool   `tfsdk:"rewrite_redirects"`
 	ProxyCluster       types.String `tfsdk:"proxy_cluster"`
+	Private            types.Bool   `tfsdk:"private"`
+	AccessGroups       types.List   `tfsdk:"access_groups"`
 	Targets            types.List   `tfsdk:"targets"`
 	Auth               types.Object `tfsdk:"auth"`
 	AccessRestrictions types.Object `tfsdk:"access_restrictions"`
@@ -288,6 +293,19 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 			"proxy_cluster": schema.StringAttribute{
 				MarkdownDescription: "The proxy cluster handling this service (derived from domain)",
 				Computed:            true,
+			},
+			"private": schema.BoolAttribute{
+				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity (no OIDC) and the server generates an access policy from `access_groups` to the cluster's proxy peers. Requires `mode = \"http\"`, at least one access group and no bearer auth.",
+				Optional:            true,
+				Computed:            true,
+				Default:             booldefault.StaticBool(false),
+			},
+			"access_groups": schema.ListAttribute{
+				MarkdownDescription: "Group IDs whose peers may reach the private service over the tunnel. Required when `private` is true; ignored otherwise.",
+				ElementType:         types.StringType,
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers:       []planmodifier.List{listplanmodifier.UseStateForUnknown()},
 			},
 			"targets": schema.ListNestedAttribute{
 				MarkdownDescription: "List of target backends for this service",
@@ -624,6 +642,10 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 	}
 
 	data.ProxyCluster = types.StringPointerValue(svc.ProxyCluster)
+	data.Private = types.BoolValue(svc.Private != nil && *svc.Private)
+	accessGroups, agDiags := sortedStringListPointer(ctx, data.AccessGroups, svc.AccessGroups)
+	ret.Append(agDiags...)
+	data.AccessGroups = accessGroups
 
 	var targets []ReverseProxyServiceTargetModel
 	for _, t := range svc.Targets {
@@ -884,6 +906,15 @@ func reverseProxyServiceTerraformToAPI(ctx context.Context, data *ReverseProxySe
 	if !data.PassHostHeader.IsNull() && !data.PassHostHeader.IsUnknown() {
 		v := data.PassHostHeader.ValueBool()
 		req.PassHostHeader = &v
+	}
+	if !data.Private.IsNull() && !data.Private.IsUnknown() {
+		v := data.Private.ValueBool()
+		req.Private = &v
+	}
+	if !data.AccessGroups.IsNull() && !data.AccessGroups.IsUnknown() {
+		groups := []string{}
+		ret.Append(data.AccessGroups.ElementsAs(ctx, &groups, false)...)
+		req.AccessGroups = &groups
 	}
 	if !data.RewriteRedirects.IsNull() && !data.RewriteRedirects.IsUnknown() {
 		v := data.RewriteRedirects.ValueBool()
@@ -1183,3 +1214,32 @@ var (
 	_ resource.Resource                = &ReverseProxyService{}
 	_ resource.ResourceWithImportState = &ReverseProxyService{}
 )
+
+// ValidateConfig checks the private-service contract the server enforces:
+// HTTP mode, at least one access group, no bearer auth.
+func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var data ReverseProxyServiceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() || data.Private.IsNull() || data.Private.IsUnknown() || !data.Private.ValueBool() {
+		return
+	}
+	if !data.Mode.IsNull() && !data.Mode.IsUnknown() && data.Mode.ValueString() != "http" {
+		resp.Diagnostics.AddAttributeError(path.Root("mode"), "Private services are HTTP only",
+			fmt.Sprintf("private = true requires mode = \"http\", got %q.", data.Mode.ValueString()))
+	}
+	if data.AccessGroups.IsNull() || (!data.AccessGroups.IsUnknown() && len(data.AccessGroups.Elements()) == 0) {
+		resp.Diagnostics.AddAttributeError(path.Root("access_groups"), "Access groups required",
+			"private = true requires at least one group in access_groups.")
+	}
+	if data.Auth.IsNull() || data.Auth.IsUnknown() {
+		return
+	}
+	bearer, ok := data.Auth.Attributes()["bearer_auth"].(types.Object)
+	if !ok || bearer.IsNull() || bearer.IsUnknown() {
+		return
+	}
+	if enabled, ok := bearer.Attributes()["enabled"].(types.Bool); ok && !enabled.IsUnknown() && enabled.ValueBool() {
+		resp.Diagnostics.AddAttributeError(path.Root("auth").AtName("bearer_auth"), "Bearer auth not allowed",
+			"private = true is NetBird-only access and cannot be combined with bearer auth (SSO).")
+	}
+}
