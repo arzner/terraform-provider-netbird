@@ -297,13 +297,13 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Computed:            true,
 			},
 			"private": schema.BoolAttribute{
-				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity and the server generates an access policy from `access_groups` to the cluster's proxy peers. The proxy then skips the service's other authentication (SSO, password, PIN, header auth), even where `auth` still enables it; access restrictions still apply. Peers reach it only through a proxy of the cluster that has private access enabled (`NB_PROXY_PRIVATE=true` or `--private`, off by default); the server accepts the setting without one. Requires `mode = \"http\"`, at least one access group and no bearer auth. Left out, a new service is public and an existing one keeps its setting.",
+				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity and the server generates an access policy from `access_groups` to the cluster's proxy peers. The proxy then skips the service's other authentication (SSO, password, PIN, header auth), even where `auth` still enables it; access restrictions still apply. Peers reach it only through a proxy of the cluster that has private access enabled (`NB_PROXY_PRIVATE=true` or `--private`, off by default); the server accepts the setting without one. A target with the `bypass` access action must be changed before a service can become private. Requires `mode = \"http\"`, at least one access group and no bearer auth. Left out, a new service is public and an existing one keeps its setting.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseNonNullStateForUnknown()},
 			},
 			"access_groups": schema.ListAttribute{
-				MarkdownDescription: "Group IDs whose peers may reach the private service over the tunnel. Required when `private` is true; ignored otherwise.",
+				MarkdownDescription: "Group IDs whose peers may reach the private service over the tunnel. Required when `private` is true; ignored otherwise. A proxy reuses a peer's granted access for up to five minutes by default (`NB_PROXY_TUNNEL_CACHE_TTL`), so removing a group can take that long to reach a peer that another policy still lets reach the proxy.",
 				ElementType:         types.StringType,
 				Optional:            true,
 				Computed:            true,
@@ -1193,6 +1193,10 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 	keepLiveUnknownAccess(&serviceReq, data, live)
+	if err := privateRequestProblem(serviceReq); err != nil {
+		resp.Diagnostics.AddError("Private service without usable access groups", err.Error())
+		return
+	}
 
 	svc, err := r.client.ReverseProxyServices.Update(ctx, data.Id.ValueString(), serviceReq)
 	if err != nil {
@@ -1288,18 +1292,44 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 				"A new service with private = true needs at least one group in access_groups.")
 			return
 		}
-	} else if plan.Mode.IsUnknown() {
-		// A left-out mode is not sent, and the server keeps the service's mode.
+	} else {
+		if req.Plan.Raw.Equal(req.State.Raw) {
+			// Nothing is written, so values the server already holds are
+			// not this plan's problem.
+			return
+		}
+		// The server keeps a service's mode between HTTP and TCP, UDP or TLS,
+		// whatever the plan says.
 		var state ReverseProxyServiceModel
 		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		plan.Mode = state.Mode
+		if plan.Mode.IsUnknown() || (!state.Mode.IsNull() && !state.Mode.IsUnknown() && state.Mode.ValueString() != "http") {
+			plan.Mode = state.Mode
+		}
 	}
 	// A configuration error stops at ValidateConfig, so this reports only
 	// problems with values kept from state.
 	resp.Diagnostics.Append(privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth)...)
+}
+
+// privateRequestProblem checks the access groups the update would send for a
+// private service once the live values of unknown settings are merged in;
+// the plan could not see those.
+func privateRequestProblem(req api.ServiceRequest) error {
+	if req.Private == nil || !*req.Private || req.AccessGroups == nil {
+		return nil
+	}
+	if len(*req.AccessGroups) == 0 {
+		return fmt.Errorf("the service would be private with no access groups. Nothing was changed; set access_groups")
+	}
+	for _, id := range *req.AccessGroups {
+		if strings.TrimSpace(id) == "" {
+			return fmt.Errorf("the service's access groups on the server include the blank ID %q, which no peer matches. Nothing was changed; set access_groups", id)
+		}
+	}
+	return nil
 }
 
 // notBlank refuses a string that is empty or only whitespace.

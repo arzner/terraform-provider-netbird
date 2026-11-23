@@ -10,6 +10,8 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -251,6 +253,15 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 			config: vals{"private": on, "access_groups": groups},
 			plan:   vals{"private": on, "mode": tftypes.NewValue(tftypes.String, tftypes.UnknownValue), "access_groups": groups},
 		},
+		"made private, explicit http on a tcp service": {
+			state:  vals{"private": tftypes.NewValue(tftypes.Bool, false), "mode": tcp, "access_groups": groups},
+			config: vals{"private": on, "mode": http, "access_groups": groups},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups}, wantError: true,
+		},
+		"no-op with an adopted blank group": {
+			state:  vals{"private": on, "mode": http, "access_groups": blankGroup},
+			config: vals{}, plan: vals{"private": on, "mode": http, "access_groups": blankGroup},
+		},
 		"made private, adopted blank group": {
 			state:  vals{"private": tftypes.NewValue(tftypes.Bool, false), "access_groups": blankGroup},
 			config: vals{"private": on}, plan: vals{"private": on, "mode": http, "access_groups": blankGroup}, wantError: true,
@@ -303,5 +314,70 @@ func Test_notBlank(t *testing.T) {
 		if resp.Diagnostics.HasError() != wantError {
 			t.Errorf("%q: expected error %v, found %v", value, wantError, resp.Diagnostics)
 		}
+	}
+}
+
+func Test_privateRequestProblem(t *testing.T) {
+	on, off := true, false
+	for name, tc := range map[string]struct {
+		req       api.ServiceRequest
+		wantError bool
+	}{
+		"private with a group":    {api.ServiceRequest{Private: &on, AccessGroups: &[]string{"g1"}}, false},
+		"private, blank live ID":  {api.ServiceRequest{Private: &on, AccessGroups: &[]string{"g1", " "}}, true},
+		"private, no live groups": {api.ServiceRequest{Private: &on, AccessGroups: &[]string{}}, true},
+		"public, blank ID":        {api.ServiceRequest{Private: &off, AccessGroups: &[]string{" "}}, false},
+		"private left out":        {api.ServiceRequest{AccessGroups: &[]string{" "}}, false},
+	} {
+		if err := privateRequestProblem(tc.req); (err != nil) != tc.wantError {
+			t.Errorf("%s: expected error %v, found %v", name, tc.wantError, err)
+		}
+	}
+}
+
+// Test_reverseProxyService_accessPlanModifiers runs the schema's own plan
+// modifiers: state from before the attributes existed (null) leaves an
+// unknown plan unknown, so the update sends the live values, and a known
+// state value is kept.
+func Test_reverseProxyService_accessPlanModifiers(t *testing.T) {
+	ctx := context.Background()
+	var sch resource.SchemaResponse
+	(&ReverseProxyService{}).Schema(ctx, resource.SchemaRequest{}, &sch)
+	private, ok := sch.Schema.Attributes["private"].(schema.BoolAttribute)
+	if !ok {
+		t.Fatal("private is not a bool attribute")
+	}
+	groups, ok := sch.Schema.Attributes["access_groups"].(schema.ListAttribute)
+	if !ok {
+		t.Fatal("access_groups is not a list attribute")
+	}
+	planBool := func(state types.Bool) types.Bool {
+		req := planmodifier.BoolRequest{ConfigValue: types.BoolNull(), PlanValue: types.BoolUnknown(), StateValue: state}
+		resp := planmodifier.BoolResponse{PlanValue: req.PlanValue}
+		for _, m := range private.PlanModifiers {
+			m.PlanModifyBool(ctx, req, &resp)
+		}
+		return resp.PlanValue
+	}
+	planList := func(state types.List) types.List {
+		req := planmodifier.ListRequest{ConfigValue: types.ListNull(types.StringType), PlanValue: types.ListUnknown(types.StringType), StateValue: state}
+		resp := planmodifier.ListResponse{PlanValue: req.PlanValue}
+		for _, m := range groups.PlanModifiers {
+			m.PlanModifyList(ctx, req, &resp)
+		}
+		return resp.PlanValue
+	}
+	if got := planBool(types.BoolNull()); !got.IsUnknown() {
+		t.Errorf("private from null state: expected unknown, found %v", got)
+	}
+	if got := planBool(types.BoolValue(true)); !got.Equal(types.BoolValue(true)) {
+		t.Errorf("private from state: expected true, found %v", got)
+	}
+	if got := planList(types.ListNull(types.StringType)); !got.IsUnknown() {
+		t.Errorf("access_groups from null state: expected unknown, found %v", got)
+	}
+	g1 := types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g1")})
+	if got := planList(g1); !got.Equal(g1) {
+		t.Errorf("access_groups from state: expected [g1], found %v", got)
 	}
 }
