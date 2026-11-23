@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -298,20 +297,20 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Computed:            true,
 			},
 			"private": schema.BoolAttribute{
-				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity and the server generates an access policy from `access_groups` to the cluster's proxy peers. The proxy then skips the service's other authentication (SSO, password, PIN, header auth), even where `auth` still enables it; access restrictions still apply. Requires `mode = \"http\"`, at least one access group and no bearer auth. Left out, a new service is public and an existing one keeps its setting.",
+				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity and the server generates an access policy from `access_groups` to the cluster's proxy peers. The proxy then skips the service's other authentication (SSO, password, PIN, header auth), even where `auth` still enables it; access restrictions still apply. Peers reach it only through a proxy of the cluster that has private access enabled (`NB_PROXY_PRIVATE=true` or `--private`, off by default); the server accepts the setting without one. Requires `mode = \"http\"`, at least one access group and no bearer auth. Left out, a new service is public and an existing one keeps its setting.",
 				Optional:            true,
 				Computed:            true,
-				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
+				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseNonNullStateForUnknown()},
 			},
 			"access_groups": schema.ListAttribute{
 				MarkdownDescription: "Group IDs whose peers may reach the private service over the tunnel. Required when `private` is true; ignored otherwise.",
 				ElementType:         types.StringType,
 				Optional:            true,
 				Computed:            true,
-				PlanModifiers:       []planmodifier.List{listplanmodifier.UseStateForUnknown()},
+				PlanModifiers:       []planmodifier.List{listplanmodifier.UseNonNullStateForUnknown()},
 				Validators: []validator.List{
 					listvalidator.NoNullValues(),
-					listvalidator.ValueStringsAre(stringvalidator.RegexMatches(regexp.MustCompile(`\S`), "must not be blank")),
+					listvalidator.ValueStringsAre(notBlank{}),
 				},
 			},
 			"targets": schema.ListNestedAttribute{
@@ -1267,13 +1266,12 @@ func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.V
 	resp.Diagnostics.Append(privateServiceProblems(data.Mode, data.AccessGroups, data.Auth)...)
 }
 
-// ModifyPlan leaves private and access_groups unknown on an update whose
-// state has no value for them and whose configuration leaves them out (state
-// from before they existed, planned without a refresh), so the update keeps
-// the live values instead of sending none and making the service public. It
-// also refuses a private service the server would reject when the
+// ModifyPlan refuses a private service the server would reject when the
 // configuration alone does not show it: a new one without access groups, or
-// one whose groups, mode or auth come from state or the plan.
+// one whose groups, mode or auth come from state or the plan. Access settings
+// absent from state (written before they existed, planned without a refresh)
+// stay unknown on a real update through UseNonNullStateForUnknown, and the
+// update sends their live values.
 func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
 		return
@@ -1281,30 +1279,43 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	var plan, config ReverseProxyServiceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	if !req.State.Raw.IsNull() {
-		if config.Private.IsNull() && plan.Private.IsNull() {
-			plan.Private = types.BoolUnknown()
-			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("private"), plan.Private)...)
-		}
-		if config.AccessGroups.IsNull() && plan.AccessGroups.IsNull() {
-			plan.AccessGroups = types.ListUnknown(types.StringType)
-			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("access_groups"), plan.AccessGroups)...)
-		}
-	}
 	if resp.Diagnostics.HasError() || plan.Private.IsUnknown() || !plan.Private.ValueBool() {
 		return
 	}
-	if req.State.Raw.IsNull() && config.AccessGroups.IsNull() {
-		resp.Diagnostics.AddAttributeError(path.Root("access_groups"), "Access groups required",
-			"A new service with private = true needs at least one group in access_groups.")
-		return
+	if req.State.Raw.IsNull() {
+		if config.AccessGroups.IsNull() {
+			resp.Diagnostics.AddAttributeError(path.Root("access_groups"), "Access groups required",
+				"A new service with private = true needs at least one group in access_groups.")
+			return
+		}
+	} else if plan.Mode.IsUnknown() {
+		// A left-out mode is not sent, and the server keeps the service's mode.
+		var state ReverseProxyServiceModel
+		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		plan.Mode = state.Mode
 	}
 	// A configuration error stops at ValidateConfig, so this reports only
 	// problems with values kept from state.
 	resp.Diagnostics.Append(privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth)...)
+}
+
+// notBlank refuses a string that is empty or only whitespace.
+type notBlank struct{}
+
+func (notBlank) Description(context.Context) string         { return "must not be blank" }
+func (notBlank) MarkdownDescription(context.Context) string { return "must not be blank" }
+
+func (notBlank) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	if strings.TrimSpace(req.ConfigValue.ValueString()) == "" {
+		resp.Diagnostics.AddAttributeError(req.Path, "Blank group ID",
+			fmt.Sprintf("%s must not be blank, got %q.", req.Path, req.ConfigValue.ValueString()))
+	}
 }
 
 // keepLiveUnknownAccess sends the live value of an access setting the plan
@@ -1325,11 +1336,20 @@ func privateServiceProblems(mode types.String, groups types.List, auth types.Obj
 	var diags diag.Diagnostics
 	if !mode.IsNull() && !mode.IsUnknown() && mode.ValueString() != "http" {
 		diags.AddAttributeError(path.Root("mode"), "Private services are HTTP only",
-			fmt.Sprintf("private = true requires mode = \"http\", got %q.", mode.ValueString()))
+			fmt.Sprintf("private = true requires mode = \"http\", got %q. The server does not change a service's "+
+				"mode between HTTP and TCP, UDP or TLS, so an existing non-HTTP service cannot become private.", mode.ValueString()))
 	}
-	if !groups.IsNull() && !groups.IsUnknown() && len(groups.Elements()) == 0 {
-		diags.AddAttributeError(path.Root("access_groups"), "Access groups required",
-			"private = true requires at least one group in access_groups.")
+	if !groups.IsNull() && !groups.IsUnknown() {
+		if len(groups.Elements()) == 0 {
+			diags.AddAttributeError(path.Root("access_groups"), "Access groups required",
+				"private = true requires at least one group in access_groups.")
+		}
+		for i, v := range groups.Elements() {
+			if id, ok := v.(types.String); ok && !id.IsNull() && !id.IsUnknown() && strings.TrimSpace(id.ValueString()) == "" {
+				diags.AddAttributeError(path.Root("access_groups").AtListIndex(i), "Blank group ID",
+					fmt.Sprintf("private = true needs real group IDs in access_groups, got %q; no peer would match it.", id.ValueString()))
+			}
+		}
 	}
 	if auth.IsNull() || auth.IsUnknown() {
 		return diags

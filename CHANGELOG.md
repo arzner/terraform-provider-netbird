@@ -30,7 +30,8 @@ it is based on.
   the private-service rules (HTTP mode, at least one group, no blank group IDs, no bearer
   auth) are checked at plan time, also for a service that stays private from its state. An
   update stops before writing when `private` or `access_groups`, shown unchanged by the plan,
-  changed on the server after the plan. Also in the data source (#25).
+  changed on the server after the plan. Peers reach a private service only through a proxy with
+  private access enabled (`NB_PROXY_PRIVATE=true`). Also in the data source (#25).
 
 ### Changed
 

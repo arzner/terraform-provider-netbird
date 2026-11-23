@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -206,6 +207,7 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 	}
 	groups := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{tftypes.NewValue(tftypes.String, "g1")})
 	noGroups := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{})
+	blankGroup := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{tftypes.NewValue(tftypes.String, " ")})
 	type vals map[string]tftypes.Value
 	object := func(v vals) tftypes.Value {
 		values := map[string]tftypes.Value{}
@@ -225,7 +227,6 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 		create              bool
 		state, config, plan vals
 		wantError           bool
-		wantUnknown         bool
 	}{
 		"new without groups":     {create: true, config: vals{"private": on}, plan: vals{"private": on, "access_groups": tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, tftypes.UnknownValue)}, wantError: true},
 		"new with groups":        {create: true, config: vals{"private": on, "access_groups": groups}, plan: vals{"private": on, "access_groups": groups}},
@@ -239,8 +240,21 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 			state:  vals{"private": tftypes.NewValue(tftypes.Bool, false), "access_groups": noGroups},
 			config: vals{"private": on}, plan: vals{"private": on, "mode": http, "access_groups": noGroups}, wantError: true,
 		},
-		"state without access settings": {state: vals{}, config: vals{}, plan: vals{"mode": http}, wantUnknown: true},
-		"new without access settings":   {create: true, config: vals{}, plan: vals{"mode": http}},
+		"new without access settings": {create: true, config: vals{}, plan: vals{"mode": http}},
+		"made private, mode tcp from state": {
+			state:  vals{"private": tftypes.NewValue(tftypes.Bool, false), "mode": tcp, "access_groups": groups},
+			config: vals{"private": on, "access_groups": groups},
+			plan:   vals{"private": on, "mode": tftypes.NewValue(tftypes.String, tftypes.UnknownValue), "access_groups": groups}, wantError: true,
+		},
+		"made private, mode http from state": {
+			state:  vals{"private": tftypes.NewValue(tftypes.Bool, false), "mode": http, "access_groups": groups},
+			config: vals{"private": on, "access_groups": groups},
+			plan:   vals{"private": on, "mode": tftypes.NewValue(tftypes.String, tftypes.UnknownValue), "access_groups": groups},
+		},
+		"made private, adopted blank group": {
+			state:  vals{"private": tftypes.NewValue(tftypes.Bool, false), "access_groups": blankGroup},
+			config: vals{"private": on}, plan: vals{"private": on, "mode": http, "access_groups": blankGroup}, wantError: true,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			state := tftypes.NewValue(typ, nil)
@@ -259,13 +273,6 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 			r.ModifyPlan(ctx, req, &resp)
 			if resp.Diagnostics.HasError() != tc.wantError {
 				t.Fatalf("expected error %v, found %v", tc.wantError, resp.Diagnostics)
-			}
-			var planned ReverseProxyServiceModel
-			if d := resp.Plan.Get(ctx, &planned); d.HasError() {
-				t.Fatal(d)
-			}
-			if got := planned.Private.IsUnknown() && planned.AccessGroups.IsUnknown(); got != tc.wantUnknown {
-				t.Errorf("expected unknown access settings %v, found private %v, access_groups %v", tc.wantUnknown, planned.Private, planned.AccessGroups)
 			}
 		})
 	}
@@ -286,5 +293,15 @@ func Test_keepLiveUnknownAccess(t *testing.T) {
 	keepLiveUnknownAccess(&req, ReverseProxyServiceModel{Private: types.BoolValue(false), AccessGroups: types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g-plan")})}, live)
 	if *req.Private || !reflect.DeepEqual(*req.AccessGroups, []string{"g-plan"}) {
 		t.Errorf("known: expected the planned values, found %v %v", *req.Private, *req.AccessGroups)
+	}
+}
+
+func Test_notBlank(t *testing.T) {
+	for value, wantError := range map[string]bool{"g1": false, "": true, " ": true, "\u00a0\t": true, " g1 ": false} {
+		var resp validator.StringResponse
+		notBlank{}.ValidateString(context.Background(), validator.StringRequest{ConfigValue: types.StringValue(value)}, &resp)
+		if resp.Diagnostics.HasError() != wantError {
+			t.Errorf("%q: expected error %v, found %v", value, wantError, resp.Diagnostics)
+		}
 	}
 }
