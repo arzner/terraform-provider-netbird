@@ -276,4 +276,3 @@ func (r *Scim) Delete(ctx context.Context, req resource.DeleteRequest, resp *res
 func (r *Scim) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
-
