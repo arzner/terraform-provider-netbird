@@ -2,7 +2,10 @@ package provider
 
 import (
 	"context"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"reflect"
 	"strings"
 	"testing"
@@ -306,7 +309,6 @@ BAUwAwEB/zAKBggqhkjOPQQDAgNHADBEAiA+VGZp9DLD/8XFE98j3rjs3SlJB9Yp
 
 func Test_postureCheck_certificateCheck(t *testing.T) {
 	ctx := context.Background()
-	other := strings.Replace(testCA, "-----END", "\n-----END", 1)
 	var data PostureCheckModel
 	pc := &api.PostureCheck{Id: "pc", Name: "n", Checks: api.Checks{CertificateCheck: &api.CertificateCheck{CaCertificates: []string{testCA}}}}
 	if d := postureCheckAPIToTerraform(ctx, pc, &data); d.HasError() {
@@ -335,11 +337,12 @@ func Test_postureCheck_certificateCheck(t *testing.T) {
 		t.Fatalf("expected a null certificate_check, found %v", none.CertificateCheck)
 	}
 
+	headered := strings.Replace(testCA, "-----BEGIN CERTIFICATE-----\n", "-----BEGIN CERTIFICATE-----\nProc-Type: 4,ENCRYPTED\n\n", 1)
 	for value, ok := range map[string]bool{
-		testCA:                 true,
-		other:                  true,
-		"not pem":              false,
-		testCA + "\n" + testCA: false,
+		testCA:                  true,
+		testCA + "\n" + testCA2: true, // a bundle in one entry, as the server accepts
+		"not pem":               false,
+		headered:                false, // the server skips blocks with headers
 		strings.Replace(testCA, "CERTIFICATE", "PRIVATE KEY", 2): false,
 	} {
 		var resp validator.StringResponse
@@ -347,5 +350,55 @@ func Test_postureCheck_certificateCheck(t *testing.T) {
 		if !resp.Diagnostics.HasError() != ok {
 			t.Errorf("%.40q: expected valid %v, found %v", value, ok, resp.Diagnostics)
 		}
+	}
+}
+
+// testCA2 is a second throwaway self-signed CA certificate.
+const testCA2 = `-----BEGIN CERTIFICATE-----
+MIIBfjCCASOgAwIBAgIUa3WBCD19m4Og/dqAc334JsCoJt8wCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJdGVzdC1jYS0yMB4XDTI2MTEyMzAxMDQxOFoXDTM2MTEyMDAx
+MDQxOFowFDESMBAGA1UEAwwJdGVzdC1jYS0yMFkwEwYHKoZIzj0CAQYIKoZIzj0D
+AQcDQgAEhtlBx76BmQWeLFbBwqxhE8bso7BuH5L5wiGZvhQqWGNSiQb95h2qHzml
+f3Dgd/yspVst/C5ayLw+1//UyaRol6NTMFEwHQYDVR0OBBYEFFHWklhBtvZ9ZyjV
+p8jGsD1Es9CHMB8GA1UdIwQYMBaAFFHWklhBtvZ9ZyjVp8jGsD1Es9CHMA8GA1Ud
+EwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSQAwRgIhALe7vCuw92lO6HYp+YWm2L+D
+wdrqKbLKWHOBGlPsd9YzAiEA9vh+KQAkkSTOur5yLsIQmUkVPaWSE/6lBGiaZLKF
+prM=
+-----END CERTIFICATE-----`
+
+func Test_postureCheck_certificateCheckRequiresCAs(t *testing.T) {
+	ctx := context.Background()
+	r := &PostureCheck{}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	certType, ok := typ.AttributeTypes["certificate_check"].(tftypes.Object)
+	if !ok {
+		t.Fatal("certificate_check is not an object")
+	}
+	listType := tftypes.List{ElementType: tftypes.String}
+	for name, tc := range map[string]struct {
+		block     tftypes.Value
+		wantError bool
+	}{
+		"no block":         {block: tftypes.NewValue(certType, nil)},
+		"block with a CA":  {block: tftypes.NewValue(certType, map[string]tftypes.Value{"ca_certificates": tftypes.NewValue(listType, []tftypes.Value{tftypes.NewValue(tftypes.String, testCA)})})},
+		"block without CA": {block: tftypes.NewValue(certType, map[string]tftypes.Value{"ca_certificates": tftypes.NewValue(listType, nil)}), wantError: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			values := map[string]tftypes.Value{}
+			for n, at := range typ.AttributeTypes {
+				values[n] = tftypes.NewValue(at, nil)
+			}
+			values["certificate_check"] = tc.block
+			var resp resource.ValidateConfigResponse
+			r.ValidateConfig(ctx, resource.ValidateConfigRequest{Config: tfsdk.Config{Schema: sch.Schema, Raw: tftypes.NewValue(typ, values)}}, &resp)
+			if resp.Diagnostics.HasError() != tc.wantError {
+				t.Fatalf("expected error %v, found %v", tc.wantError, resp.Diagnostics)
+			}
+		})
 	}
 }

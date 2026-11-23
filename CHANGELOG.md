@@ -11,8 +11,9 @@ it is based on.
 ### Added
 
 - `netbird_posture_check`: `certificate_check` block, requiring a peer certificate that chains to
-  one of the given PEM CA certificates (iOS and Android always fail it). Certificates are checked
-  to be PEM-encoded X.509 at plan time. Also in the data source (#26).
+  one of the given PEM CA certificates (iOS and Android always fail it). Entries are checked at
+  plan time with the server's own parser, and a block needs at least one. Also in the data
+  source (#26).
 
 ## [0.1.0] - 2026-11-23
 

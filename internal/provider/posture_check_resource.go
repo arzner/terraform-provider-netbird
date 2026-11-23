@@ -4,11 +4,9 @@
 package provider
 
 import (
-	"bytes"
 	"context"
-	"crypto/x509"
-	"encoding/pem"
 	"fmt"
+	"github.com/netbirdio/netbird/shared/management/certposture"
 	"regexp"
 	"strings"
 
@@ -32,6 +30,8 @@ import (
 // Ensure provider defined types fully satisfy framework interfaces.
 var _ resource.Resource = &PostureCheck{}
 var _ resource.ResourceWithImportState = &PostureCheck{}
+
+var _ resource.ResourceWithValidateConfig = &PostureCheck{}
 
 func NewPostureCheck() resource.Resource {
 	return &PostureCheck{}
@@ -714,11 +714,11 @@ func (r *PostureCheck) ImportState(ctx context.Context, req resource.ImportState
 // certificateCheckTypes are the attributes of certificate_check.
 var certificateCheckTypes = map[string]attr.Type{"ca_certificates": types.ListType{ElemType: types.StringType}}
 
-// pemCertificate accepts a PEM-encoded X.509 certificate.
+// pemCertificate accepts what the management server accepts as one CA entry.
 type pemCertificate struct{}
 
 func (pemCertificate) Description(context.Context) string {
-	return "must be a PEM-encoded X.509 certificate"
+	return "must contain PEM-encoded CA certificates"
 }
 
 func (v pemCertificate) MarkdownDescription(ctx context.Context) string { return v.Description(ctx) }
@@ -727,12 +727,24 @@ func (pemCertificate) ValidateString(_ context.Context, req validator.StringRequ
 	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
 		return
 	}
-	block, rest := pem.Decode([]byte(req.ConfigValue.ValueString()))
-	if block == nil || block.Type != "CERTIFICATE" || len(bytes.TrimSpace(rest)) != 0 {
-		resp.Diagnostics.AddAttributeError(req.Path, "Invalid CA certificate", "Expected exactly one PEM block of type CERTIFICATE.")
+	// The management server's own parser: a list entry may hold several
+	// CERTIFICATE blocks; blocks with PEM headers or of other types are skipped.
+	if _, err := certposture.ParseCAs([]string{req.ConfigValue.ValueString()}); err != nil {
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid CA certificate",
+			"Expected PEM-encoded CA certificates (blocks of type CERTIFICATE without headers).")
+	}
+}
+
+// ValidateConfig requires ca_certificates in a present certificate_check block;
+// the server refuses a certificate check without CAs.
+func (r *PostureCheck) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var data PostureCheckModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() || data.CertificateCheck.IsNull() || data.CertificateCheck.IsUnknown() {
 		return
 	}
-	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-		resp.Diagnostics.AddAttributeError(req.Path, "Invalid CA certificate", fmt.Sprintf("The certificate does not parse: %v", err))
+	if cas, ok := data.CertificateCheck.Attributes()["ca_certificates"].(types.List); ok && cas.IsNull() {
+		resp.Diagnostics.AddAttributeError(path.Root("certificate_check").AtName("ca_certificates"), "CA certificates required",
+			"A certificate_check block needs at least one CA certificate in ca_certificates.")
 	}
 }
