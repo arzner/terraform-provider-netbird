@@ -273,3 +273,42 @@ jobs:
           if [ -f coverage.out ]; then
             go tool cover -func=coverage.out | tail -n 1
           fi
+
+  # The compatibility policy supports the NetBird minor line before the one
+  # go.mod pins once the suite passes against it. This job builds that line's
+  # newest release from its own source and runs the suite against it with the
+  # provider compiled against the pinned library. It is informative, not a
+  # required check: an older server lacking a newer feature fails the tests of
+  # that feature, which is what the job is there to show.
+  acceptance-previous:
+    name: Acceptance tests (previous NetBird minor)
+    if: inputs.netbird_version == ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: '1.17.*'
+          terraform_wrapper: false
+      - name: Build the previous minor release's images
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/e2e-previous-minor.sh
+      - run: go mod download
+      - run: go mod download github.com/netbirdio/netbird
+      - env:
+          TF_ACC: "1"
+        run: |
+          echo "server images: $NB_PREVIOUS_VERSION; provider library: $(go list -m -f '{{.Version}}' github.com/netbirdio/netbird)"
+          go test -v -tags e2e -timeout 40m ./internal/provider/
+        timeout-minutes: 45
+

@@ -425,7 +425,7 @@ func Test_reverseProxyServiceRoundtrip_l4Options(t *testing.T) {
 
 func Test_reverseProxyServiceTargetModelTFType(t *testing.T) {
 	tfType := ReverseProxyServiceTargetModel{}.TFType()
-	expectedKeys := []string{"target_id", "target_type", "host", "port", "protocol", "path", "enabled", "options"}
+	expectedKeys := []string{"target_id", "target_type", "host", "port", "protocol", "path", "enabled", "access_action", "options"}
 	for _, key := range expectedKeys {
 		if _, ok := tfType.AttrTypes[key]; !ok {
 			t.Errorf("Expected key %s in TFType, not found", key)
@@ -448,7 +448,7 @@ func Test_reverseProxyServiceAuthModelTFType(t *testing.T) {
 
 func Test_reverseProxyTargetOptionsModelTFType(t *testing.T) {
 	tfType := ReverseProxyTargetOptionsModel{}.TFType()
-	expectedKeys := []string{"skip_tls_verify", "request_timeout", "path_rewrite", "custom_headers", "proxy_protocol", "session_idle_timeout"}
+	expectedKeys := []string{"skip_tls_verify", "request_timeout", "path_rewrite", "custom_headers", "proxy_protocol", "session_idle_timeout", "direct_upstream"}
 	for _, key := range expectedKeys {
 		if _, ok := tfType.AttrTypes[key]; !ok {
 			t.Errorf("Expected key %s in TFType, not found", key)
@@ -827,8 +827,8 @@ func Test_reverseProxyServiceTFTypeConsistency(t *testing.T) {
 		t.Error("Target options type doesn't match TargetOptions TFType")
 	}
 
-	if len(targetType.AttrTypes) != 8 {
-		t.Errorf("Expected 8 target attributes, got %d", len(targetType.AttrTypes))
+	if len(targetType.AttrTypes) != 9 {
+		t.Errorf("Expected 9 target attributes, got %d", len(targetType.AttrTypes))
 	}
 }
 
@@ -965,7 +965,7 @@ func Test_preserveTargetPlanValues(t *testing.T) {
 			Protocol:   types.StringValue("http"),
 			Enabled:    types.BoolValue(true),
 			Host:       types.StringValue("100.0.219.86"),
-			Path:       types.StringValue("/"),
+			Path:       types.StringValue("/custom"),
 			Options:    types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes),
 		},
 	}
@@ -1397,4 +1397,388 @@ func mustObjectValue(ctx context.Context, attrTypes map[string]attr.Type, val an
 		panic("failed to create object value in test helper")
 	}
 	return obj
+}
+
+func Test_reverseProxyNewFieldsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	inherit, block := api.ServiceTargetAccessActionInherit, api.ServiceTargetAccessActionBlock
+	mode := api.AccessRestrictionsCrowdsecModeObserve
+	yes, no := true, false
+	svc := &api.Service{
+		Id: "s", Name: "n", Domain: "d.example", Enabled: true,
+		Targets: []api.ServiceTarget{
+			{TargetId: "a", TargetType: "peer", Port: 80, Protocol: "http", Enabled: true, AccessAction: &inherit, Options: &api.ServiceTargetOptions{DirectUpstream: &no}},
+			{TargetId: "b", TargetType: "peer", Port: 80, Protocol: "http", Enabled: true, AccessAction: &block, Options: &api.ServiceTargetOptions{DirectUpstream: &yes}},
+		},
+		AccessRestrictions: &api.AccessRestrictions{CrowdsecMode: &mode},
+	}
+	var data ReverseProxyServiceModel
+	if d := reverseProxyServiceAPIToTerraform(ctx, svc, &data); d.HasError() {
+		t.Fatal(d)
+	}
+	var targets []ReverseProxyServiceTargetModel
+	if d := data.Targets.ElementsAs(ctx, &targets, false); d.HasError() {
+		t.Fatal(d)
+	}
+	if targets[0].AccessAction.ValueString() != "inherit" || targets[1].AccessAction.ValueString() != "block" {
+		t.Errorf("access_action: found %v, %v", targets[0].AccessAction, targets[1].AccessAction)
+	}
+	// direct_upstream=false is the default and reads as no options at all.
+	if !targets[0].Options.IsNull() {
+		t.Errorf("options with only direct_upstream=false should read as null, found %v", targets[0].Options)
+	}
+	if v := targets[1].Options.Attributes()["direct_upstream"]; !v.Equal(types.BoolValue(true)) {
+		t.Errorf("direct_upstream: found %v", v)
+	}
+	if v := data.AccessRestrictions.Attributes()["crowdsec_mode"]; !v.Equal(types.StringValue("observe")) {
+		t.Errorf("crowdsec_mode: found %v", v)
+	}
+
+	// Back to a request: configured values are sent, an unknown action is not.
+	data.Targets, _ = types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), []ReverseProxyServiceTargetModel{
+		dataTarget(targets[0], types.StringUnknown()), dataTarget(targets[1], types.StringValue("block")),
+	})
+	data.Auth = types.ObjectNull(ReverseProxyServiceAuthModel{}.TFType().AttrTypes)
+	req, d := reverseProxyServiceTerraformToAPI(ctx, &data)
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	got := *req.Targets
+	if got[0].AccessAction != nil {
+		t.Errorf("an unknown access_action must not be sent, found %v", *got[0].AccessAction)
+	}
+	if got[1].AccessAction == nil || *got[1].AccessAction != block {
+		t.Errorf("configured access_action: found %v", got[1].AccessAction)
+	}
+	if got[1].Options == nil || got[1].Options.DirectUpstream == nil || !*got[1].Options.DirectUpstream {
+		t.Errorf("direct_upstream not sent: %+v", got[1].Options)
+	}
+	if req.AccessRestrictions == nil || req.AccessRestrictions.CrowdsecMode == nil || *req.AccessRestrictions.CrowdsecMode != mode {
+		t.Errorf("crowdsec_mode not sent: %+v", req.AccessRestrictions)
+	}
+}
+
+func dataTarget(m ReverseProxyServiceTargetModel, action types.String) ReverseProxyServiceTargetModel {
+	m.AccessAction = action
+	return m
+}
+
+func Test_preserveTargetPlanValues_pathAndDirectUpstream(t *testing.T) {
+	ctx := context.Background()
+	optsType := ReverseProxyTargetOptionsModel{}.TFType()
+	options := func(direct types.Bool) types.Object {
+		attrs := map[string]attr.Value{}
+		for name, typ := range optsType.AttrTypes {
+			switch typ {
+			case types.BoolType:
+				attrs[name] = types.BoolNull()
+			case types.StringType:
+				attrs[name] = types.StringNull()
+			default:
+				attrs[name] = types.MapNull(types.StringType)
+			}
+		}
+		attrs["direct_upstream"] = direct
+		return types.ObjectValueMust(optsType.AttrTypes, attrs)
+	}
+	target := func(path string, action string, opts types.Object) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("peer"), TargetType: types.StringValue("peer"), Host: types.StringNull(),
+			Port: types.Int64Value(80), Protocol: types.StringValue("http"), Path: types.StringValue(path),
+			Enabled: types.BoolValue(true), AccessAction: types.StringValue(action), Options: opts,
+		}
+	}
+	list := func(targets ...ReverseProxyServiceTargetModel) types.List {
+		l, d := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), targets)
+		if d.HasError() {
+			t.Fatal(d)
+		}
+		return l
+	}
+	nullOpts := types.ObjectNull(optsType.AttrTypes)
+	for name, tc := range map[string]struct {
+		plannedDirect, liveDirect types.Object
+		want                      types.Bool
+	}{
+		"false as written while off":  {options(types.BoolValue(false)), nullOpts, types.BoolValue(false)},
+		"switched on outside":         {options(types.BoolValue(false)), options(types.BoolValue(true)), types.BoolValue(true)},
+		"switched off outside":        {options(types.BoolValue(true)), nullOpts, types.BoolNull()}, // options null
+		"left out, switched on":       {options(types.BoolNull()), options(types.BoolValue(true)), types.BoolValue(true)},
+		"left out, off stays omitted": {options(types.BoolNull()), nullOpts, types.BoolNull()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// One backend serving two paths with different actions.
+			planned := list(target("/public", "inherit", nullOpts), target("/admin", "block", tc.plannedDirect))
+			live := list(target("/admin", "block", tc.liveDirect), target("/public", "inherit", nullOpts))
+			got, d := preserveTargetPlanValues(ctx, planned, live)
+			if d.HasError() {
+				t.Fatal(d)
+			}
+			var out []ReverseProxyServiceTargetModel
+			got.ElementsAs(ctx, &out, false)
+			if out[0].Path.ValueString() != "/admin" || out[0].AccessAction.ValueString() != "block" || out[1].Path.ValueString() != "/public" {
+				t.Fatalf("targets matched to the wrong path: %+v", out)
+			}
+			if !out[1].Options.IsNull() {
+				t.Errorf("/public must keep no options, found %v", out[1].Options)
+			}
+			// With no options left on the server the parent is null unless the
+			// planned object sets only defaults.
+			wantNull := tc.liveDirect.IsNull() && tc.plannedDirect.Attributes()["direct_upstream"].Equal(types.BoolValue(true))
+			if out[0].Options.IsNull() != wantNull {
+				t.Fatalf("options: expected null %v, found %v", wantNull, out[0].Options)
+			}
+			if wantNull {
+				return
+			}
+			if v := out[0].Options.Attributes()["direct_upstream"]; !v.Equal(tc.want) {
+				t.Errorf("direct_upstream: expected %v, found %v", tc.want, v)
+			}
+		})
+	}
+}
+
+// A target whose path the server reports differently (moved outside
+// Terraform) is not paired: its server values stay, so the plan shows it.
+func Test_preserveTargetPlanValues_movedPathStaysVisible(t *testing.T) {
+	ctx := context.Background()
+	target := func(path, host string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("peer1"), TargetType: types.StringValue("peer"), Port: types.Int64Value(80),
+			Protocol: types.StringValue("http"), Enabled: types.BoolValue(true), Host: types.StringValue(host),
+			Path: types.StringValue(path), AccessAction: types.StringValue("block"),
+			Options: types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes),
+		}
+	}
+	planned, _ := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), []ReverseProxyServiceTargetModel{target("/admin", "10.0.0.1")})
+	live, _ := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), []ReverseProxyServiceTargetModel{target("/old-admin", "100.0.0.9")})
+	got, d := preserveTargetPlanValues(ctx, planned, live)
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	var out []ReverseProxyServiceTargetModel
+	got.ElementsAs(ctx, &out, false)
+	if out[0].Path.ValueString() != "/old-admin" || out[0].Host.ValueString() != "100.0.0.9" {
+		t.Errorf("a moved target must keep its server values, found %+v", out[0])
+	}
+}
+
+// Two targets of one backend on the same path pair one to one.
+func Test_preserveTargetPlanValues_samePathPairsOnce(t *testing.T) {
+	ctx := context.Background()
+	target := func(port int64, host string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("peer1"), TargetType: types.StringValue("peer"), Port: types.Int64Value(port),
+			Protocol: types.StringValue("http"), Enabled: types.BoolValue(true), Host: types.StringValue(host),
+			Path: types.StringValue("/"), AccessAction: types.StringValue("inherit"),
+			Options: types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes),
+		}
+	}
+	planned, _ := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), []ReverseProxyServiceTargetModel{target(80, "a.example"), target(81, "b.example")})
+	live, _ := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), []ReverseProxyServiceTargetModel{target(80, "100.0.0.1"), target(81, "100.0.0.2")})
+	got, d := preserveTargetPlanValues(ctx, planned, live)
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	var out []ReverseProxyServiceTargetModel
+	got.ElementsAs(ctx, &out, false)
+	if out[0].Host.ValueString() != "a.example" || out[1].Host.ValueString() != "b.example" {
+		t.Errorf("each planned target pairs once: found %s, %s", out[0].Host.ValueString(), out[1].Host.ValueString())
+	}
+}
+
+// Targets of one backend that share a path pair on port and protocol: on
+// create with the paths left out, and on refresh after one was removed.
+func Test_matchPlanTargets_portDecides(t *testing.T) {
+	target := func(port int64, path types.String, host string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("peer1"), Port: types.Int64Value(port), Protocol: types.StringValue("http"),
+			Path: path, Host: types.StringValue(host),
+		}
+	}
+	unknown, root := types.StringUnknown(), types.StringValue("/")
+	// Create: both paths unknown in the plan.
+	got := matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target(8080, unknown, "a"), target(8081, unknown, "b")},
+		[]ReverseProxyServiceTargetModel{target(8081, root, ""), target(8080, root, "")})
+	if got[0].Host.ValueString() != "b" || got[1].Host.ValueString() != "a" {
+		t.Errorf("create: expected 8081->b and 8080->a, found %v", got)
+	}
+	// Refresh after 8080 was removed outside Terraform.
+	got = matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target(8080, root, "a"), target(8081, root, "b")},
+		[]ReverseProxyServiceTargetModel{target(8081, root, "")})
+	if len(got) != 1 || got[0].Host.ValueString() != "b" {
+		t.Errorf("refresh: the survivor must pair with its own prior target, found %v", got)
+	}
+}
+
+// Targets of one subnet resource that share path, port and protocol pair on
+// their host.
+func Test_matchPlanTargets_hostDecides(t *testing.T) {
+	target := func(path types.String, host string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("subnet"), Port: types.Int64Value(80), Protocol: types.StringValue("http"),
+			Path: path, Host: types.StringValue(host), TargetType: types.StringValue("subnet"),
+		}
+	}
+	unknown, root := types.StringUnknown(), types.StringValue("/")
+	got := matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target(root, "10.0.0.1"), target(root, "10.0.0.2")},
+		[]ReverseProxyServiceTargetModel{target(root, "10.0.0.2")})
+	if len(got) != 1 || got[0].Host.ValueString() != "10.0.0.2" {
+		t.Errorf("refresh: the survivor must pair with its own prior target, found %v", got)
+	}
+	got = matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target(unknown, "10.0.0.1"), target(unknown, "10.0.0.2")},
+		[]ReverseProxyServiceTargetModel{target(root, "10.0.0.2"), target(root, "10.0.0.1")})
+	if len(got) != 2 || got[0].Host.ValueString() != "10.0.0.2" || got[1].Host.ValueString() != "10.0.0.1" {
+		t.Errorf("create: expected pairs by host, found %v", got)
+	}
+}
+
+// Targets equal in every compared field pair in list order; a survivor whose
+// port changed still pairs on its host.
+func Test_matchPlanTargets_duplicatesAndMovedPort(t *testing.T) {
+	target := func(port int64, host types.String, tag string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("x"), Port: types.Int64Value(port), Protocol: types.StringValue("http"),
+			Path: types.StringValue("/"), Host: host, TargetType: types.StringValue(tag),
+		}
+	}
+	null := types.StringNull()
+	got := matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target(80, null, "first"), target(80, null, "second")},
+		[]ReverseProxyServiceTargetModel{target(80, types.StringValue("100.0.0.1"), ""), target(80, types.StringValue("100.0.0.1"), "")})
+	if len(got) != 2 || got[0].TargetType.ValueString() != "first" || got[1].TargetType.ValueString() != "second" {
+		t.Errorf("duplicates: expected pairs in list order, found %v", got)
+	}
+	got = matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target(80, types.StringValue("10.0.0.1"), "A"), target(80, types.StringValue("10.0.0.2"), "B")},
+		[]ReverseProxyServiceTargetModel{target(81, types.StringValue("10.0.0.2"), "")})
+	if len(got) != 1 || got[0].TargetType.ValueString() != "B" {
+		t.Errorf("moved port: expected the survivor to pair with B, found %v", got)
+	}
+}
+
+// A subnet target keeps the host the server has, so a host changed outside
+// Terraform shows; among equal targets the same position pairs.
+func Test_preserveTargetPlanValues_subnetHostAndPosition(t *testing.T) {
+	ctx := context.Background()
+	target := func(typ string, path types.String, host, timeout string) ReverseProxyServiceTargetModel {
+		opts := types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes)
+		if timeout != "" {
+			attrs := map[string]attr.Value{}
+			for name, at := range (ReverseProxyTargetOptionsModel{}).TFType().AttrTypes {
+				switch at {
+				case types.BoolType:
+					attrs[name] = types.BoolNull()
+				case types.StringType:
+					attrs[name] = types.StringNull()
+				default:
+					attrs[name] = types.MapNull(types.StringType)
+				}
+			}
+			attrs["request_timeout"] = types.StringValue(timeout)
+			opts = types.ObjectValueMust(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes, attrs)
+		}
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("x"), TargetType: types.StringValue(typ), Port: types.Int64Value(80),
+			Protocol: types.StringValue("http"), Enabled: types.BoolValue(true), Path: path,
+			Host: types.StringValue(host), AccessAction: types.StringValue("inherit"), Options: opts,
+		}
+	}
+	list := func(ts ...ReverseProxyServiceTargetModel) types.List {
+		l, _ := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), ts)
+		return l
+	}
+	root := types.StringValue("/")
+	got, d := preserveTargetPlanValues(ctx,
+		list(target("subnet", root, "10.0.0.1", ""), target("subnet", root, "10.0.0.2", "")),
+		list(target("subnet", root, "10.0.0.3", ""), target("subnet", root, "10.0.0.4", "")))
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	var out []ReverseProxyServiceTargetModel
+	got.ElementsAs(ctx, &out, false)
+	if out[0].Host.ValueString() != "10.0.0.3" || out[1].Host.ValueString() != "10.0.0.4" {
+		t.Errorf("subnet hosts changed outside Terraform must show, found %s, %s", out[0].Host.ValueString(), out[1].Host.ValueString())
+	}
+	// Create: the first path left out (unknown), the second "/", both on one
+	// peer; the API answers in request order.
+	got, d = preserveTargetPlanValues(ctx,
+		list(target("peer", types.StringUnknown(), "", "5s"), target("peer", root, "", "10s")),
+		list(target("peer", types.StringNull(), "100.0.0.1", "5s"), target("peer", root, "100.0.0.1", "10s")))
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	got.ElementsAs(ctx, &out, false)
+	timeout := func(m ReverseProxyServiceTargetModel) string {
+		v, _ := m.Options.Attributes()["request_timeout"].(types.String)
+		return v.ValueString()
+	}
+	if timeout(out[0]) != "5s" || timeout(out[1]) != "10s" {
+		t.Errorf("options must stay with their own target, found %s, %s", timeout(out[0]), timeout(out[1]))
+	}
+}
+
+// After an earlier target was removed outside Terraform, equal survivors keep
+// their relative order.
+func Test_matchPlanTargets_removalKeepsRelativeOrder(t *testing.T) {
+	target := func(id, tag string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue(id), Port: types.Int64Value(80), Protocol: types.StringValue("http"),
+			Path: types.StringValue("/"), Host: types.StringNull(), TargetType: types.StringValue(tag),
+		}
+	}
+	got := matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target("a", "A"), target("p", "B"), target("p", "C")},
+		[]ReverseProxyServiceTargetModel{target("p", ""), target("p", "")})
+	if len(got) != 2 || got[0].TargetType.ValueString() != "B" || got[1].TargetType.ValueString() != "C" {
+		t.Errorf("expected B, C in order, found %v", got)
+	}
+}
+
+// Planned options keep their spelling where they mean the server's value and
+// take the server's value where they do not.
+func Test_reconcileOptions(t *testing.T) {
+	optsType := ReverseProxyTargetOptionsModel{}.TFType()
+	options := func(timeout, idle types.String, skip types.Bool) types.Object {
+		attrs := map[string]attr.Value{}
+		for name, typ := range optsType.AttrTypes {
+			switch typ {
+			case types.BoolType:
+				attrs[name] = types.BoolNull()
+			case types.StringType:
+				attrs[name] = types.StringNull()
+			default:
+				attrs[name] = types.MapNull(types.StringType)
+			}
+		}
+		attrs["request_timeout"], attrs["session_idle_timeout"], attrs["skip_tls_verify"] = timeout, idle, skip
+		return types.ObjectValueMust(optsType.AttrTypes, attrs)
+	}
+	s, n := types.StringValue, types.StringNull()
+	got, d := reconcileOptions(options(s("2m"), s("5s"), types.BoolValue(false)), options(s("2m0s"), s("10s"), types.BoolNull()))
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	a := got.Attributes()
+	if !a["request_timeout"].Equal(s("2m")) {
+		t.Errorf("an equal duration keeps its planned spelling, found %v", a["request_timeout"])
+	}
+	if !a["session_idle_timeout"].Equal(s("10s")) {
+		t.Errorf("a different duration takes the server value, found %v", a["session_idle_timeout"])
+	}
+	if !a["skip_tls_verify"].Equal(types.BoolValue(false)) {
+		t.Errorf("a planned false stays while the server has none, found %v", a["skip_tls_verify"])
+	}
+	got, _ = reconcileOptions(options(s("5s"), n, types.BoolValue(true)), types.ObjectNull(optsType.AttrTypes))
+	if !got.IsNull() {
+		t.Errorf("with no options on the server, options that set more than defaults must read as null, found %v", got)
+	}
+	got, _ = reconcileOptions(options(n, n, types.BoolValue(false)), types.ObjectNull(optsType.AttrTypes))
+	if got.IsNull() || !got.Attributes()["skip_tls_verify"].Equal(types.BoolValue(false)) {
+		t.Errorf("options that set only defaults stay as planned, found %v", got)
+	}
 }
