@@ -89,6 +89,10 @@ func Test_SpecConformance(t *testing.T) {
 					if prop.ref != child {
 						t.Errorf("%s: %s refers to schema %q, not the flattened %q; update specResources", rm.typeName, key, prop.ref, child)
 					}
+					if prop.inline != nil {
+						// Members beside the reference would be checked nowhere.
+						t.Errorf("%s: flattened %s has members beside its reference to %q; model them or update specResources", rm.typeName, key, child)
+					}
 					if !rm.checks(child) {
 						t.Errorf("%s: flattened schema %s is not checked; add it to specResources", rm.typeName, child)
 					}
@@ -371,7 +375,8 @@ func (s openAPISpec) property(d schemaDoc, depth int) (specProperty, bool) {
 		}
 		out.items, out.inline, out.array = item.ref, item.inline, true
 	}
-	if len(d.Properties) > 0 || (len(d.AllOf) > 1 && objectParts(d.AllOf)) {
+	if len(d.Properties) > 0 || (len(d.AllOf) > 1 && objectParts(d.AllOf)) ||
+		(d.Ref != "" && len(d.AllOf) > 0 && objectParts(d.AllOf)) {
 		// An inline object, or a composition of objects: its members are the
 		// union of every part, which propertiesOf walks.
 		inline := d
@@ -615,6 +620,10 @@ schemas:
               properties:
                 h: {type: string}
           twoRefs: {$ref: '#/components/schemas/Child'}
+          refAndAllOf:
+            $ref: '#/components/schemas/Child'
+            allOf:
+              - $ref: '#/components/schemas/Other'
   Other:
     type: object
     properties:
@@ -664,6 +673,8 @@ schemas:
 		"itemsRefAndSiblings": {[]string{"a", "h"}, true},
 		// Two allOf parts referring to different components.
 		"twoRefs": {[]string{"a", "o"}, false},
+		// A direct reference beside a single allOf part.
+		"refAndAllOf": {[]string{"a", "o"}, false},
 	}
 	for name, w := range inline {
 		got := props[name]
