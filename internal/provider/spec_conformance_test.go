@@ -526,7 +526,9 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 	if a.children == nil {
 		return
 	}
-	label, props, ok := key, map[string]specProperty(nil), true
+	label := key
+	var props map[string]specProperty
+	var ok bool
 	switch {
 	case prop.ref != "":
 		label = prop.ref
