@@ -27,7 +27,7 @@ resource "netbird_dns_zone" "internal" {
 
 ### Required
 
-- `domain` (String) Zone domain (FQDN)
+- `domain` (String) Zone domain (FQDN). The server does not change the domain of a zone, so a new domain replaces the zone; its records are replaced with it, and their names have to move to the new domain too.
 - `name` (String) DNS Zone name identifier
 
 ### Optional

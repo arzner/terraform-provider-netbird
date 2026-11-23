@@ -66,6 +66,9 @@ it is based on.
 
 ### Fixed
 
+- `netbird_dns_zone`: changing `domain` replaces the zone, and its records with it, instead of
+  planning an update the server refuses (#57; upstream
+  [#188](https://github.com/netbirdio/terraform-provider-netbird/issues/188)).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the

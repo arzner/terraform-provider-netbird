@@ -69,9 +69,10 @@ func (r *DNSZone) Schema(ctx context.Context, req resource.SchemaRequest, resp *
 				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"domain": schema.StringAttribute{
-				MarkdownDescription: "Zone domain (FQDN)",
+				MarkdownDescription: "Zone domain (FQDN). The server does not change the domain of a zone, so a new domain replaces the zone; its records are replaced with it, and their names have to move to the new domain too.",
 				Required:            true,
 				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
+				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"enabled": schema.BoolAttribute{
 				MarkdownDescription: "DNS Zone status",

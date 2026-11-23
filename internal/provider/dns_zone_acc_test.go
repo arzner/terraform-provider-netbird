@@ -3,11 +3,14 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 func Test_DNSZone_Create(t *testing.T) {
@@ -94,6 +97,53 @@ func Test_DNSZone_DataSource(t *testing.T) {
 					resource.TestCheckResourceAttr(dsNameFull, "domain", "datasource.local"),
 					resource.TestCheckResourceAttr(dsNameFull, "enabled", "true"),
 					resource.TestCheckResourceAttr(dsNameFull, "enable_search_domain", "false"),
+				),
+			},
+		},
+	})
+}
+
+// Test_DNSZone_DomainReplaces: the server refuses to change a zone's domain,
+// so a new domain replaces the zone, and its records with it.
+func Test_DNSZone_DomainReplaces(t *testing.T) {
+	testE2E(t)
+	zoneName := "z" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rName := "r" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	zoneFull := "netbird_dns_zone." + zoneName
+	recordFull := "netbird_dns_record." + rName
+	var firstZone, zoneID string
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().DNSZones.GetZone, &zoneID),
+		Steps: []resource.TestStep{
+			{
+				Config: testDNSRecordResource(zoneName, "before.local", rName, "www", "A", "192.168.1.1", 300),
+				Check:  testRecordID(zoneFull, &firstZone),
+			},
+			{
+				Config: testDNSRecordResource(zoneName, "after.local", rName, "www", "A", "192.168.1.1", 300),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(zoneFull, plancheck.ResourceActionDestroyBeforeCreate),
+					plancheck.ExpectResourceAction(recordFull, plancheck.ResourceActionDestroyBeforeCreate),
+				}},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(zoneFull, &zoneID),
+					resource.TestCheckResourceAttr(zoneFull, "domain", "after.local"),
+					resource.TestCheckResourceAttr(recordFull, "name", "www.after.local"),
+					func(s *terraform.State) error {
+						if zoneID == firstZone {
+							return fmt.Errorf("the zone kept its ID %s; expected a replacement", zoneID)
+						}
+						zone, err := testClient().DNSZones.GetZone(context.Background(), zoneID)
+						if err != nil {
+							return err
+						}
+						if zone.Domain != "after.local" {
+							return fmt.Errorf("domain on the server: expected after.local, found %s", zone.Domain)
+						}
+						return testCheckGone(testClient().DNSZones.GetZone, &firstZone)(s)
+					},
 				),
 			},
 		},
