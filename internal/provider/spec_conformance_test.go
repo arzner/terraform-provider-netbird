@@ -35,6 +35,7 @@ func Test_SpecConformance(t *testing.T) {
 
 	seenAllowlist := map[string]bool{}
 	checked := map[string]bool{}
+	walk := &specWalk{t: t, spec: spec, seen: seenAllowlist, checked: checked, expanded: map[string]bool{}}
 	for _, rm := range specResources {
 		attrs := resourceAttributes(t, rm.resource())
 		for _, sm := range rm.schemas {
@@ -83,7 +84,7 @@ func Test_SpecConformance(t *testing.T) {
 				if prop.readOnly && a.configurable {
 					t.Errorf("%s: %s is read-only in the spec but %q is configurable", rm.typeName, key, a.name)
 				}
-				checkNested(t, spec, rm.typeName, prop, a, seenAllowlist, checked, 1)
+				walk.checkNested(rm.typeName, key, prop, a, 1)
 			}
 		}
 	}
@@ -97,8 +98,8 @@ func Test_SpecConformance(t *testing.T) {
 		}
 	}
 	for key := range specNestedFlattened {
-		if !checked[key] {
-			t.Errorf("specNestedFlattened lists %s, which no checked schema has any more; remove it", key)
+		if !walk.expanded[key] {
+			t.Errorf("specNestedFlattened lists %s, which no nested check applied; remove it or fix it", key)
 		}
 	}
 	for key := range specRenamed {
@@ -225,8 +226,12 @@ func attrName(key, property string) string {
 type specProperty struct {
 	readOnly bool
 	ref      string
-	// items is the component an array property's items refer to.
+	// items is the component an array property's items refer to, directly or
+	// through a single allOf part.
 	items string
+	// inline is the schema of an inline object, or of an array's inline item
+	// object, with no component name of its own.
+	inline *schemaDoc
 }
 
 type openAPISpec struct {
@@ -283,8 +288,16 @@ func (s openAPISpec) property(d schemaDoc, depth int) (specProperty, bool) {
 		return specProperty{}, false
 	}
 	out := specProperty{readOnly: d.ReadOnly}
-	if d.Items != nil && d.Items.Ref != "" {
-		out.items = refName(d.Items.Ref)
+	if d.Items != nil {
+		item, ok := s.property(*d.Items, depth+1)
+		if !ok {
+			return specProperty{}, false
+		}
+		out.items, out.inline = item.ref, item.inline
+	}
+	if len(d.Properties) > 0 {
+		inline := d
+		out.inline = &inline
 	}
 	if d.Ref != "" {
 		inner, ok := s.schemas[refName(d.Ref)]
@@ -307,6 +320,9 @@ func (s openAPISpec) property(d schemaDoc, depth int) (specProperty, bool) {
 		out.readOnly = out.readOnly || p.readOnly
 		if len(d.AllOf) == 1 && out.ref == "" {
 			out.ref = p.ref
+			if out.items == "" && out.inline == nil {
+				out.items, out.inline = p.items, p.inline
+			}
 		}
 	}
 	return out, true
@@ -318,6 +334,11 @@ func (s openAPISpec) properties(name string) (map[string]specProperty, bool) {
 	if !ok {
 		return nil, false
 	}
+	return s.propertiesOf(doc)
+}
+
+// propertiesOf resolves the properties of a schema, named or inline.
+func (s openAPISpec) propertiesOf(doc schemaDoc) (map[string]specProperty, bool) {
 	out := map[string]specProperty{}
 	var walk func(d schemaDoc, depth int) bool
 	walk = func(d schemaDoc, depth int) bool {
@@ -349,6 +370,9 @@ func (s openAPISpec) properties(name string) (map[string]specProperty, bool) {
 				}
 				if prop.items == "" {
 					prop.items = prev.items
+				}
+				if prop.inline == nil {
+					prop.inline = prev.inline
 				}
 			}
 			out[p] = prop
@@ -418,6 +442,21 @@ schemas:
             type: array
             items:
               $ref: '#/components/schemas/Child'
+          composedChildren:
+            type: array
+            items:
+              allOf:
+                - $ref: '#/components/schemas/Child'
+          inlineObject:
+            type: object
+            properties:
+              b: {type: string}
+          inlineItems:
+            type: array
+            items:
+              type: object
+              properties:
+                c: {type: string}
 `
 	if err := yaml.Unmarshal([]byte(fixture), &doc); err != nil {
 		t.Fatal(err)
@@ -428,15 +467,29 @@ schemas:
 		t.Fatal("Request did not resolve")
 	}
 	want := map[string]specProperty{
-		"shared":       {readOnly: true},
-		"child":        {ref: "Child"},
-		"wrapped":      {ref: "Child"},
-		"computed":     {readOnly: true, ref: "ReadOnlyThing"},
-		"composed":     {readOnly: true},
-		"plain":        {},
-		"chained":      {readOnly: true, ref: "Alias"},
-		"chainedTwice": {readOnly: true, ref: "AliasOfAlias"},
-		"children":     {items: "Child"},
+		"shared":           {readOnly: true},
+		"child":            {ref: "Child"},
+		"wrapped":          {ref: "Child"},
+		"computed":         {readOnly: true, ref: "ReadOnlyThing"},
+		"composed":         {readOnly: true},
+		"plain":            {},
+		"chained":          {readOnly: true, ref: "Alias"},
+		"chainedTwice":     {readOnly: true, ref: "AliasOfAlias"},
+		"children":         {items: "Child"},
+		"composedChildren": {items: "Child"},
+	}
+	inline := map[string]string{"inlineObject": "b", "inlineItems": "c"}
+	for name, member := range inline {
+		got := props[name]
+		if got.inline == nil {
+			t.Errorf("%s: expected an inline schema, found %+v", name, got)
+			continue
+		}
+		members, ok := s.propertiesOf(*got.inline)
+		if _, has := members[member]; !ok || !has || len(members) != 1 {
+			t.Errorf("%s: expected the inline member %s, found %v", name, member, members)
+		}
+		want[name] = specProperty{inline: got.inline}
 	}
 	for name, w := range want {
 		if got := props[name]; got != w {
@@ -451,40 +504,68 @@ schemas:
 	}
 }
 
-// checkNested compares the members of the component a nested attribute or
-// block models (prop.ref for an object, prop.items for an array of objects)
-// with the attribute's own members, with the same rules as the top level.
-func checkNested(t *testing.T, spec openAPISpec, typeName string, prop specProperty, a attrInfo, seen, checked map[string]bool, depth int) {
-	t.Helper()
-	component := prop.ref
-	if component == "" {
-		component = prop.items
-	}
-	if a.children == nil || component == "" || depth > 6 {
+// specWalk carries the bookkeeping of one Test_SpecConformance run.
+type specWalk struct {
+	t        *testing.T
+	spec     openAPISpec
+	seen     map[string]bool // specUnmodelled entries that matched
+	checked  map[string]bool // every property key compared
+	expanded map[string]bool // specNestedFlattened entries that were applied
+}
+
+// specMaxDepth bounds the nested walk; the provider's own schemas are far
+// shallower, so reaching it means a cycle and fails the test.
+const specMaxDepth = 12
+
+// checkNested compares the members of the schema a nested attribute or block
+// models (a component, an array's item component, or an inline object) with
+// the attribute's own members, with the same rules as the top level. A
+// read-only parent makes every member read-only.
+func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrInfo, depth int) {
+	w.t.Helper()
+	if a.children == nil {
 		return
 	}
-	props, ok := spec.properties(component)
+	label, props, ok := key, map[string]specProperty(nil), true
+	switch {
+	case prop.ref != "":
+		label = prop.ref
+		props, ok = w.spec.properties(prop.ref)
+	case prop.items != "":
+		label = prop.items
+		props, ok = w.spec.properties(prop.items)
+	case prop.inline != nil:
+		props, ok = w.spec.propertiesOf(*prop.inline)
+	default:
+		return
+	}
 	if !ok {
-		t.Errorf("%s: nested schema %s of %q is not in the spec", typeName, component, a.name)
+		w.t.Errorf("%s: nested schema %s of %q does not resolve in the spec", typeName, label, a.name)
+		return
+	}
+	if depth > specMaxDepth {
+		w.t.Errorf("%s: nested walk reached depth %d at %s; a cycle in the spec or in specNestedFlattened?", typeName, depth, label)
 		return
 	}
 	for _, name := range sortedKeys(props) {
 		p := props[name]
-		key := component + "." + name
-		checked[key] = true
+		p.readOnly = p.readOnly || prop.readOnly
+		key := label + "." + name
+		w.checked[key] = true
 		if specNestedFlattened[key] {
 			// The provider spreads this array's item members over the parent.
-			if p.items == "" {
-				t.Errorf("%s: %s is listed in specNestedFlattened but is not an array of objects", typeName, key)
+			if p.items == "" && p.inline == nil {
+				w.t.Errorf("%s: %s is listed in specNestedFlattened but is not an array of objects", typeName, key)
 				continue
 			}
-			checkNested(t, spec, typeName, specProperty{items: p.items}, a, seen, checked, depth+1)
+			w.expanded[key] = true
+			w.checkNested(typeName, key, specProperty{readOnly: p.readOnly, items: p.items, inline: p.inline}, a, depth+1)
 			continue
 		}
 		if _, listed := specUnmodelled[key]; listed {
-			seen[key] = true
+			w.seen[key] = true
 			if c, modelled := a.children[attrName(key, name)]; modelled {
-				t.Errorf("%s: %s is listed in specUnmodelled but modelled by %q; remove it from the list", typeName, key, c.name)
+				w.t.Errorf("%s: %s is listed in specUnmodelled but modelled by %q; remove it from the list", typeName, key, c.name)
 			}
 			continue
 		}
@@ -493,12 +574,12 @@ func checkNested(t *testing.T, spec openAPISpec, typeName string, prop specPrope
 			continue
 		}
 		if !modelled {
-			t.Errorf("%s: %s (NetBird %s, inside %q) is neither modelled nor listed in specUnmodelled", typeName, key, spec.version, a.name)
+			w.t.Errorf("%s: %s (NetBird %s, inside %q) is neither modelled nor listed in specUnmodelled", typeName, key, w.spec.version, a.name)
 			continue
 		}
 		if p.readOnly && c.configurable {
-			t.Errorf("%s: %s is read-only in the spec but %q is configurable", typeName, key, c.name)
+			w.t.Errorf("%s: %s is read-only in the spec but %q is configurable", typeName, key, c.name)
 		}
-		checkNested(t, spec, typeName, p, c, seen, checked, depth+1)
+		w.checkNested(typeName, key, p, c, depth+1)
 	}
 }

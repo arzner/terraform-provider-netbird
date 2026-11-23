@@ -10,6 +10,8 @@ var specRenamed = map[string]string{
 	"CreateSetupKeyRequest.expires_in":      "expiry_seconds",
 	"PersonalAccessTokenRequest.expires_in": "expiration_days",
 	"PolicyUpdate.rules":                    "rule",
+	"PolicyRuleUpdate.sourceResource":       "source_resource",
+	"PolicyRuleUpdate.destinationResource":  "destination_resource",
 
 	// The OS version check flattens each {min_version} or {min_kernel_version}
 	// object into one string attribute.
@@ -32,8 +34,6 @@ var specNestedFlattened = map[string]bool{
 // reviewer can check; a property that later gets modelled or leaves the spec
 // fails Test_SpecConformance until it is removed here.
 var specUnmodelled = map[string]string{
-	"PolicyRuleUpdate.sourceResource":      "not modelled yet (#44)",
-	"PolicyRuleUpdate.destinationResource": "not modelled yet (#44)",
 	"AccessRestrictions.crowdsec_mode":     "not modelled yet (#45); server default off",
 	"ServiceTarget.access_action":          "not modelled yet (#45); server default inherit",
 	"ServiceTargetOptions.direct_upstream": "not modelled yet (#45); server default false",
