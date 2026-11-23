@@ -56,7 +56,7 @@ func (d *IdentityProviderDataSource) Schema(ctx context.Context, req datasource.
 				Computed:            true,
 			},
 			"type": schema.StringAttribute{
-				MarkdownDescription: "Type of identity provider (entra, google, microsoft, oidc, okta, pocketid, zitadel)",
+				MarkdownDescription: "Type of identity provider (adfs, authentik, entra, google, keycloak, microsoft, oidc, okta, pocketid, zitadel)",
 				Computed:            true,
 			},
 			"client_id": schema.StringAttribute{

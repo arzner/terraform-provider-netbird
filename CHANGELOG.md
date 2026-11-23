@@ -66,6 +66,11 @@ it is based on.
 
 ### Fixed
 
+- `netbird_identity_provider`: the types `authentik`, `keycloak` and `adfs`, which the server
+  accepts, are no longer refused at plan time; the accepted list is checked against the server
+  source at the pinned version (#54; upstream
+  [#163](https://github.com/netbirdio/terraform-provider-netbird/issues/163),
+  [#255](https://github.com/netbirdio/terraform-provider-netbird/issues/255)).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the

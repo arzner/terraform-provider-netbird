@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -104,6 +105,33 @@ func Test_IdentityProvider_Update(t *testing.T) {
 					},
 				),
 			},
+		},
+	})
+}
+
+// Test_IdentityProvider_TypesAddedInNetBird covers a type the provider did
+// not accept before (keycloak; authentik and adfs behave the same on the
+// server): it is created, read back and imported, and the server gives the
+// provider a type-prefixed ID.
+func Test_IdentityProvider_TypesAddedInNetBird(t *testing.T) {
+	testE2E(t)
+	rName := "idp" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_identity_provider." + rName
+	var createdID string
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().IdentityProviders.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: testIdentityProviderResource(rName, "keycloak", "keycloak", "client-id", "client-secret", "https://oauth.id.jumpcloud.com/"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "type", "keycloak"),
+					resource.TestMatchResourceAttr(rNameFull, "id", regexp.MustCompile(`^keycloak-`)),
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"client_secret"}},
 		},
 	})
 }

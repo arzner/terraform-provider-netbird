@@ -64,9 +64,9 @@ func (r *IdentityProvider) Schema(ctx context.Context, req resource.SchemaReques
 				Required:            true,
 			},
 			"type": schema.StringAttribute{
-				MarkdownDescription: "Type of identity provider (entra, google, microsoft, oidc, okta, pocketid, zitadel)",
+				MarkdownDescription: "Type of identity provider (adfs, authentik, entra, google, keycloak, microsoft, oidc, okta, pocketid, zitadel). google and microsoft have a built-in issuer; the others need `issuer`.",
 				Required:            true,
-				Validators:          []validator.String{stringvalidator.OneOf("entra", "google", "microsoft", "oidc", "okta", "pocketid", "zitadel")},
+				Validators:          []validator.String{stringvalidator.OneOf(identityProviderTypes...)},
 			},
 			"client_id": schema.StringAttribute{
 				MarkdownDescription: "OAuth2 client ID",
@@ -207,3 +207,8 @@ func (r *IdentityProvider) Delete(ctx context.Context, req resource.DeleteReques
 func (r *IdentityProvider) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
+
+// identityProviderTypes are the types the management server accepts (v0.83,
+// v0.82: IdentityProviderType.IsValid). Test_identityProviderTypes checks
+// them against the server source at the pinned version.
+var identityProviderTypes = []string{"adfs", "authentik", "entra", "google", "keycloak", "microsoft", "oidc", "okta", "pocketid", "zitadel"}
