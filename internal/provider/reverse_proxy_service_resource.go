@@ -1012,6 +1012,9 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 			if p.TargetId.IsNull() || p.TargetId.IsUnknown() {
 				continue
 			}
+			if !byPath && !p.Path.IsUnknown() {
+				continue // the unknown-path round pairs only targets whose path is unknown
+			}
 			candidates := byID[p.TargetId.ValueString()]
 			if byPath {
 				if p.Path.IsUnknown() {

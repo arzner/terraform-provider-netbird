@@ -1351,6 +1351,15 @@ resource "netbird_reverse_proxy_service" "l4" {
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 			{
+				// Values outside the enums are refused at plan time.
+				Config:      config(svc{adminAction: `access_action = "deny"`, adminPort: 8081, crowdsec: crowdsec}),
+				ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Match.*targets\[1\]\.access_action`),
+			},
+			{
+				Config:      config(svc{adminAction: `access_action = "block"`, adminPort: 8081, crowdsec: "strict"}),
+				ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Match.*access_restrictions\.crowdsec_mode`),
+			},
+			{
 				// A path left out is kept from state when nothing changes, so it
 				// is not a second target at "/".
 				Config:   config(svc{adminAction: `access_action = "block"`, adminPort: 8081, crowdsec: crowdsec, adminNoPath: true}),
