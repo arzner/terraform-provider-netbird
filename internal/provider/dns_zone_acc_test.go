@@ -232,6 +232,35 @@ resource "netbird_group" "zone" {
 					},
 				),
 			},
+			{
+				// Only the domain changes and the group, known now, stays: the
+				// plan looks it up, and the new zone holds it.
+				Config: strings.Replace(testDNSRecordResource(zoneName, "again.local", rName, "www", "A", "192.168.1.1", 300),
+					fmt.Sprintf("distribution_groups = [%q]", e2eGroupAllID()), "distribution_groups = [netbird_group.zone.id]", 1) + fmt.Sprintf(`
+resource "netbird_group" "zone" {
+  name = %q
+}
+`, zoneName+"-group"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(zoneFull, plancheck.ResourceActionDestroyBeforeCreate),
+					plancheck.ExpectResourceAction("netbird_group.zone", plancheck.ResourceActionNoop),
+				}},
+				Check: func(s *terraform.State) error {
+					id := s.RootModule().Resources[zoneFull].Primary.ID
+					if id == zoneID {
+						return fmt.Errorf("the zone kept its ID %s; expected a replacement", id)
+					}
+					zone, err := testClient().DNSZones.GetZone(context.Background(), id)
+					if err != nil {
+						return err
+					}
+					groupID := s.RootModule().Resources["netbird_group.zone"].Primary.ID
+					if zone.Domain != "again.local" || !slices.Equal(zone.DistributionGroups, []string{groupID}) {
+						return fmt.Errorf("new zone on the server: expected again.local with [%s], found %s with %v", groupID, zone.Domain, zone.DistributionGroups)
+					}
+					return nil
+				},
+			},
 			{ResourceName: zoneFull, ImportState: true, ImportStateVerify: true},
 		},
 	})
