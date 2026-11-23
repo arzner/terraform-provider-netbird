@@ -5,14 +5,14 @@ package provider
 import (
 	"context"
 	"fmt"
-	"github.com/netbirdio/netbird/shared/management/http/api"
 	"regexp"
-	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/netbirdio/netbird/shared/management/http/api"
 )
 
 func Test_ReverseProxyClusters_DataSource(t *testing.T) {
@@ -940,20 +940,40 @@ func testAccountSettingsPeerExpose(enabled bool, groupID string) string {
 }
 
 // Test_ReverseProxyService_Private creates a NetBird-only service for a group,
-// checks the server, imports it, makes it public again, and expects the
-// plan-time error for a private service with bearer auth.
+// checks the server and the data source, imports it, expects the plan-time
+// errors of the private-service contract, stops an update whose access
+// settings changed on the server after the plan, and makes the service public
+// again.
 func Test_ReverseProxyService_Private(t *testing.T) {
 	cluster := testRequireProxyCluster(t)
 	rName := "s" + acctest.RandStringFromCharSet(8, acctest.CharSetAlpha)
 	domain := rName + "." + cluster.Address
 	rNameFull := "netbird_reverse_proxy_service." + rName
+	dsName := "data.netbird_reverse_proxy_service.test"
 	var createdID string
 	peerID := testPeerID(t, "peer1")
 	groupID := e2eGroupAllID()
-	config := func(private bool, bearer bool) string {
+	type svc struct {
+		private string // HCL value; empty leaves the attribute out
+		groups  string // HCL value; empty leaves the attribute out
+		bearer  bool
+		port    int
+		extra   string
+	}
+	config := func(c svc) string {
+		if c.port == 0 {
+			c.port = 8080
+		}
+		lines := ""
+		if c.private != "" {
+			lines += "\n  private       = " + c.private
+		}
+		if c.groups != "" {
+			lines += "\n  access_groups = " + c.groups
+		}
 		auth := `
   auth = {}`
-		if bearer {
+		if c.bearer {
 			auth = fmt.Sprintf(`
   auth = {
     bearer_auth = {
@@ -966,19 +986,25 @@ func Test_ReverseProxyService_Private(t *testing.T) {
 resource "netbird_reverse_proxy_service" %q {
   name          = %q
   domain        = %q
-  mode          = "http"
-  private       = %t
-  access_groups = [%q]
+  mode          = "http"%s
 
   targets = [{
     target_id   = %q
     target_type = "peer"
-    port        = 8080
+    port        = %d
     protocol    = "http"
   }]%s
-}`, rName, rName, domain, private, groupID, peerID, auth)
+}
+
+data "netbird_reverse_proxy_service" "test" {
+  id = netbird_reverse_proxy_service.%s.id
+}
+%s`, rName, rName, domain, lines, peerID, c.port, auth, rName, c.extra)
 	}
-	onServer := func(private bool) resource.TestCheckFunc {
+	group := fmt.Sprintf("[%q]", groupID)
+	otherGroupID := e2eGroupNotAllID()
+	twoGroups := fmt.Sprintf("[%q, %q]", groupID, otherGroupID)
+	onServer := func(private bool, groups []string, port int) resource.TestCheckFunc {
 		return func(s *terraform.State) error {
 			svc, err := testClient().ReverseProxyServices.Get(context.Background(), s.RootModule().Resources[rNameFull].Primary.Attributes["id"])
 			if err != nil {
@@ -987,10 +1013,32 @@ resource "netbird_reverse_proxy_service" %q {
 			if got := svc.Private != nil && *svc.Private; got != private {
 				return fmt.Errorf("private on the server: expected %t, found %t", private, got)
 			}
-			if private && (svc.AccessGroups == nil || len(*svc.AccessGroups) != 1 || (*svc.AccessGroups)[0] != groupID) {
-				return fmt.Errorf("access groups on the server: expected [%s], found %v", groupID, svc.AccessGroups)
+			var got []string
+			if svc.AccessGroups != nil {
+				got = *svc.AccessGroups
+			}
+			if !sameStrings(got, groups) {
+				return fmt.Errorf("access groups on the server: expected %v, found %v", groups, got)
+			}
+			if len(svc.Targets) != 1 || svc.Targets[0].Port != port {
+				return fmt.Errorf("target port on the server: expected %d, found %v", port, svc.Targets)
 			}
 			return nil
+		}
+	}
+	outside := func(change func(*api.ServiceRequest)) resource.ConfigPlanChecks {
+		return resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+			testExpectUpdateInPlace(rNameFull), serviceChangedOutside{id: &createdID, change: change}}}
+	}
+	// onServerBefore checks, before a step, that a stopped apply wrote nothing.
+	onServerBefore := func(private bool, groups []string, port int) func() {
+		return func() {
+			check := onServer(private, groups, port)
+			if err := check(&terraform.State{Modules: []*terraform.ModuleState{{Path: []string{"root"}, Resources: map[string]*terraform.ResourceState{
+				rNameFull: {Primary: &terraform.InstanceState{Attributes: map[string]string{"id": createdID}}},
+			}}}}); err != nil {
+				t.Error(err)
+			}
 		}
 	}
 	resource.Test(t, resource.TestCase{
@@ -999,34 +1047,133 @@ resource "netbird_reverse_proxy_service" %q {
 		CheckDestroy:             testCheckGone(testClient().ReverseProxyServices.Get, &createdID),
 		Steps: []resource.TestStep{
 			{
-				Config: config(true, false),
+				Config: config(svc{private: "true", groups: group}),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					testRecordID(rNameFull, &createdID),
 					resource.TestCheckResourceAttr(rNameFull, "private", "true"),
 					resource.TestCheckResourceAttr(rNameFull, "access_groups.#", "1"),
 					resource.TestCheckResourceAttr(rNameFull, "access_groups.0", groupID),
-					onServer(true),
+					resource.TestCheckResourceAttr(dsName, "private", "true"),
+					resource.TestCheckResourceAttr(dsName, "access_groups.#", "1"),
+					resource.TestCheckResourceAttr(dsName, "access_groups.0", groupID),
+					onServer(true, []string{groupID}, 8080),
 				),
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
-			{Config: config(true, true), ExpectError: regexp.MustCompile(`Bearer auth not allowed`)},
+			{Config: config(svc{private: "true", groups: group, bearer: true}), ExpectError: regexp.MustCompile(`Bearer auth not allowed`)},
 			{
-				Config:           config(false, false),
+				// The service stays private from its state; bearer auth is still refused.
+				Config:      config(svc{groups: group, bearer: true}),
+				ExpectError: regexp.MustCompile(`Bearer auth not allowed`),
+			},
+			{Config: config(svc{private: "true", groups: "[null]"}), ExpectError: regexp.MustCompile(`(?s)access_groups.*null`)},
+			{Config: config(svc{private: "true", groups: `[""]`}), ExpectError: regexp.MustCompile(`(?s)access_groups.*must not be blank`)},
+			{Config: config(svc{private: "true", groups: `[" "]`}), ExpectError: regexp.MustCompile(`(?s)access_groups.*must not be blank`)},
+			{
+				// A new private service has no groups to keep.
+				Config: config(svc{private: "true", groups: group, extra: fmt.Sprintf(`
+resource "netbird_reverse_proxy_service" "other" {
+  name    = "%s-other"
+  domain  = "%s-other.%s"
+  mode    = "http"
+  private = true
+  targets = [{
+    target_id   = %q
+    target_type = "peer"
+    port        = 8080
+    protocol    = "http"
+  }]
+  auth = {}
+}`, rName, rName, cluster.Address, peerID)}),
+				ExpectError: regexp.MustCompile(`Access groups required`),
+			},
+			{
+				// The plan changes the port only; the service is made public
+				// on the server before the apply, so the apply stops.
+				Config:           config(svc{private: "true", groups: group, port: 8081}),
+				ConfigPlanChecks: outside(func(r *api.ServiceRequest) { off := false; r.Private = &off }),
+				ExpectError:      regexp.MustCompile(`(?s)changed after the plan.*private: true when planned, now false`),
+			},
+			{
+				// The outside change was kept; a new plan restores the configuration.
+				PreConfig: onServerBefore(false, []string{groupID}, 8080),
+				Config:    config(svc{private: "true", groups: twoGroups}),
+				Check:     onServer(true, []string{groupID, otherGroupID}, 8080),
+			},
+			{
+				// Only a group is revoked on the server after a port-only plan.
+				Config: config(svc{private: "true", groups: twoGroups, port: 8081}),
+				ConfigPlanChecks: outside(func(r *api.ServiceRequest) {
+					r.AccessGroups = &[]string{groupID}
+				}),
+				ExpectError: regexp.MustCompile(`(?s)changed after the plan.*access_groups: `),
+			},
+			{
+				PreConfig: onServerBefore(true, []string{groupID}, 8080),
+				Config:    config(svc{private: "true", groups: group}),
+				Check:     onServer(true, []string{groupID}, 8080),
+			},
+			{
+				Config:           config(svc{private: "false", groups: group}),
 				ConfigPlanChecks: updatesInPlace(rNameFull),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(rNameFull, "private", "false"),
-					onServer(false),
+					onServer(false, []string{groupID}, 8080),
 				),
 			},
 			{
 				// A public service with no access groups: the empty list stays empty.
-				Config: strings.Replace(config(false, false), fmt.Sprintf("access_groups = [%q]", groupID), "access_groups = []", 1) + fmt.Sprintf(`
-data "netbird_reverse_proxy_service" "test" {
-  id = netbird_reverse_proxy_service.%s.id
-}`, rName),
+				Config: config(svc{private: "false", groups: "[]"}),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(rNameFull, "access_groups.#", "0"),
-					resource.TestCheckResourceAttr("data.netbird_reverse_proxy_service.test", "private", "false"),
+					resource.TestCheckResourceAttr(dsName, "private", "false"),
+					resource.TestCheckResourceAttr(dsName, "access_groups.#", "0"),
+					onServer(false, nil, 8080),
+				),
+			},
+			{
+				// Imported, the cleared list reads as the applied one.
+				ResourceName: rNameFull, ImportState: true, ImportStateVerify: true,
+			},
+			{
+				// Made private with the groups left out: the empty list from
+				// state is refused at plan time.
+				Config:      config(svc{private: "true"}),
+				ExpectError: regexp.MustCompile(`Access groups required`),
+			},
+			{
+				// Both access settings left out: the service is made private
+				// on the server after the plan, so the apply stops rather
+				// than reopening it.
+				Config: config(svc{port: 8081}),
+				ConfigPlanChecks: outside(func(r *api.ServiceRequest) {
+					on := true
+					r.Private, r.AccessGroups = &on, &[]string{groupID}
+				}),
+				ExpectError: regexp.MustCompile(`(?s)changed after the plan.*private: false when planned, now true`),
+			},
+			{
+				// A new plan adopts the live settings.
+				PreConfig: onServerBefore(true, []string{groupID}, 8080),
+				Config:    config(svc{port: 8081}),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "private", "true"),
+					onServer(true, []string{groupID}, 8081),
+				),
+			},
+			{
+				// A group created in the same apply: its ID is unknown at
+				// plan time and reaches state and the server once known.
+				Config: config(svc{private: "true", groups: "[netbird_group.allowed.id]", port: 8081, extra: fmt.Sprintf(`
+resource "netbird_group" "allowed" {
+  name = "%s-allowed"
+}`, rName)}),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPair(rNameFull, "access_groups.0", "netbird_group.allowed", "id"),
+					resource.TestCheckResourceAttr(rNameFull, "access_groups.#", "1"),
+					func(s *terraform.State) error {
+						return onServer(true, []string{s.RootModule().Resources["netbird_group.allowed"].Primary.ID}, 8081)(s)
+					},
 				),
 			},
 		},
@@ -1188,4 +1335,33 @@ func normalizedPath(p *string) string {
 		return "/"
 	}
 	return *p
+}
+
+// serviceChangedOutside is a plan check that changes the service on the
+// server between plan and apply, as an operator would.
+type serviceChangedOutside struct {
+	id     *string
+	change func(*api.ServiceRequest)
+}
+
+func (c serviceChangedOutside) CheckPlan(ctx context.Context, _ plancheck.CheckPlanRequest, resp *plancheck.CheckPlanResponse) {
+	svc, err := testClient().ReverseProxyServices.Get(ctx, *c.id)
+	if err != nil {
+		resp.Error = err
+		return
+	}
+	auth := svc.Auth
+	targets := svc.Targets
+	req := api.ServiceRequest{
+		Name: svc.Name, Domain: svc.Domain, Enabled: svc.Enabled, ListenPort: svc.ListenPort,
+		PassHostHeader: svc.PassHostHeader, RewriteRedirects: svc.RewriteRedirects,
+		Private: svc.Private, AccessGroups: svc.AccessGroups,
+		AccessRestrictions: svc.AccessRestrictions, Auth: &auth, Targets: &targets,
+	}
+	if svc.Mode != nil {
+		mode := api.ServiceRequestMode(*svc.Mode)
+		req.Mode = &mode
+	}
+	c.change(&req)
+	_, resp.Error = testClient().ReverseProxyServices.Update(ctx, *c.id, req)
 }

@@ -10,14 +10,47 @@ it is based on.
 
 ### Added
 
+- `netbird_account_settings` can be imported with the ID `current`: the account of the token,
+  when the token sees exactly one account (#19).
+- `netbird_account_settings`: `metrics_push_enabled`, `auto_update_always`,
+  `peer_hostname_collision_rejected`, `agent_network_only` and `dashboard_features`, also in
+  the data source (#23). `agent_network_only = true` together with
+  `dashboard_features.agent_network = false` is rejected at plan time.
+- `netbird_posture_check`: `certificate_check` block, requiring a peer certificate that chains to
+  one of the given PEM CA certificates (iOS and Android always fail it). Entries are checked at
+  plan time with the server's own parser, and a block needs at least one. Also in the data
+  source (#26).
+- `netbird_scim`: `connector_id`, the Dex connector for setups with the embedded identity
+  provider; also in the data source (#27).
+- `netbird_peer`: `ipv6`, the peer's IPv6 overlay address; left out, the server-assigned address
+  is kept, set, the peer moves to it (canonical form only). Also in the `netbird_peer` data
+  source (#24).
 - `netbird_reverse_proxy_service`: `private` and `access_groups` for NetBird-only services
   (reachable over the tunnel by the given groups, with a server-generated access policy);
-  the private-service rules (HTTP mode, at least one group, no bearer auth) are checked at
-  plan time. Also in the data source (#25).
+  the private-service rules (HTTP mode, at least one group, no blank group IDs, no bearer
+  auth) are checked at plan time, also for a service that stays private from its state. An
+  update stops before writing when `private` or `access_groups`, shown unchanged by the plan,
+  changed on the server after the plan. Peers reach a private service only through a proxy with
+  private access enabled (`NB_PROXY_PRIVATE=true`). Also in the data source (#25).
 - `netbird_reverse_proxy_service`: `access_restrictions.crowdsec_mode` (CrowdSec IP reputation),
   `targets[].access_action` (`inherit`, `bypass` or `block` for a target's path; left out, the
   server keeps the current action) and `targets[].options.direct_upstream` (dial through the
   proxy host's network). Also in the data source (#45).
+
+### Changed
+
+- NetBird 0.82 is supported too: the acceptance suite also runs against the newest release of the
+  previous NetBird minor line (v0.82.1 today), and passes with the 0.1.0 provider code (#32).
+- `netbird_account_settings` sends only the settings the configuration sets; the others keep
+  the server's current values even if they changed between plan and apply (previously the
+  planned prior state was sent back).
+- `netbird_peer` updates start from the live peer and change only the attributes the
+  configuration sets. When a setting the plan shows unchanged changed after the plan, an
+  in-place update stops before writing anything and asks for a new plan (#74 extends this to
+  the other resources). An
+  address the server refuses (outside the account range, peer not in an IPv6-enabled group,
+  already in use) changes nothing else, and changing login or inactivity expiration on a peer
+  added with a setup key is refused before anything is sent.
 
 ## [0.1.0] - 2026-11-23
 
