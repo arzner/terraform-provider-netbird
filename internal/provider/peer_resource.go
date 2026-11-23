@@ -281,9 +281,15 @@ func (r *Peer) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		return
 	}
 
-	peer, err = r.applyPeer(ctx, peer, data, config)
+	peer, partial, err := r.applyPeer(ctx, peer, data, config)
 	if err != nil {
-		resp.Diagnostics.AddError("Error updating Peer", err.Error())
+		// Not saved: a resource that failed to create is tainted, and replacing
+		// it would deregister the device. The next apply adopts it again.
+		detail := err.Error()
+		if partial {
+			detail = "The peer's other settings were updated, then its IPv6 address was refused: " + detail
+		}
+		resp.Diagnostics.AddError("Error updating Peer", detail)
 		return
 	}
 
@@ -354,8 +360,18 @@ func (r *Peer) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		resp.Diagnostics.AddError("Error getting Peer", err.Error())
 		return
 	}
-	peer, err := r.applyPeer(ctx, live, data, config)
+	peer, partial, err := r.applyPeer(ctx, live, data, config)
 	if err != nil {
+		if partial {
+			// Record what took effect, so the next plan starts from it.
+			mapped := peerAPIToTerraform(ctx, peer, &data)
+			resp.Diagnostics.Append(mapped...)
+			if !mapped.HasError() {
+				resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+			}
+			resp.Diagnostics.AddError("Error updating Peer", "The peer's other settings were updated, then its IPv6 address was refused: "+err.Error())
+			return
+		}
 		resp.Diagnostics.AddError("Error updating Peer", err.Error())
 		return
 	}
@@ -445,23 +461,33 @@ func peerRequest(live *api.Peer, plan, config PeerModel) (api.PeerRequest, bool)
 // request after the others succeed: the server moves the address before it
 // validates the rest of an update, so a refused combined update would still
 // move it.
-func (r *Peer) applyPeer(ctx context.Context, live *api.Peer, plan, config PeerModel) (*api.Peer, error) {
-	peer := live
+//
+// When the address request fails after the first one succeeded, it returns the
+// error together with the peer as it is now (read back, or as the first request
+// returned it), and partial is true: the other changes took effect.
+func (r *Peer) applyPeer(ctx context.Context, live *api.Peer, plan, config PeerModel) (peer *api.Peer, partial bool, err error) {
+	peer = live
 	if req, changed := peerRequest(peer, plan, config); changed {
 		updated, err := r.client.Peers.Update(ctx, peer.Id, req)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		peer = updated
+		peer, partial = updated, true
 	}
 	if ipv6 := peerIPv6Request(configuredOnly(plan.Ipv6, config.Ipv6), peer.Ipv6); ipv6 != nil {
 		req, _ := peerRequest(peer, plan, config)
 		req.Ipv6 = ipv6
 		updated, err := r.client.Peers.Update(ctx, peer.Id, req)
 		if err != nil {
-			return nil, err
+			if !partial {
+				return nil, false, err
+			}
+			if current, getErr := r.client.Peers.Get(ctx, peer.Id); getErr == nil {
+				peer = current
+			}
+			return peer, true, err
 		}
 		peer = updated
 	}
-	return peer, nil
+	return peer, false, nil
 }

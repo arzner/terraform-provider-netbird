@@ -34,21 +34,29 @@ func Test_peerRequest_keepsLiveValuesOfUnconfiguredAttributes(t *testing.T) {
 
 func Test_applyPeer_sendsIPv6Separately(t *testing.T) {
 	for name, tc := range map[string]struct {
-		failFirst bool
-		wantPuts  int
-		wantErr   bool
+		failFirst   bool
+		failSecond  bool
+		wantPuts    int
+		wantErr     bool
+		wantPartial bool
 	}{
 		"both succeed":         {wantPuts: 2},
 		"first update refused": {failFirst: true, wantPuts: 1, wantErr: true},
+		"address refused":      {failSecond: true, wantPuts: 2, wantErr: true, wantPartial: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var puts []map[string]any
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.Method == http.MethodGet {
+					// The read-back after a refused address: the rename stuck.
+					_, _ = io.WriteString(w, `{"id":"p","name":"new","ipv6":"fd00::7"}`)
+					return
+				}
 				var body map[string]any
 				_ = json.NewDecoder(r.Body).Decode(&body)
 				puts = append(puts, body)
-				w.Header().Set("Content-Type", "application/json")
-				if tc.failFirst && len(puts) == 1 {
+				if (tc.failFirst && len(puts) == 1) || (tc.failSecond && len(puts) == 2) {
 					w.WriteHeader(http.StatusUnprocessableEntity)
 					_, _ = io.WriteString(w, `{"message":"refused","code":422}`)
 					return
@@ -65,9 +73,12 @@ func Test_applyPeer_sendsIPv6Separately(t *testing.T) {
 			live := &api.Peer{Id: "p", Name: "old", Ipv6: ptr("fd00::7")}
 			plan := PeerModel{Name: types.StringValue("new"), Ipv6: types.StringValue("fd00::9")}
 			config := PeerModel{Name: types.StringValue("new"), Ipv6: types.StringValue("fd00::9")}
-			_, err := r.applyPeer(context.Background(), live, plan, config)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("expected error %v, found %v", tc.wantErr, err)
+			peer, partial, err := r.applyPeer(context.Background(), live, plan, config)
+			if (err != nil) != tc.wantErr || partial != tc.wantPartial {
+				t.Fatalf("expected error %v partial %v, found %v %v", tc.wantErr, tc.wantPartial, err, partial)
+			}
+			if tc.wantPartial && (peer == nil || peer.Name != "new" || peer.Ipv6 == nil || *peer.Ipv6 != "fd00::7") {
+				t.Errorf("a partial update must return the peer as read back, found %+v", peer)
 			}
 			if len(puts) != tc.wantPuts {
 				t.Fatalf("expected %d requests, found %d: %v", tc.wantPuts, len(puts), puts)
