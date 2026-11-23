@@ -164,7 +164,7 @@ func (r *Scim) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		ConnectorId:       stringDefaultPointer(data.ConnectorId, nil),
 	}
 
-	plannedEnabled := data.Enabled
+	plannedEnabled, plannedPrefix := data.Enabled, data.Prefix
 	scim, err := r.client.SCIM.Create(ctx, scimReq)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating SCIM integration", err.Error())
@@ -197,9 +197,15 @@ func (r *Scim) Create(ctx context.Context, req resource.CreateRequest, resp *res
 			resp.Diagnostics.AddError("Error disabling the new SCIM integration", err.Error())
 			return
 		}
+		created := data.Prefix // as the create confirmed it
 		resp.Diagnostics.Append(scimAPIToTerraform(ctx, updated, &data)...)
 		if resp.Diagnostics.HasError() {
 			return
+		}
+		// The update does not send the prefix: a known planned one stays as
+		// the create returned it, an unknown one takes the latest answer.
+		if !plannedPrefix.IsUnknown() {
+			data.Prefix = created
 		}
 	}
 	data.AuthToken = authToken
@@ -284,7 +290,7 @@ func (r *Scim) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 	data.AuthToken = state.AuthToken
 	// The update does not send the prefix, so the result keeps the planned
 	// one; a change made on the server since shows at the next refresh.
-	if !planned.Prefix.IsNull() && !planned.Prefix.IsUnknown() {
+	if !planned.Prefix.IsUnknown() {
 		data.Prefix = planned.Prefix
 	}
 

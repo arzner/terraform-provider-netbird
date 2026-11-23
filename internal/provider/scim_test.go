@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -13,6 +14,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -239,7 +241,7 @@ func Test_scim_disabledOnCreate(t *testing.T) {
 	if d := create.State.Get(ctx, &got); d.HasError() {
 		t.Fatal(d)
 	}
-	if got.Enabled.ValueBool() || got.Prefix.ValueString() != "server-prefix" || got.AuthToken.ValueString() != "full-token" {
+	if !got.Enabled.Equal(types.BoolValue(false)) || got.Prefix.ValueString() != "server-prefix" || got.AuthToken.ValueString() != "full-token" {
 		t.Errorf("expected enabled false, the server's prefix and the token, found %v %v %v", got.Enabled, got.Prefix, got.AuthToken)
 	}
 }
@@ -376,5 +378,107 @@ func Test_scim_updateKeepsPlannedPrefix(t *testing.T) {
 	}
 	if got.Prefix.ValueString() != "old" || got.AuthToken.ValueString() != "full-token" {
 		t.Errorf("expected the planned prefix and the stored token, found %v %v", got.Prefix, got.AuthToken)
+	}
+}
+
+// Test_scim_updateKeepsNullPrefix: state from before the prefix was read
+// holds null, and an update must return the planned null.
+func Test_scim_updateKeepsNullPrefix(t *testing.T) {
+	ctx := context.Background()
+	r, stop := scimStub(t, "server-prefix", false)
+	defer stop()
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	v := scimValue(t, sch, map[string]tftypes.Value{
+		"id":            tftypes.NewValue(tftypes.String, "7"),
+		"provider_name": tftypes.NewValue(tftypes.String, "okta"),
+		"enabled":       tftypes.NewValue(tftypes.Bool, true),
+		"auth_token":    tftypes.NewValue(tftypes.String, "full-token"),
+	})
+	state := tfsdk.State{Schema: sch.Schema, Raw: v}
+	resp := resource.UpdateResponse{State: state}
+	r.Update(ctx, resource.UpdateRequest{Plan: tfsdk.Plan{Schema: sch.Schema, Raw: v}, Config: tfsdk.Config{Schema: sch.Schema, Raw: v}, State: state}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatal(resp.Diagnostics)
+	}
+	var got ScimModel
+	if d := resp.State.Get(ctx, &got); d.HasError() {
+		t.Fatal(d)
+	}
+	if !got.Prefix.IsNull() {
+		t.Errorf("expected the planned null prefix, found %v", got.Prefix)
+	}
+}
+
+// Test_scim_disableKeepsCreatedPrefix: the prefix changes between the create
+// and the disable; a known planned prefix stays as the create returned it.
+func Test_scim_disableKeepsCreatedPrefix(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		prefix, token, enabled := "p", "full-token", true
+		if r.Method == http.MethodPut {
+			prefix, token, enabled = "changed", "nbs_****", false
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":7,"provider":"okta","prefix":%q,"enabled":%t,"group_prefixes":[],"user_group_prefixes":[],"auth_token":%q,"last_synced_at":"2026-01-01T00:00:00Z"}`, prefix, enabled, token)
+	}))
+	defer srv.Close()
+	r := &Scim{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	plan := scimValue(t, sch, map[string]tftypes.Value{
+		"provider_name": tftypes.NewValue(tftypes.String, "okta"),
+		"prefix":        tftypes.NewValue(tftypes.String, "p"),
+		"enabled":       tftypes.NewValue(tftypes.Bool, false),
+	})
+	create := resource.CreateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(plan.Type(), nil)}}
+	r.Create(ctx, resource.CreateRequest{Plan: tfsdk.Plan{Schema: sch.Schema, Raw: plan}, Config: tfsdk.Config{Schema: sch.Schema, Raw: plan}}, &create)
+	if create.Diagnostics.HasError() {
+		t.Fatal(create.Diagnostics)
+	}
+	var got ScimModel
+	if d := create.State.Get(ctx, &got); d.HasError() {
+		t.Fatal(d)
+	}
+	if got.Prefix.ValueString() != "p" || !got.Enabled.Equal(types.BoolValue(false)) {
+		t.Errorf("expected the created prefix p and enabled false, found %v %v", got.Prefix, got.Enabled)
+	}
+}
+
+func Test_scimDataSource_prefix(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body := `{"id":7,"provider":"okta","prefix":"looked-up","enabled":true,"group_prefixes":[],"user_group_prefixes":[],"auth_token":"nbs_****","last_synced_at":"2026-01-01T00:00:00Z"}`
+		if !strings.HasSuffix(r.URL.Path, "/7") {
+			body = "[" + body + "]"
+		}
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	d := &ScimDataSource{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch datasource.SchemaResponse
+	d.Schema(ctx, datasource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	values := map[string]tftypes.Value{}
+	for n, at := range typ.AttributeTypes {
+		values[n] = tftypes.NewValue(at, nil)
+	}
+	values["provider_name"] = tftypes.NewValue(tftypes.String, "okta")
+	cfg := tftypes.NewValue(typ, values)
+	resp := datasource.ReadResponse{State: tfsdk.State{Schema: sch.Schema, Raw: cfg}}
+	d.Read(ctx, datasource.ReadRequest{Config: tfsdk.Config{Schema: sch.Schema, Raw: cfg}}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatal(resp.Diagnostics)
+	}
+	var got ScimDataSourceModel
+	if diags := resp.State.Get(ctx, &got); diags.HasError() {
+		t.Fatal(diags)
+	}
+	if got.Prefix.ValueString() != "looked-up" {
+		t.Errorf("expected the integration's prefix, found %v", got.Prefix)
 	}
 }
