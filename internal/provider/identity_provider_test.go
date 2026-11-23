@@ -308,6 +308,7 @@ func Test_identityProviderValidateConfig(t *testing.T) {
 		"issuer with a port":                 {idpType: "oidc", issuer: "https://sso.example.com:8443/realms/main"},
 		"issuer with a stray bracket":        {idpType: "oidc", issuer: "https://sso.example.com]/realms/main", wantError: true},
 		"issuer with an IPv6 host":           {idpType: "oidc", issuer: "https://[2001:db8::1]:8443/realms/main"},
+		"issuer with a doubled bracket":      {idpType: "oidc", issuer: "https://[[2001:db8::1]/realm", wantError: true},
 		"issuer with user info":              {idpType: "oidc", issuer: "https://u:p@sso.example.test/", wantError: true},
 		"issuer with a query":                {idpType: "oidc", issuer: "https://sso.example.test/?a=b", wantError: true},
 		"issuer with a fragment":             {idpType: "oidc", issuer: "https://sso.example.test/#x", wantError: true},

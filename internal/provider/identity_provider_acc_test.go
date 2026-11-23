@@ -255,3 +255,39 @@ func testIdentityProviderResource(rName, name, idpType, clientID, clientSecret, 
 }
 `, rName, name, idpType, clientID, clientSecret, issuer)
 }
+
+// Test_IdentityProvider_IgnoredTypeIssuer: with type ignored, the plan keeps
+// the stored keycloak type, so an empty issuer is refused at plan time.
+func Test_IdentityProvider_IgnoredTypeIssuer(t *testing.T) {
+	testE2E(t)
+	rName := "idp" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_identity_provider." + rName
+	var createdID string
+	config := func(idpType, issuer string) string {
+		return fmt.Sprintf(`resource "netbird_identity_provider" %q {
+  name          = %q
+  type          = %q
+  client_id     = "client-id"
+  client_secret = "client-secret"
+  issuer        = %q
+  lifecycle {
+    ignore_changes = [type]
+  }
+}`, rName, rName, idpType, issuer)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().IdentityProviders.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: config("keycloak", "https://oauth.id.jumpcloud.com/"),
+				Check:  testRecordID(rNameFull, &createdID),
+			},
+			{
+				Config:      config("google", ""),
+				ExpectError: regexp.MustCompile(`(?s)Issuer required.*keycloak`),
+			},
+		},
+	})
+}

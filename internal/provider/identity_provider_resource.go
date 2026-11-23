@@ -28,6 +28,7 @@ import (
 var _ resource.Resource = &IdentityProvider{}
 var _ resource.ResourceWithImportState = &IdentityProvider{}
 var _ resource.ResourceWithValidateConfig = &IdentityProvider{}
+var _ resource.ResourceWithModifyPlan = &IdentityProvider{}
 
 func NewIdentityProvider() resource.Resource {
 	return &IdentityProvider{}
@@ -293,7 +294,7 @@ func issuerProblem(issuer string) string {
 	switch {
 	case err != nil || u.Host == "" || u.Hostname() == "":
 		return "The issuer must be an absolute URL with a host."
-	case strings.ContainsAny(u.Hostname(), "[]") || (strings.Contains(u.Host, "]") && !strings.HasPrefix(u.Host, "[")):
+	case !bracketsWellPlaced(issuer):
 		return "The issuer's host has misplaced brackets; only an IPv6 address goes in brackets."
 	case !validPort(u.Port()):
 		return "The issuer's port must be between 1 and 65535."
@@ -314,4 +315,43 @@ func validPort(p string) bool {
 	}
 	n, err := strconv.Atoi(p)
 	return err == nil && n >= 1 && n <= 65535
+}
+
+// bracketsWellPlaced reports whether the URL's authority has brackets only
+// as one pair around the host (an IPv6 address); url.Parse reads the host
+// from the last opening bracket and would hide extra ones.
+func bracketsWellPlaced(raw string) bool {
+	rest := raw
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	if i := strings.LastIndex(rest, "@"); i >= 0 {
+		rest = rest[i+1:]
+	}
+	open, closing := strings.Count(rest, "["), strings.Count(rest, "]")
+	if open == 0 && closing == 0 {
+		return true
+	}
+	return open == 1 && closing == 1 && strings.HasPrefix(rest, "[") && strings.Index(rest, "]") > 0
+}
+
+// ModifyPlan checks the type and issuer the plan will send, which can differ
+// from the configuration (ignore_changes on type keeps the stored type).
+func (r *IdentityProvider) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	var idpType, issuer types.String
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("type"), &idpType)...)
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("issuer"), &issuer)...)
+	if resp.Diagnostics.HasError() || idpType.IsNull() || idpType.IsUnknown() || issuer.IsNull() || issuer.IsUnknown() {
+		return
+	}
+	if issuer.ValueString() == "" && !builtInIssuer[idpType.ValueString()] {
+		resp.Diagnostics.AddAttributeError(path.Root("issuer"), "Issuer required",
+			fmt.Sprintf("The plan keeps type %q, which has no built-in issuer; set issuer to the provider's issuer URL.", idpType.ValueString()))
+	}
 }
