@@ -12,7 +12,10 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
+	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
 
@@ -93,10 +96,11 @@ data "netbird_groups" "%[1]s" {
   name = "%[1]s-never-created"
 }
 `, rName)
-	dsCase(t, missing, resource.ComposeAggregateTestCheckFunc(
-		resource.TestCheckResourceAttr(ds, "ids.#", "0"),
-		resource.TestCheckResourceAttr(ds, "groups.#", "0"),
-	))
+	// Empty lists, not null: iterating over the result must work.
+	dsCaseState(t, missing,
+		statecheck.ExpectKnownValue(ds, tfjsonpath.New("ids"), knownvalue.ListSizeExact(0)),
+		statecheck.ExpectKnownValue(ds, tfjsonpath.New("groups"), knownvalue.ListSizeExact(0)),
+	)
 
 	// An issuer filter returns every group the server holds with that issuer.
 	byIssuer := fmt.Sprintf(`

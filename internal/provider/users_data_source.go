@@ -80,7 +80,7 @@ func (d *UsersDataSource) Schema(ctx context.Context, req datasource.SchemaReque
 				Validators:          []validator.String{stringvalidator.OneOf(userRoles...)},
 			},
 			"status": schema.StringAttribute{
-				MarkdownDescription: "Only return users with this status (`active`, `invited` or `blocked`)",
+				MarkdownDescription: "Only return users with this status (`active`, `invited` or `blocked`). With an external identity provider, NetBird reports a user the provider does not return as `active` and not blocked, so `status`, `is_blocked` and `issued` reflect what NetBird reports.",
 				Optional:            true,
 				Validators:          []validator.String{stringvalidator.OneOf("active", "invited", "blocked")},
 			},

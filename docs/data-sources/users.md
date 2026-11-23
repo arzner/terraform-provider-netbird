@@ -41,7 +41,7 @@ data "netbird_users" "service" {
 - `issued` (String) Only return users issued by this source (`api` or `integration`)
 - `name` (String) Only return users with this name
 - `role` (String) Only return users with this role (`owner`, `admin`, `user`, `billing_admin`, `auditor`, `network_admin`, `agent_network_admin` or `usage_viewer`)
-- `status` (String) Only return users with this status (`active`, `invited` or `blocked`)
+- `status` (String) Only return users with this status (`active`, `invited` or `blocked`). With an external identity provider, NetBird reports a user the provider does not return as `active` and not blocked, so `status`, `is_blocked` and `issued` reflect what NetBird reports.
 
 ### Read-Only
 
