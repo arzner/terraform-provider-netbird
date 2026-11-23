@@ -1190,11 +1190,12 @@ func Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream(t *testing.T) {
 	var createdID string
 	peerID1 := testPeerID(t, "peer1")
 	groupID := e2eGroupAllID()
-	// The server stores every CrowdSec mode whatever the cluster supports;
-	// observe is the one that also reads well on a capable cluster.
-	crowdsec := "off"
+	// The server stores every CrowdSec mode whatever the cluster supports,
+	// but only a capable cluster gets an active one: enforce without a
+	// checker denies every request from outside the tunnel.
+	crowdsec, crowdsecNext := "off", "off"
 	if cluster.SupportsCrowdsec != nil && *cluster.SupportsCrowdsec {
-		crowdsec = "observe"
+		crowdsec, crowdsecNext = "observe", "enforce"
 	}
 	// Both targets are one backend (the shared read-only peer1) on two paths,
 	// which is how access actions are meant to be used.
@@ -1203,7 +1204,7 @@ func Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream(t *testing.T) {
 		adminPort   int    // 0 leaves the /admin target out
 		firstAction string // the first target's access_action line
 		direct      bool   // direct_upstream on the first target of a private service
-		crowdsec    string // "" leaves access_restrictions out
+		crowdsec    string // "" leaves access_restrictions out, "null" sets crowdsec_mode = null
 		extra       string // more configuration
 	}
 	config := func(c svc) string {
@@ -1215,11 +1216,15 @@ func Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream(t *testing.T) {
 		}
 		restrictions := ""
 		if c.crowdsec != "" {
+			mode := fmt.Sprintf("%q", c.crowdsec)
+			if c.crowdsec == "null" {
+				mode = "null"
+			}
 			restrictions = fmt.Sprintf(`
   access_restrictions = {
-    crowdsec_mode = %q
+    crowdsec_mode = %s
   }
-`, c.crowdsec)
+`, mode)
 		}
 		admin := ""
 		if c.adminPort != 0 {
@@ -1326,25 +1331,27 @@ resource "netbird_reverse_proxy_service" "l4" {
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 			{
-				// The action and the CrowdSec mode change in place.
-				Config:           config(svc{adminAction: `access_action = "bypass"`, adminPort: 8081, crowdsec: "enforce"}),
+				// The action and, on a capable cluster, the CrowdSec mode change
+				// in place.
+				Config:           config(svc{adminAction: `access_action = "bypass"`, adminPort: 8081, crowdsec: crowdsecNext}),
 				ConfigPlanChecks: updatesInPlace(rNameFull),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "bypass"),
-					resource.TestCheckResourceAttr(rNameFull, "access_restrictions.crowdsec_mode", "enforce"),
-					onServer("bypass", false, "enforce"),
+					resource.TestCheckResourceAttr(rNameFull, "access_restrictions.crowdsec_mode", crowdsecNext),
+					onServer("bypass", false, crowdsecNext),
 				),
 			},
 			{
 				// Left out, the action stays as it is: no change planned.
-				Config:   config(svc{adminPort: 8081, crowdsec: "enforce"}),
+				Config:   config(svc{adminPort: 8081, crowdsec: crowdsecNext}),
 				PlanOnly: true,
 			},
 			{
 				// Left out while the target changes: the update does not send
 				// it, and the server keeps the action of the target at /admin.
-				// Without access_restrictions the server has no CrowdSec mode.
-				Config:           config(svc{adminPort: 8082}),
+				// crowdsec_mode = null clears the mode; the server then reports
+				// no restrictions, and the object that sets nothing stays.
+				Config:           config(svc{adminPort: 8082, crowdsec: "null"}),
 				ConfigPlanChecks: updatesInPlace(rNameFull),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "bypass"),
@@ -1352,6 +1359,10 @@ resource "netbird_reverse_proxy_service" "l4" {
 					resource.TestCheckNoResourceAttr(rNameFull, "access_restrictions.crowdsec_mode"),
 					onServer("bypass", false, ""),
 				),
+			},
+			{
+				Config:   config(svc{adminPort: 8082, crowdsec: "null"}),
+				PlanOnly: true,
 			},
 			{
 				// Turning the service private while /admin keeps bypass from
@@ -1393,11 +1404,13 @@ data "netbird_reverse_proxy_service" "test" {
 				ExpectError: regexp.MustCompile(`(?s)Access action needed when a controlled path goes.*path "/admin"`),
 			},
 			{
-				Config:           config(svc{firstAction: `access_action = "inherit"`, direct: true, crowdsec: crowdsec}),
+				// Also drops access_restrictions: the server then has none.
+				Config:           config(svc{firstAction: `access_action = "inherit"`, direct: true}),
 				ConfigPlanChecks: updatesInPlace(rNameFull),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(rNameFull, "targets.#", "1"),
-					onServer("", true, crowdsec),
+					resource.TestCheckNoResourceAttr(rNameFull, "access_restrictions.crowdsec_mode"),
+					onServer("", true, ""),
 				),
 			},
 		},

@@ -454,6 +454,15 @@ func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
 		return tftypes.NewValue(targetType, values)
 	}
 	targets := func(ts ...tftypes.Value) tftypes.Value { return tftypes.NewValue(listType, ts) }
+	disabled := func(tv tftypes.Value) tftypes.Value {
+		var m map[string]tftypes.Value
+		if err := tv.As(&m); err != nil {
+			t.Fatal(err)
+		}
+		m["enabled"] = tftypes.NewValue(tftypes.Bool, false)
+		return tftypes.NewValue(targetType, m)
+	}
+	unknownPath := tftypes.NewValue(tftypes.String, unknown)
 	groups := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{tftypes.NewValue(tftypes.String, "g1")})
 	on := tftypes.NewValue(tftypes.Bool, true)
 	off := tftypes.NewValue(tftypes.Bool, false)
@@ -547,6 +556,60 @@ func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
 			config: vals{"private": on, "access_groups": groups, "targets": targets(tftypes.NewValue(targetType, unknown), target("/a", "block"))},
 			plan:   vals{"private": on, "access_groups": groups, "targets": targets(tftypes.NewValue(targetType, unknown), target("/a", "block"))},
 		},
+		"made private, bypass kept before a path not known yet": {
+			state:     vals{"private": off, "mode": http, "access_groups": groups, "targets": targets(target("/admin", "bypass"), target("", "inherit"))},
+			config:    vals{"private": on, "targets": targets(target("/admin", nil), target(unknownPath, nil))},
+			plan:      vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("/admin", unknown), target(unknownPath, unknown))},
+			wantError: "targets[0].access_action",
+		},
+		"made private, bypass path after a path not known yet": {
+			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": targets(target("", "inherit"), target("/admin", "bypass"))},
+			config: vals{"private": on, "targets": targets(target(unknownPath, nil), target("/admin", nil))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target(unknownPath, unknown), target("/admin", unknown))},
+		},
+		"several current targets at one path, a path not known yet": {
+			state:     vals{"private": off, "mode": http, "targets": targets(target("", "inherit"), target("", "inherit"), target("/admin", "block"))},
+			config:    vals{"targets": targets(target(unknownPath, nil), target("", nil), target("/admin", nil))},
+			plan:      vals{"private": off, "mode": http, "targets": targets(target(unknownPath, unknown), target("", unknown), target("/admin", unknown))},
+			wantError: "Access action needed on every target",
+		},
+		"two enabled targets at one controlled path": {
+			config:    vals{"targets": targets(target("/admin", "block"), target("/admin", "inherit"))},
+			plan:      vals{"private": off, "targets": targets(target("/admin", "block"), target("/admin", "inherit"))},
+			wantError: "targets[1].path",
+		},
+		"a disabled target at a controlled path": {
+			config: vals{"targets": targets(target("/admin", "block"), disabled(target("/admin", "inherit")))},
+			plan:   vals{"private": off, "targets": targets(target("/admin", "block"), disabled(target("/admin", "inherit")))},
+		},
+		"two enabled targets at one path, all inherit": {
+			config: vals{"targets": targets(target("/admin", nil), target("/admin", "inherit"))},
+			plan:   vals{"private": off, "targets": targets(target("/admin", unknown), target("/admin", "inherit"))},
+		},
+		"a kept block makes paths strict": {
+			state:     vals{"private": off, "mode": http, "targets": targets(target("", "inherit"), target("/admin", "block"))},
+			config:    vals{"targets": targets(target("", nil), target("/admin", nil), target("/admin", "inherit"))},
+			plan:      vals{"private": off, "mode": http, "targets": targets(target("", unknown), target("/admin", unknown), target("/admin", "inherit"))},
+			wantError: "targets[2].path",
+		},
+		"block on a relative path": {
+			config:    vals{"targets": targets(target("admin", "block"))},
+			plan:      vals{"private": off, "targets": targets(target("admin", "block"))},
+			wantError: "targets[0].path",
+		},
+		"block on a dot segment": {
+			config:    vals{"targets": targets(target("/a/../b", "block"))},
+			plan:      vals{"private": off, "targets": targets(target("/a/../b", "block"))},
+			wantError: "targets[0].path",
+		},
+		"inherit on a relative path": {
+			config: vals{"targets": targets(target("admin", "inherit"))},
+			plan:   vals{"private": off, "targets": targets(target("admin", "inherit"))},
+		},
+		"block on the root path": {
+			config: vals{"targets": targets(target("/", "block"))},
+			plan:   vals{"private": off, "targets": targets(target("/", "block"))},
+		},
 		"new tcp with block": {
 			config:    vals{"mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "block"))},
 			plan:      vals{"mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", "block"))},
@@ -564,8 +627,8 @@ func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
 		},
 		"made private, path not known yet": {
 			state:  vals{"private": off, "mode": http, "access_groups": groups, "targets": bypassAtAdmin},
-			config: vals{"private": on, "targets": targets(target("", nil), target(tftypes.NewValue(tftypes.String, unknown), nil))},
-			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target(tftypes.NewValue(tftypes.String, unknown), unknown))},
+			config: vals{"private": on, "targets": targets(target("", nil), target(unknownPath, nil))},
+			plan:   vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target(unknownPath, unknown))},
 		},
 		"no-op with bypass, actions left out": {
 			state:  vals{"private": off, "mode": http, "targets": bypassAtAdmin},
@@ -643,5 +706,116 @@ func Test_directUpstreamWarnings(t *testing.T) {
 		if d.WarningsCount() != 1 || d.HasError() {
 			t.Errorf("%s: expected one warning for the first target, found %v", mode, d)
 		}
+	}
+}
+
+// directTarget builds a target with a host and direct_upstream.
+func directTarget(host string, direct attr.Value) attr.Value {
+	ctx := context.Background()
+	optsType := ReverseProxyTargetOptionsModel{}.TFType()
+	opts := map[string]attr.Value{}
+	for n, at := range optsType.AttrTypes {
+		opts[n] = nullOf(at.ValueType(ctx))
+	}
+	opts["custom_headers"] = types.MapNull(types.StringType)
+	opts["direct_upstream"] = direct
+	targetType := ReverseProxyServiceTargetModel{}.TFType()
+	attrs := map[string]attr.Value{}
+	for n, at := range targetType.AttrTypes {
+		attrs[n] = nullOf(at.ValueType(ctx))
+	}
+	attrs["host"] = types.StringValue(host)
+	attrs["options"] = types.ObjectValueMust(optsType.AttrTypes, opts)
+	return types.ObjectValueMust(targetType.AttrTypes, attrs)
+}
+
+func Test_directUpstreamHostProblems(t *testing.T) {
+	on := types.BoolValue(true)
+	for host, want := range map[string]bool{
+		"127.0.0.1": true, "[::1]": true, "224.0.0.1": true, "169.254.1.1": true, "fe80::1%eth0": true,
+		"10.0.0.5:80": true, "a b": true, "a/b": true,
+		"10.0.0.5": false, "backend.lan": false, "2001:db8::1": false, "": false,
+	} {
+		list := types.ListValueMust(ReverseProxyServiceTargetModel{}.TFType(), []attr.Value{directTarget(host, on)})
+		if got := directUpstreamHostProblems(list).HasError(); got != want {
+			t.Errorf("host %q: expected error %v, found %v", host, want, got)
+		}
+	}
+	off := types.ListValueMust(ReverseProxyServiceTargetModel{}.TFType(), []attr.Value{directTarget("127.0.0.1", types.BoolValue(false))})
+	if directUpstreamHostProblems(off).HasError() {
+		t.Error("without direct_upstream the server ignores the host")
+	}
+}
+
+func Test_reverseProxyService_directUpstreamWarningWithoutChanges(t *testing.T) {
+	ctx := context.Background()
+	r := &ReverseProxyService{}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	list := types.ListValueMust(ReverseProxyServiceTargetModel{}.TFType(), []attr.Value{directTarget("10.0.0.5", types.BoolValue(true))})
+	targets, err := list.ToTerraformValue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]tftypes.Value{}
+	for n, at := range typ.AttributeTypes {
+		values[n] = tftypes.NewValue(at, nil)
+	}
+	values["mode"] = tftypes.NewValue(tftypes.String, "tcp")
+	values["private"] = tftypes.NewValue(tftypes.Bool, false)
+	values["targets"] = targets
+	state := tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(typ, values)}
+	req := resource.ModifyPlanRequest{
+		Config: tfsdk.Config{Schema: sch.Schema, Raw: state.Raw},
+		Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: state.Raw},
+		State:  state,
+	}
+	resp := resource.ModifyPlanResponse{Plan: req.Plan}
+	r.ModifyPlan(ctx, req, &resp)
+	if resp.Diagnostics.WarningsCount() != 1 || resp.Diagnostics.HasError() {
+		t.Fatalf("expected one warning on a plan without changes, found %v", resp.Diagnostics)
+	}
+}
+
+func Test_reverseProxyService_emptyRestrictionsKept(t *testing.T) {
+	ctx := context.Background()
+	arType := ReverseProxyAccessRestrictionsModel{}.TFType()
+	empty, d := types.ObjectValueFrom(ctx, arType.AttrTypes, ReverseProxyAccessRestrictionsModel{
+		AllowedCidrs: types.ListNull(types.StringType), BlockedCidrs: types.ListNull(types.StringType),
+		AllowedCountries: types.ListNull(types.StringType), BlockedCountries: types.ListNull(types.StringType),
+		CrowdsecMode: types.StringNull(),
+	})
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	set, d := types.ObjectValueFrom(ctx, arType.AttrTypes, ReverseProxyAccessRestrictionsModel{
+		AllowedCidrs: types.ListNull(types.StringType), BlockedCidrs: types.ListNull(types.StringType),
+		AllowedCountries: types.ListNull(types.StringType), BlockedCountries: types.ListNull(types.StringType),
+		CrowdsecMode: types.StringValue("enforce"),
+	})
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	for name, tc := range map[string]struct {
+		prior    types.Object
+		wantNull bool
+	}{
+		"planned object that sets nothing":  {prior: empty},
+		"stored mode removed on the server": {prior: set, wantNull: true},
+		"no object":                         {prior: types.ObjectNull(arType.AttrTypes), wantNull: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			data := ReverseProxyServiceModel{AccessRestrictions: tc.prior}
+			if d := reverseProxyServiceAPIToTerraform(ctx, &api.Service{Id: "s"}, &data); d.HasError() {
+				t.Fatal(d)
+			}
+			if data.AccessRestrictions.IsNull() != tc.wantNull {
+				t.Fatalf("expected null %v, found %v", tc.wantNull, data.AccessRestrictions)
+			}
+		})
 	}
 }

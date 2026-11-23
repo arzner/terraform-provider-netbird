@@ -37,10 +37,12 @@ it is based on.
   server keeps the current action) and `targets[].options.direct_upstream` (dial through the
   proxy host's network). Also in the data source (#45). The plan refuses what the server would
   reject: a `bypass` target on a private service, also one that keeps `bypass` from the server
-  because it leaves `access_action` out; `bypass` or `block` outside HTTP mode; and, while a
-  target has `bypass` or `block`, an update that sets no action and drops that path, or that
-  leaves an action out with several targets on one path. `direct_upstream` on a TCP, UDP or TLS
-  service, which NetBird stores but does not apply, gets a plan warning.
+  because it leaves `access_action` out; `bypass` or `block` outside HTTP mode or on a path that
+  is not a canonical prefix; two enabled targets on one path once a target has `bypass` or
+  `block`; while a target has `bypass` or `block`, an update that sets no action and drops that
+  path, or that leaves an action out with several targets on one path; and a loopback,
+  multicast, link-local or malformed host with `direct_upstream`. `direct_upstream` on a TCP, UDP
+  or TLS service, which NetBird stores but does not apply, gets a plan warning.
 
 ### Changed
 
@@ -56,6 +58,11 @@ it is based on.
   address the server refuses (outside the account range, peer not in an IPv6-enabled group,
   already in use) changes nothing else, and changing login or inactivity expiration on a peer
   added with a setup key is refused before anything is sent.
+
+### Fixed
+
+- `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
+  `crowdsec_mode = null`) no longer fails the apply with an inconsistent result.
 
 ## [0.1.0] - 2026-11-23
 
