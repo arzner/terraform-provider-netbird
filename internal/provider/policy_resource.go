@@ -335,7 +335,7 @@ func policyAPIToTerraform(ctx context.Context, policy *api.Policy, data *PolicyM
 		if r.Description == nil || *r.Description == "" {
 			ruleModel.Description = types.StringNull()
 		}
-		if r.Sources != nil {
+		if r.Sources != nil && len(*r.Sources) > 0 {
 			var sources []string
 			for _, v := range *r.Sources {
 				sources = append(sources, v.Id)
@@ -343,9 +343,14 @@ func policyAPIToTerraform(ctx context.Context, policy *api.Policy, data *PolicyM
 			ruleModel.Sources, diag = sortedStringList(ctx, objectListAttr(prior, "sources"), sources)
 			ret.Append(diag...)
 		} else {
+			// The server reports no groups as null: an empty list keeps the
+			// prior spelling, unless a resource is the source now.
 			ruleModel.Sources = types.ListNull(types.StringType)
+			if r.SourceResource == nil {
+				ruleModel.Sources = emptyListAsPrior(objectListAttr(prior, "sources"), types.StringType)
+			}
 		}
-		if r.Destinations != nil {
+		if r.Destinations != nil && len(*r.Destinations) > 0 {
 			var destinations []string
 			for _, v := range *r.Destinations {
 				destinations = append(destinations, v.Id)
@@ -354,6 +359,9 @@ func policyAPIToTerraform(ctx context.Context, policy *api.Policy, data *PolicyM
 			ret.Append(diag...)
 		} else {
 			ruleModel.Destinations = types.ListNull(types.StringType)
+			if r.DestinationResource == nil {
+				ruleModel.Destinations = emptyListAsPrior(objectListAttr(prior, "destinations"), types.StringType)
+			}
 		}
 		if r.Ports != nil {
 			ruleModel.Ports, diag = sortedStringList(ctx, objectListAttr(prior, "ports"), *r.Ports)
