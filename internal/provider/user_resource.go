@@ -78,7 +78,7 @@ func (r *User) Schema(ctx context.Context, req resource.SchemaRequest, resp *res
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "User Name. NetBird does not change a user's name: for a service user a new name replaces the user (its tokens are deleted with it); for a regular user, whose name comes from the identity provider, a change is refused at plan time.",
+				MarkdownDescription: "User Name. NetBird does not change a user's name: for a service user a new name replaces the user (its tokens are deleted with it), which needs `is_service_user = true` in the configuration, a name known at plan time, and a user other than the one the provider authenticates as; for a regular user, whose name comes from the identity provider, a change is refused at plan time. A new regular user is an invitation and needs `name` and `email`.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers: []planmodifier.String{
@@ -330,32 +330,73 @@ func serviceUserRenamed(ctx context.Context, req planmodifier.StringRequest, res
 	if req.State.Raw.IsNull() || req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() || req.ConfigValue.Equal(req.StateValue) {
 		return
 	}
-	var service types.Bool
-	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("is_service_user"), &service)...)
-	resp.RequiresReplace = service.ValueBool()
+	var stateService, configService types.Bool
+	resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("is_service_user"), &stateService)...)
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("is_service_user"), &configService)...)
+	// ModifyPlan refuses the other combinations; the replacement creates a
+	// service user only when the configuration says so.
+	resp.RequiresReplace = stateService.ValueBool() && configService.Equal(types.BoolValue(true))
 }
 
-// ModifyPlan refuses a change the API cannot make: UserRequest (v0.83, v0.82)
-// carries only role, auto_groups and is_blocked, so an email, or a regular
-// user's name, would be planned and silently not applied.
+// ModifyPlan refuses what the API cannot do or what would fail after the
+// old user is deleted. UserRequest (v0.83, v0.82) carries only role,
+// auto_groups and is_blocked, so a name or email change is either a
+// replacement or impossible; a new regular user is an invitation, which needs
+// a name and an email.
 func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	if req.Plan.Raw.IsNull() || req.State.Raw.IsNull() {
+	if req.Plan.Raw.IsNull() {
 		return
 	}
 	var config, state UserModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if !req.State.Raw.IsNull() {
+		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	}
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	changed := func(c, s types.String) bool { return !c.IsNull() && !c.IsUnknown() && !c.Equal(s) }
-	if changed(config.Email, state.Email) {
+	known := func(v types.String) bool { return !v.IsNull() && !v.IsUnknown() }
+	configuredService := config.IsServiceUser.Equal(types.BoolValue(true))
+	// Left out, a new user is a regular user.
+	configuredRegular := config.IsServiceUser.IsNull() || config.IsServiceUser.Equal(types.BoolValue(false))
+
+	// A new user, or one replaced because its kind changes, is created as
+	// the configuration says.
+	creates := req.State.Raw.IsNull()
+	kindChanges := !creates && !config.IsServiceUser.IsNull() && !config.IsServiceUser.IsUnknown() && !config.IsServiceUser.Equal(state.IsServiceUser)
+	if creates || kindChanges {
+		if configuredRegular {
+			missing := func(v types.String) bool { return v.IsNull() || (known(v) && v.ValueString() == "") }
+			if missing(config.Email) || missing(config.Name) {
+				resp.Diagnostics.AddError("Name and email required",
+					"A regular user is created as an invitation, which needs a name and an email; set both, or is_service_user = true for a service user.")
+			}
+		}
+		return
+	}
+
+	if known(config.Email) && !config.Email.Equal(state.Email) {
 		resp.Diagnostics.AddAttributeError(path.Root("email"), "Email cannot be changed",
 			fmt.Sprintf("NetBird does not change a user's email (%q). Keep the current email in the configuration, or leave it out.", state.Email.ValueString()))
 	}
-	if changed(config.Name, state.Name) && !state.IsServiceUser.ValueBool() {
+	if config.Name.IsNull() || config.Name.Equal(state.Name) {
+		return
+	}
+	switch {
+	case !state.IsServiceUser.ValueBool() && config.Name.IsUnknown():
+		// Whether it changes is known only at apply.
+	case !state.IsServiceUser.ValueBool():
 		resp.Diagnostics.AddAttributeError(path.Root("name"), "Name cannot be changed",
 			fmt.Sprintf("A regular user's name (%q) comes from the identity provider and NetBird does not change it. Keep the current name in the configuration, or leave it out.", state.Name.ValueString()))
+	case config.Name.IsUnknown():
+		resp.Diagnostics.AddAttributeError(path.Root("name"), "Service user name not known",
+			"A service user's new name replaces the user, so the plan needs the name to decide; it is not known until apply.")
+	case !configuredService:
+		resp.Diagnostics.AddAttributeError(path.Root("is_service_user"), "Service user kind required",
+			"Renaming a service user replaces it, and the new user is created as the configuration says: set is_service_user = true, or keep the current name.")
+	case state.IsCurrent.ValueBool():
+		resp.Diagnostics.AddAttributeError(path.Root("name"), "Cannot replace the current user",
+			"This service user is the one the provider authenticates as, and NetBird refuses to delete it; rename it with another identity's token.")
 	}
 }
 
@@ -364,7 +405,8 @@ func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, r
 // for, as on import, is a regular user.
 func userResourceAPIToTerraform(ctx context.Context, user *api.User, data *UserModel) diag.Diagnostics {
 	d := userAPIToTerraform(ctx, user, data)
-	if data.IsServiceUser.IsNull() || data.IsServiceUser.IsUnknown() {
+	// Compatibility: a response without the flag is a regular user.
+	if user.IsServiceUser == nil {
 		data.IsServiceUser = types.BoolValue(false)
 	}
 	return d

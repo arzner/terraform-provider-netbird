@@ -127,6 +127,12 @@ func Test_User_ServiceUserNameAndKind(t *testing.T) {
 				ExpectError: regexp.MustCompile(`Email cannot be changed`),
 			},
 			{
+				// A rename replaces the user, and the new one is created as
+				// the configuration says, so the kind must be stated.
+				Config:      config(rName+"-renamed", ""),
+				ExpectError: regexp.MustCompile(`Service user kind required`),
+			},
+			{
 				Config: config(rName+"-renamed", "is_service_user = true"),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionDestroyBeforeCreate),
@@ -138,9 +144,31 @@ func Test_User_ServiceUserNameAndKind(t *testing.T) {
 						if createdID == firstID {
 							return fmt.Errorf("the service user kept its ID %s; expected a replacement", createdID)
 						}
+						users, err := testClient().Users.List(context.Background())
+						if err != nil {
+							return err
+						}
+						found := false
+						for _, u := range users {
+							if u.Id == firstID {
+								return fmt.Errorf("the replaced service user %s still exists", firstID)
+							}
+							if u.Id == createdID {
+								found = u.Name == rName+"-renamed" && u.IsServiceUser != nil && *u.IsServiceUser
+							}
+						}
+						if !found {
+							return fmt.Errorf("user %s is not a service user named %s-renamed on the server", createdID, rName)
+						}
 						return nil
 					},
 				),
+			},
+			// Imported with the kind left out, it plans no change.
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				Config:   config(rName+"-renamed", ""),
+				PlanOnly: true,
 			},
 		},
 	})
