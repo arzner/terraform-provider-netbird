@@ -159,6 +159,16 @@ func Test_IdentityProvider_TypeChangeReplaces(t *testing.T) {
 				Check:  testRecordID(rNameFull, &firstID),
 			},
 			{
+				// A type without a built-in issuer and issuer = "" fails at
+				// plan time, before the working provider is deleted.
+				Config:      testIdentityProviderResource(rName, "migrated", "keycloak", "client-id", "client-secret", ""),
+				ExpectError: regexp.MustCompile(`Issuer required`),
+			},
+			{
+				Config:   testIdentityProviderResource(rName, "migrated", "oidc", "client-id", "client-secret", "https://oauth.id.jumpcloud.com/"),
+				PlanOnly: true,
+			},
+			{
 				Config: testIdentityProviderResource(rName, "migrated", "keycloak", "client-id", "client-secret", "https://oauth.id.jumpcloud.com/"),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionDestroyBeforeCreate),
@@ -167,11 +177,9 @@ func Test_IdentityProvider_TypeChangeReplaces(t *testing.T) {
 					testRecordID(rNameFull, &createdID),
 					resource.TestMatchResourceAttr(rNameFull, "id", regexp.MustCompile("^keycloak-")),
 					idpTypeOnServer(&createdID, "keycloak"),
-					func(*terraform.State) error {
-						if _, err := testClient().IdentityProviders.Get(context.Background(), firstID); err == nil {
-							return fmt.Errorf("the oidc provider %s still exists after the replacement", firstID)
-						}
-						return nil
+					func(s *terraform.State) error {
+						// Only a not-found answer proves the old one is gone.
+						return testCheckGone(testClient().IdentityProviders.Get, &firstID)(s)
 					},
 				),
 			},

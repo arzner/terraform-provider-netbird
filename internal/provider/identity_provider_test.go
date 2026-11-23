@@ -12,7 +12,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
@@ -133,7 +136,7 @@ func Test_identityProviderTypes(t *testing.T) {
 	}
 	// The constants by name, then the names IsValid's switch accepts.
 	values := map[string]string{}
-	var accepted []string
+	var accepted, builtIn []string
 	for _, decl := range parsed.Decls {
 		switch d := decl.(type) {
 		case *ast.GenDecl:
@@ -154,22 +157,45 @@ func Test_identityProviderTypes(t *testing.T) {
 				}
 			}
 		case *ast.FuncDecl:
-			if d.Name.Name != "IsValid" || d.Recv == nil || len(d.Recv.List) != 1 {
+			if d.Recv == nil || len(d.Recv.List) != 1 {
 				continue
 			}
 			if id, ok := d.Recv.List[0].Type.(*ast.Ident); !ok || id.Name != "IdentityProviderType" {
 				continue
 			}
-			ast.Inspect(d.Body, func(n ast.Node) bool {
-				if cc, ok := n.(*ast.CaseClause); ok {
+			switch d.Name.Name {
+			case "IsValid":
+				// Expected shape: switch t { case A, B, ...: return true }
+				// then return false. Anything else fails, so a change in
+				// how the server decides is looked at.
+				ast.Inspect(d.Body, func(n ast.Node) bool {
+					cc, ok := n.(*ast.CaseClause)
+					if !ok {
+						return true
+					}
+					if len(cc.Body) != 1 || !returnsBool(cc.Body[0], "true") || len(cc.List) == 0 {
+						t.Fatalf("IsValid has a case that does not just return true; update this test")
+					}
 					for _, e := range cc.List {
-						if id, ok := e.(*ast.Ident); ok {
-							accepted = append(accepted, id.Name)
+						id, ok := e.(*ast.Ident)
+						if !ok {
+							t.Fatalf("IsValid has a case value that is not a constant name; update this test")
+						}
+						accepted = append(accepted, id.Name)
+					}
+					return true
+				})
+			case "HasBuiltInIssuer":
+				// Expected shape: return t == A || t == B.
+				ast.Inspect(d.Body, func(n ast.Node) bool {
+					if be, ok := n.(*ast.BinaryExpr); ok && be.Op == token.EQL {
+						if id, ok := be.Y.(*ast.Ident); ok {
+							builtIn = append(builtIn, id.Name)
 						}
 					}
-				}
-				return true
-			})
+					return true
+				})
+			}
 		}
 	}
 	var server []string
@@ -186,5 +212,65 @@ func Test_identityProviderTypes(t *testing.T) {
 	}
 	if !slices.Equal(server, identityProviderTypes) {
 		t.Errorf("the server accepts the types %v, the provider %v", server, identityProviderTypes)
+	}
+	var builtInValues []string
+	for _, name := range builtIn {
+		builtInValues = append(builtInValues, values[name])
+	}
+	slices.Sort(builtInValues)
+	var provider []string
+	for k := range builtInIssuer {
+		provider = append(provider, k)
+	}
+	slices.Sort(provider)
+	if len(builtInValues) == 0 || !slices.Equal(builtInValues, provider) {
+		t.Errorf("the server gives a built-in issuer to %v, the provider to %v", builtInValues, provider)
+	}
+}
+
+// returnsBool reports whether stmt is `return <value>` for a bool literal.
+func returnsBool(stmt ast.Stmt, value string) bool {
+	ret, ok := stmt.(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return false
+	}
+	id, ok := ret.Results[0].(*ast.Ident)
+	return ok && id.Name == value
+}
+
+func Test_identityProviderValidateConfig(t *testing.T) {
+	ctx := context.Background()
+	r := &IdentityProvider{}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	for name, tc := range map[string]struct {
+		idpType, issuer any
+		wantError       bool
+	}{
+		"google with the built-in issuer":    {idpType: "google", issuer: ""},
+		"microsoft with the built-in issuer": {idpType: "microsoft", issuer: ""},
+		"keycloak without an issuer":         {idpType: "keycloak", issuer: "", wantError: true},
+		"oidc without an issuer":             {idpType: "oidc", issuer: "", wantError: true},
+		"keycloak with an issuer":            {idpType: "keycloak", issuer: "https://id.example.com/realms/x"},
+		"issuer not known yet":               {idpType: "keycloak", issuer: tftypes.UnknownValue},
+		"type not known yet":                 {idpType: tftypes.UnknownValue, issuer: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			values := map[string]tftypes.Value{}
+			for n, at := range typ.AttributeTypes {
+				values[n] = tftypes.NewValue(at, nil)
+			}
+			values["type"] = tftypes.NewValue(tftypes.String, tc.idpType)
+			values["issuer"] = tftypes.NewValue(tftypes.String, tc.issuer)
+			var resp resource.ValidateConfigResponse
+			r.ValidateConfig(ctx, resource.ValidateConfigRequest{Config: tfsdk.Config{Schema: sch.Schema, Raw: tftypes.NewValue(typ, values)}}, &resp)
+			if resp.Diagnostics.HasError() != tc.wantError {
+				t.Fatalf("expected error %v, found %v", tc.wantError, resp.Diagnostics)
+			}
+		})
 	}
 }

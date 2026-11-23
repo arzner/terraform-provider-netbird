@@ -24,6 +24,7 @@ import (
 // Ensure provider defined types fully satisfy framework interfaces.
 var _ resource.Resource = &IdentityProvider{}
 var _ resource.ResourceWithImportState = &IdentityProvider{}
+var _ resource.ResourceWithValidateConfig = &IdentityProvider{}
 
 func NewIdentityProvider() resource.Resource {
 	return &IdentityProvider{}
@@ -79,7 +80,7 @@ func (r *IdentityProvider) Schema(ctx context.Context, req resource.SchemaReques
 				Sensitive:           true,
 			},
 			"issuer": schema.StringAttribute{
-				MarkdownDescription: "OIDC issuer URL",
+				MarkdownDescription: "OIDC issuer URL. `\"\"` uses the built-in issuer of google and microsoft; the other types need a URL, checked at plan time.",
 				Required:            true,
 			},
 		},
@@ -213,3 +214,23 @@ func (r *IdentityProvider) ImportState(ctx context.Context, req resource.ImportS
 // v0.82: IdentityProviderType.IsValid). Test_identityProviderTypes checks
 // them against the server source at the pinned version.
 var identityProviderTypes = []string{"adfs", "authentik", "entra", "google", "keycloak", "microsoft", "oidc", "okta", "pocketid", "zitadel"}
+
+// builtInIssuer lists the types whose issuer the server knows (v0.83, v0.82:
+// IdentityProviderType.HasBuiltInIssuer); every other type needs one.
+var builtInIssuer = map[string]bool{"google": true, "microsoft": true}
+
+// ValidateConfig refuses an empty issuer for a type without a built-in one,
+// which the server rejects. A type change replaces the provider, so without
+// this the plan would delete a working provider before a create that fails.
+func (r *IdentityProvider) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var idpType, issuer types.String
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("type"), &idpType)...)
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("issuer"), &issuer)...)
+	if resp.Diagnostics.HasError() || idpType.IsNull() || idpType.IsUnknown() || issuer.IsNull() || issuer.IsUnknown() {
+		return
+	}
+	if issuer.ValueString() == "" && !builtInIssuer[idpType.ValueString()] {
+		resp.Diagnostics.AddAttributeError(path.Root("issuer"), "Issuer required",
+			fmt.Sprintf("type %q has no built-in issuer; set issuer to the provider's issuer URL. Only google and microsoft work with issuer = \"\".", idpType.ValueString()))
+	}
+}
