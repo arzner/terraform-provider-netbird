@@ -47,7 +47,44 @@ func Test_ReverseProxyService_legacyStatePlan(t *testing.T) {
 		}
 		return &d
 	}
-	configured := map[string]tftypes.Value{"name": str("svc"), "domain": str("svc.example"), "mode": str("http")}
+	targetsType, ok := typ.AttributeTypes["targets"].(tftypes.List)
+	if !ok {
+		t.Fatal("targets is not a list")
+	}
+	targetType, ok := targetsType.ElementType.(tftypes.Object)
+	if !ok {
+		t.Fatal("a target is not an object")
+	}
+	target := func(v map[string]tftypes.Value) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range targetType.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		for n, x := range v {
+			values[n] = x
+		}
+		return tftypes.NewValue(targetsType, []tftypes.Value{tftypes.NewValue(targetType, values)})
+	}
+	authType, ok := typ.AttributeTypes["auth"].(tftypes.Object)
+	if !ok {
+		t.Fatal("auth is not an object")
+	}
+	emptyAuth := map[string]tftypes.Value{}
+	for n, at := range authType.AttributeTypes {
+		emptyAuth[n] = tftypes.NewValue(at, nil)
+	}
+	configuredTarget := map[string]tftypes.Value{
+		"target_id": str("peer1"), "target_type": str("peer"),
+		"port": tftypes.NewValue(tftypes.Number, 8080), "protocol": str("http"),
+	}
+	priorTarget := map[string]tftypes.Value{"host": str("100.64.0.5"), "path": str("/"), "enabled": tftypes.NewValue(tftypes.Bool, true)}
+	for k, v := range configuredTarget {
+		priorTarget[k] = v
+	}
+	configured := map[string]tftypes.Value{
+		"name": str("svc"), "domain": str("svc.example"), "mode": str("http"),
+		"targets": target(configuredTarget), "auth": tftypes.NewValue(authType, emptyAuth),
+	}
 	boolean := func(b bool) tftypes.Value { return tftypes.NewValue(tftypes.Bool, b) }
 	// State as 0.1.0 wrote it: every attribute it knew, the new ones null.
 	prior := map[string]tftypes.Value{
@@ -58,6 +95,7 @@ func Test_ReverseProxyService_legacyStatePlan(t *testing.T) {
 	for k, v := range configured {
 		prior[k] = v
 	}
+	prior["targets"] = target(priorTarget)
 
 	for name, tc := range map[string]struct {
 		rename      bool
@@ -80,6 +118,17 @@ func Test_ReverseProxyService_legacyStatePlan(t *testing.T) {
 			}
 			if _, err := server.GetProviderSchema(ctx, &tfprotov6.GetProviderSchemaRequest{}); err != nil {
 				t.Fatal(err)
+			}
+			valid, err := server.ValidateResourceConfig(ctx, &tfprotov6.ValidateResourceConfigRequest{
+				TypeName: "netbird_reverse_proxy_service", Config: dynamic(object(config)),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range valid.Diagnostics {
+				if d.Severity == tfprotov6.DiagnosticSeverityError {
+					t.Fatalf("configuration: %s: %s", d.Summary, d.Detail)
+				}
 			}
 			resp, err := server.PlanResourceChange(ctx, &tfprotov6.PlanResourceChangeRequest{
 				TypeName:         "netbird_reverse_proxy_service",

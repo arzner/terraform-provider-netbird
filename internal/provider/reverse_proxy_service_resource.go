@@ -297,7 +297,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Computed:            true,
 			},
 			"private": schema.BoolAttribute{
-				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity and the server generates an access policy from `access_groups` to the cluster's proxy peers. The proxy then skips the service's other authentication (SSO, password, PIN, header auth), even where `auth` still enables it; access restrictions still apply. Peers reach it only through a proxy of the cluster that has private access enabled (`NB_PROXY_PRIVATE=true` or `--private`, off by default); the server accepts the setting without one. A target with the `bypass` access action must be changed before a service can become private. Requires `mode = \"http\"`, at least one access group and no bearer auth. Left out, a new service is public and an existing one keeps its setting.",
+				MarkdownDescription: "When true, the service is reachable only over the NetBird tunnel: peers authenticate by their tunnel identity and the server generates an access policy from `access_groups` to the cluster's proxy peers. The proxy then skips the service's other authentication (SSO, password, PIN, header auth), even where `auth` still enables it. CIDR access restrictions still apply, matched against the peer's NetBird address; country restrictions do not. Peers reach it only through a proxy of the cluster that has private access enabled (`NB_PROXY_PRIVATE=true` or `--private`, off by default); the server accepts the setting without one. A target with the `bypass` access action must be changed before a service can become private. Requires `mode = \"http\"`, at least one access group and no bearer auth. Left out, a new service is public and an existing one keeps its setting.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseNonNullStateForUnknown()},
@@ -1327,7 +1327,13 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	}
 	// A configuration error stops at ValidateConfig, so this reports only
 	// problems with values kept from state.
-	resp.Diagnostics.Append(privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth)...)
+	problems := privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth)
+	if config.Private.IsNull() && problems.HasError() {
+		problems.AddAttributeError(path.Root("private"), "Service is private from its state",
+			"private is left out, so the service stays private and the errors above apply. Set private = false to make it "+
+				"public; that is also needed for -replace, which plans against the existing service first.")
+	}
+	resp.Diagnostics.Append(problems...)
 }
 
 // privateRequestProblem checks the access groups the update would send for a
