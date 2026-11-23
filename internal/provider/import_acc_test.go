@@ -23,6 +23,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 // gone is Terraform's own message for an import that resolved to nothing. It is
@@ -348,7 +349,8 @@ resource "netbird_agent_network_policy" "%[1]s" {
 // Test_Import_AccountSettingsChecksTheID: refresh reads the account whose ID is
 // in state, so importing an ID the management server does not list fails like
 // any other import of a missing object, instead of silently binding to
-// whichever account the token sees. Importing the real ID works.
+// whichever account the token sees. Importing the real ID works, and so does
+// "current" when the token sees exactly one account.
 func Test_Import_AccountSettingsChecksTheID(t *testing.T) {
 	testE2E(t)
 	n := "i" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
@@ -375,6 +377,19 @@ resource "netbird_account_settings" "%[1]s" {
 				ImportStateId:      mustE2E().AccountID,
 				ImportStatePersist: true,
 				Check:              resource.TestCheckResourceAttr(address, "id", mustE2E().AccountID),
+			},
+			{
+				// "current" resolves to the only account the token sees.
+				Config:        config,
+				ResourceName:  address,
+				ImportState:   true,
+				ImportStateId: "current",
+				ImportStateCheck: func(states []*terraform.InstanceState) error {
+					if len(states) != 1 || states[0].ID != mustE2E().AccountID {
+						return fmt.Errorf("expected one state with ID %s, found %v", mustE2E().AccountID, states)
+					}
+					return nil
+				},
 			},
 		},
 	})

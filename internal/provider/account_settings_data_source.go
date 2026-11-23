@@ -119,6 +119,32 @@ func (d *AccountSettingsDataSource) Schema(ctx context.Context, req datasource.S
 				MarkdownDescription: "Enables or disables TOTP multi-factor authentication for local users. Only applicable when the embedded identity provider is enabled.",
 				Computed:            true,
 			},
+			"metrics_push_enabled": schema.BoolAttribute{
+				MarkdownDescription: "Whether client metrics push is enabled for all peers in the account.",
+				Computed:            true,
+			},
+			"auto_update_always": schema.BoolAttribute{
+				MarkdownDescription: "Whether client updates are installed automatically in the background.",
+				Computed:            true,
+			},
+			"peer_hostname_collision_rejected": schema.BoolAttribute{
+				MarkdownDescription: "Whether a peer hostname already used in the account is rejected instead of suffixed.",
+				Computed:            true,
+			},
+			"agent_network_only": schema.BoolAttribute{
+				MarkdownDescription: "Whether the dashboard is limited to the Agent Network surface.",
+				Computed:            true,
+			},
+			"dashboard_features": schema.SingleNestedAttribute{
+				MarkdownDescription: "Per-account dashboard section visibility overrides.",
+				Computed:            true,
+				Attributes: map[string]schema.Attribute{
+					"agent_network": schema.BoolAttribute{
+						MarkdownDescription: "Whether the Agent Network menu is shown regardless of the deployment feature flag.",
+						Computed:            true,
+					},
+				},
+			},
 			"user_approval_required": schema.BoolAttribute{
 				MarkdownDescription: "Enables manual approval for new users joining via domain matching. When enabled, users are blocked with pending approval status until explicitly approved by an admin.",
 				Computed:            true,

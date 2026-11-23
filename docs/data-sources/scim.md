@@ -34,6 +34,7 @@ data "netbird_scim" "example" {
 
 ### Read-Only
 
+- `connector_id` (String) Dex connector ID, for setups with the embedded identity provider
 - `enabled` (Boolean) Indicates whether the integration is enabled
 - `group_prefixes` (List of String) List of start_with string patterns for groups to sync
 - `last_synced_at` (String) Timestamp of when the integration was last synced

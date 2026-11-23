@@ -36,6 +36,7 @@ type ScimDataSourceModel struct {
 	GroupPrefixes     types.List   `tfsdk:"group_prefixes"`
 	UserGroupPrefixes types.List   `tfsdk:"user_group_prefixes"`
 	LastSyncedAt      types.String `tfsdk:"last_synced_at"`
+	ConnectorId       types.String `tfsdk:"connector_id"`
 }
 
 func (d *ScimDataSource) Metadata(ctx context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
@@ -73,6 +74,10 @@ func (d *ScimDataSource) Schema(ctx context.Context, req datasource.SchemaReques
 			},
 			"last_synced_at": schema.StringAttribute{
 				MarkdownDescription: "Timestamp of when the integration was last synced",
+				Computed:            true,
+			},
+			"connector_id": schema.StringAttribute{
+				MarkdownDescription: "Dex connector ID, for setups with the embedded identity provider",
 				Computed:            true,
 			},
 		},
@@ -140,6 +145,7 @@ func (d *ScimDataSource) Read(ctx context.Context, req datasource.ReadRequest, r
 	data.ProviderName = types.StringValue(scim.Provider)
 	data.Enabled = types.BoolValue(scim.Enabled)
 	data.LastSyncedAt = types.StringValue(scim.LastSyncedAt.Format("2006-01-02T15:04:05Z"))
+	data.ConnectorId = types.StringPointerValue(scim.ConnectorId)
 	gp, diags := sortedStringList(ctx, data.GroupPrefixes, scim.GroupPrefixes)
 	resp.Diagnostics.Append(diags...)
 	data.GroupPrefixes = gp
