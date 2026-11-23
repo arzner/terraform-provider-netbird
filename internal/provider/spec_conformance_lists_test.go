@@ -17,14 +17,6 @@ var specRenamed = map[string]string{
 // reviewer can check; a property that later gets modelled or leaves the spec
 // fails Test_SpecConformance until it is removed here.
 var specUnmodelled = map[string]string{
-	// Account settings the resource does not manage yet (#23). The raw update
-	// sends the account's current value back unchanged, so they are kept.
-	"AccountSettings.agent_network_only":               "not modelled yet (#23); kept by the raw update",
-	"AccountSettings.auto_update_always":               "not modelled yet (#23); kept by the raw update",
-	"AccountSettings.dashboard_features":               "not modelled yet (#23); kept by the raw update",
-	"AccountSettings.metrics_push_enabled":             "not modelled yet (#23); kept by the raw update",
-	"AccountSettings.peer_hostname_collision_rejected": "not modelled yet (#23); kept by the raw update",
-
 	"PeerRequest.ipv6":             "not modelled yet (#24); the server keeps the peer's address when it is omitted",
 	"ServiceRequest.private":       "not modelled yet (#25)",
 	"ServiceRequest.access_groups": "not modelled yet (#25); only used with private",

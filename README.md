@@ -123,13 +123,14 @@ Check usage in [docs](./docs/index.md).
 Provider versions follow their own semantic versioning. Each release is built
 against one NetBird client library version and passes the acceptance suite
 against a NetBird server built from that same version: its *tested* version.
-The tested NetBird minor line is supported; the one before it is meant to be
-supported too once the acceptance suite also runs against it (not yet).
-Older servers may work but are not promised.
+The tested NetBird minor line is supported, and so is the one before it: every
+pull request and main build also runs the acceptance suite against the newest
+release of the previous minor line, with the provider unchanged. Older servers
+may work but are not promised.
 
 | Provider | Tested with NetBird | Supported NetBird |
 | --- | --- | --- |
-| 0.1.x | v0.83.2 | 0.83 |
+| 0.1.x | v0.83.2, v0.82.1 | 0.83, 0.82 |
 
 A new NetBird release is adopted by bumping the dependency, which runs the
 acceptance suite against the new server and the API spec check, and is
