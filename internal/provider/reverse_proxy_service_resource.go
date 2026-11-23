@@ -910,7 +910,8 @@ func preserveAuthSecrets(priorAuth, currentAuth types.Object) (types.Object, dia
 
 // preserveTargetPlanValues keeps the user's planned host/path/options values in targets
 // since the API may override them (e.g. resolving host from the peer's IP).
-// Targets are matched by target_id to handle potential reordering by the API.
+// Targets are matched as matchPlanTargets does, and keep the planned or
+// stored order when all of them pair.
 func preserveTargetPlanValues(ctx context.Context, planTargets, apiTargets types.List) (types.List, diag.Diagnostics) {
 	var ret diag.Diagnostics
 
@@ -925,12 +926,13 @@ func preserveTargetPlanValues(ctx context.Context, planTargets, apiTargets types
 		return apiTargets, ret
 	}
 
-	matches := matchPlanTargets(planModels, apiModels)
+	matches := matchPlanTargetIndexes(planModels, apiModels)
 	for i, apiModel := range apiModels {
-		planModel, ok := matches[i]
+		j, ok := matches[i]
 		if !ok {
 			continue
 		}
+		planModel := planModels[j]
 		// For peer, host and domain targets the server reports the address it
 		// looked up, not the configured one; subnet and cluster targets keep
 		// theirs, so the server's value stands and a change shows.
@@ -945,6 +947,17 @@ func preserveTargetPlanValues(ctx context.Context, planTargets, apiTargets types
 			ret.Append(d...)
 			apiModels[i].Options = options
 		}
+	}
+
+	// The server loads targets without an order: when every target pairs
+	// with a planned or stored one, they keep that order. Otherwise a target
+	// was added or removed, and the API order stands.
+	if len(matches) == len(apiModels) && len(apiModels) == len(planModels) {
+		ordered := make([]ReverseProxyServiceTargetModel, len(apiModels))
+		for i, j := range matches {
+			ordered[j] = apiModels[i]
+		}
+		apiModels = ordered
 	}
 
 	result, d := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), apiModels)
@@ -974,6 +987,16 @@ func serverResolvesHost(targetType string) bool {
 // so a change made outside Terraform (a moved path, a removed target) shows
 // in the next plan.
 func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]ReverseProxyServiceTargetModel {
+	out := map[int]ReverseProxyServiceTargetModel{}
+	for i, j := range matchPlanTargetIndexes(planned, live) {
+		out[i] = planned[j]
+	}
+	return out
+}
+
+// matchPlanTargetIndexes is matchPlanTargets by index: API target index to
+// planned target index.
+func matchPlanTargetIndexes(planned, live []ReverseProxyServiceTargetModel) map[int]int {
 	samePath := func(p, l ReverseProxyServiceTargetModel) bool {
 		return !p.Path.IsUnknown() && targetLocation(p.Path) == targetLocation(l.Path)
 	}
@@ -987,7 +1010,7 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 	sameHost := func(p, l ReverseProxyServiceTargetModel) bool {
 		return !p.Host.IsNull() && !p.Host.IsUnknown() && p.Host.Equal(l.Host)
 	}
-	out := map[int]ReverseProxyServiceTargetModel{}
+	out := map[int]int{}
 	used := make([]bool, len(planned))
 	// Only targets of one ID are compared, in the API's order.
 	byID := map[string][]int{}
@@ -1041,7 +1064,7 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 						pick = i
 					}
 				}
-				out[pick], used[j] = p, true
+				out[pick], used[j] = j, true
 			}
 		}
 	}

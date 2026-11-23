@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -1516,22 +1517,23 @@ func Test_preserveTargetPlanValues_pathAndDirectUpstream(t *testing.T) {
 			}
 			var out []ReverseProxyServiceTargetModel
 			got.ElementsAs(ctx, &out, false)
-			if out[0].Path.ValueString() != "/admin" || out[0].AccessAction.ValueString() != "block" || out[1].Path.ValueString() != "/public" {
+			// Both pair, so the planned order stands.
+			if out[1].Path.ValueString() != "/admin" || out[1].AccessAction.ValueString() != "block" || out[0].Path.ValueString() != "/public" {
 				t.Fatalf("targets matched to the wrong path: %+v", out)
 			}
-			if !out[1].Options.IsNull() {
+			if !out[0].Options.IsNull() {
 				t.Errorf("/public must keep no options, found %v", out[1].Options)
 			}
 			// With no options left on the server the parent is null unless the
 			// planned object sets only defaults.
 			wantNull := tc.liveDirect.IsNull() && tc.plannedDirect.Attributes()["direct_upstream"].Equal(types.BoolValue(true))
-			if out[0].Options.IsNull() != wantNull {
+			if out[1].Options.IsNull() != wantNull {
 				t.Fatalf("options: expected null %v, found %v", wantNull, out[0].Options)
 			}
 			if wantNull {
 				return
 			}
-			if v := out[0].Options.Attributes()["direct_upstream"]; !v.Equal(tc.want) {
+			if v := out[1].Options.Attributes()["direct_upstream"]; !v.Equal(tc.want) {
 				t.Errorf("direct_upstream: expected %v, found %v", tc.want, v)
 			}
 		})
@@ -1780,5 +1782,54 @@ func Test_reconcileOptions(t *testing.T) {
 	got, _ = reconcileOptions(options(n, n, types.BoolValue(false)), types.ObjectNull(optsType.AttrTypes))
 	if got.IsNull() || !got.Attributes()["skip_tls_verify"].Equal(types.BoolValue(false)) {
 		t.Errorf("options that set only defaults stay as planned, found %v", got)
+	}
+}
+
+// The server loads targets without an order: a reordered response keeps the
+// planned order when every target pairs, and the API order otherwise.
+func Test_preserveTargetPlanValues_order(t *testing.T) {
+	ctx := context.Background()
+	target := func(id string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue(id), TargetType: types.StringValue("peer"), Host: types.StringNull(),
+			Port: types.Int64Value(80), Protocol: types.StringValue("http"), Path: types.StringValue("/" + id),
+			Enabled: types.BoolValue(true), AccessAction: types.StringValue("inherit"),
+			Options: types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes),
+		}
+	}
+	list := func(ids ...string) types.List {
+		var targets []ReverseProxyServiceTargetModel
+		for _, id := range ids {
+			targets = append(targets, target(id))
+		}
+		l, d := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), targets)
+		if d.HasError() {
+			t.Fatal(d)
+		}
+		return l
+	}
+	for name, tc := range map[string]struct {
+		planned, live []string
+		want          []string
+	}{
+		"reordered":       {[]string{"a", "b", "c"}, []string{"c", "a", "b"}, []string{"a", "b", "c"}},
+		"one added":       {[]string{"a", "b"}, []string{"c", "b", "a"}, []string{"c", "b", "a"}},
+		"one removed":     {[]string{"a", "b", "c"}, []string{"c", "a"}, []string{"c", "a"}},
+		"one replaced":    {[]string{"a", "b"}, []string{"x", "a"}, []string{"x", "a"}},
+		"same order kept": {[]string{"a", "b"}, []string{"a", "b"}, []string{"a", "b"}},
+	} {
+		got, d := preserveTargetPlanValues(ctx, list(tc.planned...), list(tc.live...))
+		if d.HasError() {
+			t.Fatalf("%s: %v", name, d)
+		}
+		var out []ReverseProxyServiceTargetModel
+		got.ElementsAs(ctx, &out, false)
+		var ids []string
+		for _, o := range out {
+			ids = append(ids, o.TargetId.ValueString())
+		}
+		if !slices.Equal(ids, tc.want) {
+			t.Errorf("%s: expected %v, found %v", name, tc.want, ids)
+		}
 	}
 }

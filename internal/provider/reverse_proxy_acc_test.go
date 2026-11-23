@@ -352,6 +352,11 @@ func Test_ReverseProxyService_MultipleTargets(t *testing.T) {
 					},
 				),
 			},
+			// The server loads targets without an order; each refresh keeps
+			// the configured one, so the plan stays empty.
+			{Config: testReverseProxyServiceMultiTarget(rName, domain, peerID1, peerID2), PlanOnly: true},
+			{Config: testReverseProxyServiceMultiTarget(rName, domain, peerID1, peerID2), PlanOnly: true},
+			{Config: testReverseProxyServiceMultiTarget(rName, domain, peerID1, peerID2), PlanOnly: true},
 		},
 	})
 }
