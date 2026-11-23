@@ -144,3 +144,49 @@ func Test_dnsZone_groupLookupStaysOnEndpoint(t *testing.T) {
 		t.Errorf("expected no request for a path-like group ID, found %v", paths)
 	}
 }
+
+// Test_dnsZone_groupLookupStopsOnServerError: after a lookup the server
+// cannot answer, the plan fails without looking up the other groups.
+func Test_dnsZone_groupLookupStopsOnServerError(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"message":"unavailable","code":503}`)
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+	r := &DNSZone{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	value := func(domain string, groups ...string) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["id"] = tftypes.NewValue(tftypes.String, "z1")
+		values["name"] = tftypes.NewValue(tftypes.String, "z")
+		values["domain"] = tftypes.NewValue(tftypes.String, domain)
+		var g []tftypes.Value
+		for _, id := range groups {
+			g = append(g, tftypes.NewValue(tftypes.String, id))
+		}
+		values["distribution_groups"] = tftypes.NewValue(tftypes.Set{ElementType: tftypes.String}, g)
+		return tftypes.NewValue(typ, values)
+	}
+	config := value("after.local", "g1", "g2")
+	req := resource.ModifyPlanRequest{
+		Config: tfsdk.Config{Schema: sch.Schema, Raw: config},
+		Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: config},
+		State:  tfsdk.State{Schema: sch.Schema, Raw: value("before.local", "g1")},
+	}
+	resp := resource.ModifyPlanResponse{Plan: req.Plan}
+	r.ModifyPlan(ctx, req, &resp)
+	if !resp.Diagnostics.HasError() || requests != 1 {
+		t.Errorf("expected the plan refused after one request, found %v after %d requests", resp.Diagnostics, requests)
+	}
+}

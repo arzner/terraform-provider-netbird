@@ -73,7 +73,7 @@ func (r *DNSZone) Schema(ctx context.Context, req resource.SchemaRequest, resp *
 				Validators:          []validator.String{stringvalidator.LengthBetween(1, 255)},
 			},
 			"domain": schema.StringAttribute{
-				MarkdownDescription: "Zone domain (FQDN, no wildcard, no trailing dot; a known value is checked at plan time the way the server does). The server does not change the domain of a zone, so a new domain replaces the zone. The server deletes the old zone with all its records. A `netbird_dns_record` in the same configuration whose `zone_id` refers to this zone is created again in the new zone (its name has to move to the new domain too); any other record, added outside Terraform, with a literal zone ID or in another state, is lost. The plan does not check that the new domain is free: one used by another zone or by the peer DNS domain fails after the old zone is deleted, unless `lifecycle { create_before_destroy = true }` is set.",
+				MarkdownDescription: "Zone domain (FQDN, no wildcard, no trailing dot; a known value is checked at plan time the way the server does). The server does not change the domain of a zone, so a new domain replaces the zone. The server deletes the old zone with all its records. A `netbird_dns_record` in the same configuration whose `zone_id` refers to this zone is created again in the new zone by the same apply (its name has to move to the new domain too), unless the apply is targeted (`-target`) without it; any other record, added outside Terraform, with a literal zone ID or in another state, is lost. The plan does not check that the new domain is free: one used by another zone or by the peer DNS domain fails after the old zone is deleted, unless `lifecycle { create_before_destroy = true }` is set.",
 				Required:            true,
 				Validators:          []validator.String{zoneDomain{}},
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
@@ -347,6 +347,8 @@ func (r *DNSZone) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest
 			// Inconclusive: refuse rather than risk deleting the zone.
 			resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Distribution group not checked",
 				fmt.Sprintf("Group %q could not be looked up before the replacement, which deletes the zone first: %s. Plan again once the server answers.", id.ValueString(), err))
+			// The plan fails either way: no further lookups.
+			return
 		case group.Id != id.ValueString():
 			// The lookup goes through the URL, which does not carry every
 			// character the create sends (a "#..." suffix, for one).
