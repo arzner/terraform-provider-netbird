@@ -277,12 +277,3 @@ func (r *Scim) ImportState(ctx context.Context, req resource.ImportStateRequest,
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
-// configuredOnly returns the planned value when the configuration sets the
-// attribute and null otherwise: whether to send comes from the configuration,
-// what to send from the plan (which honours ignore_changes).
-func configuredOnly(planned, configured types.String) types.String {
-	if configured.IsNull() {
-		return types.StringNull()
-	}
-	return planned
-}
