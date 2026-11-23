@@ -4,9 +4,12 @@ package provider
 
 import (
 	"context"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -69,6 +72,16 @@ func Test_SpecConformance(t *testing.T) {
 					}
 					if !rm.checks(child) {
 						t.Errorf("%s: flattened schema %s is not checked; add it to specResources", rm.typeName, child)
+					}
+					if prop.readOnly {
+						// Its members are checked as the child schema, which
+						// does not know the parent is read-only.
+						childProps, _ := spec.properties(child)
+						for _, cn := range sortedKeys(childProps) {
+							if c, modelled := attrs[attrName(child+"."+cn, cn)]; modelled && c.configurable {
+								t.Errorf("%s: %s is read-only in the spec, but its member %q is configurable", rm.typeName, key, c.name)
+							}
+						}
 					}
 					continue
 				}
@@ -181,6 +194,20 @@ func resourceAttributes(t *testing.T, r resource.Resource) map[string]attrInfo {
 	return schemaMembers(resp.Schema.Attributes, resp.Schema.Blocks)
 }
 
+// objectMembers returns the members of an object attribute's type; they are
+// configurable when the object is.
+func objectMembers(types map[string]attr.Type, configurable bool) map[string]attrInfo {
+	out := map[string]attrInfo{}
+	for name, typ := range types {
+		info := attrInfo{name: name, configurable: configurable}
+		if o, ok := typ.(basetypes.ObjectType); ok {
+			info.children = objectMembers(o.AttrTypes, configurable)
+		}
+		out[name] = info
+	}
+	return out
+}
+
 func schemaMembers(attributes map[string]rschema.Attribute, blocks map[string]rschema.Block) map[string]attrInfo {
 	out := map[string]attrInfo{}
 	for name, a := range attributes {
@@ -194,6 +221,8 @@ func schemaMembers(attributes map[string]rschema.Attribute, blocks map[string]rs
 			info.children = schemaMembers(n.NestedObject.Attributes, nil)
 		case rschema.MapNestedAttribute:
 			info.children = schemaMembers(n.NestedObject.Attributes, nil)
+		case rschema.ObjectAttribute:
+			info.children = objectMembers(n.AttributeTypes, info.configurable)
 		}
 		out[name] = info
 	}
@@ -230,8 +259,12 @@ type specProperty struct {
 	// through a single allOf part.
 	items string
 	// inline is the schema of an inline object, or of an array's inline item
-	// object, with no component name of its own.
+	// object, with no component name of its own; for a composition of several
+	// parts it holds all of them.
 	inline *schemaDoc
+	// array is set when the property is an array (directly or through a
+	// reference): items and inline then describe its items.
+	array bool
 }
 
 type openAPISpec struct {
@@ -293,11 +326,16 @@ func (s openAPISpec) property(d schemaDoc, depth int) (specProperty, bool) {
 		if !ok {
 			return specProperty{}, false
 		}
-		out.items, out.inline = item.ref, item.inline
+		out.items, out.inline, out.array = item.ref, item.inline, true
 	}
-	if len(d.Properties) > 0 {
+	if len(d.Properties) > 0 || (len(d.AllOf) > 1 && objectParts(d.AllOf)) {
+		// An inline object, or a composition of objects: its members are the
+		// union of every part, which propertiesOf walks.
 		inline := d
-		out.inline = &inline
+		inline.Items, inline.ReadOnly = nil, false
+		if !out.array {
+			out.inline = &inline
+		}
 	}
 	if d.Ref != "" {
 		inner, ok := s.schemas[refName(d.Ref)]
@@ -311,6 +349,10 @@ func (s openAPISpec) property(d schemaDoc, depth int) (specProperty, bool) {
 			return specProperty{}, false
 		}
 		out.readOnly = out.readOnly || resolved.readOnly
+		if resolved.array && !out.array {
+			// A named array: its items are what a nested attribute models.
+			out.items, out.inline, out.array = resolved.items, resolved.inline, true
+		}
 	}
 	for _, part := range d.AllOf {
 		p, ok := s.property(part, depth+1)
@@ -320,12 +362,25 @@ func (s openAPISpec) property(d schemaDoc, depth int) (specProperty, bool) {
 		out.readOnly = out.readOnly || p.readOnly
 		if len(d.AllOf) == 1 && out.ref == "" {
 			out.ref = p.ref
-			if out.items == "" && out.inline == nil {
-				out.items, out.inline = p.items, p.inline
+			if !out.array && p.array {
+				out.items, out.inline, out.array = p.items, p.inline, true
+			} else if out.inline == nil {
+				out.inline = p.inline
 			}
 		}
 	}
 	return out, true
+}
+
+// objectParts reports whether a composition has a part with members: a
+// reference to a component or an inline object.
+func objectParts(parts []schemaDoc) bool {
+	for _, part := range parts {
+		if part.Ref != "" || len(part.Properties) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // properties resolves a component schema's properties through $ref and allOf.
@@ -374,6 +429,7 @@ func (s openAPISpec) propertiesOf(doc schemaDoc) (map[string]specProperty, bool)
 				if prop.inline == nil {
 					prop.inline = prev.inline
 				}
+				prop.array = prop.array || prev.array
 			}
 			out[p] = prop
 		}
@@ -457,6 +513,25 @@ schemas:
               type: object
               properties:
                 c: {type: string}
+          mixedItems:
+            type: array
+            items:
+              allOf:
+                - $ref: '#/components/schemas/Child'
+                - type: object
+                  properties:
+                    d: {type: string}
+          mixedObject:
+            allOf:
+              - $ref: '#/components/schemas/Child'
+              - type: object
+                properties:
+                  e: {type: string}
+          namedArray: {$ref: '#/components/schemas/ChildList'}
+  ChildList:
+    type: array
+    items:
+      $ref: '#/components/schemas/Child'
 `
 	if err := yaml.Unmarshal([]byte(fixture), &doc); err != nil {
 		t.Fatal(err)
@@ -475,21 +550,31 @@ schemas:
 		"plain":            {},
 		"chained":          {readOnly: true, ref: "Alias"},
 		"chainedTwice":     {readOnly: true, ref: "AliasOfAlias"},
-		"children":         {items: "Child"},
-		"composedChildren": {items: "Child"},
+		"children":         {items: "Child", array: true},
+		"composedChildren": {items: "Child", array: true},
+		"namedArray":       {ref: "ChildList", items: "Child", array: true},
 	}
-	inline := map[string]string{"inlineObject": "b", "inlineItems": "c"}
-	for name, member := range inline {
+	// Inline schemas and compositions: their members, including every part.
+	inline := map[string]struct {
+		members []string
+		array   bool
+	}{
+		"inlineObject": {[]string{"b"}, false},
+		"inlineItems":  {[]string{"c"}, true},
+		"mixedItems":   {[]string{"a", "d"}, true},
+		"mixedObject":  {[]string{"a", "e"}, false},
+	}
+	for name, w := range inline {
 		got := props[name]
 		if got.inline == nil {
 			t.Errorf("%s: expected an inline schema, found %+v", name, got)
 			continue
 		}
 		members, ok := s.propertiesOf(*got.inline)
-		if _, has := members[member]; !ok || !has || len(members) != 1 {
-			t.Errorf("%s: expected the inline member %s, found %v", name, member, members)
+		if !ok || !slices.Equal(sortedKeys(members), w.members) {
+			t.Errorf("%s: expected the members %v, found %v", name, w.members, members)
 		}
-		want[name] = specProperty{inline: got.inline}
+		want[name] = specProperty{inline: got.inline, array: w.array, ref: got.ref}
 	}
 	for name, w := range want {
 		if got := props[name]; got != w {
@@ -530,12 +615,19 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 	var props map[string]specProperty
 	var ok bool
 	switch {
+	case prop.array && prop.items != "":
+		label = prop.items
+		props, ok = w.spec.properties(prop.items)
+	case prop.array && prop.inline != nil:
+		props, ok = w.spec.propertiesOf(*prop.inline)
+	case prop.array:
+		return // an array of scalars
+	case prop.inline != nil && len(prop.inline.AllOf) > 1:
+		// A composition: the union of its parts, keyed by the parent.
+		props, ok = w.spec.propertiesOf(*prop.inline)
 	case prop.ref != "":
 		label = prop.ref
 		props, ok = w.spec.properties(prop.ref)
-	case prop.items != "":
-		label = prop.items
-		props, ok = w.spec.properties(prop.items)
 	case prop.inline != nil:
 		props, ok = w.spec.propertiesOf(*prop.inline)
 	default:
@@ -556,12 +648,12 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 		w.checked[key] = true
 		if specNestedFlattened[key] {
 			// The provider spreads this array's item members over the parent.
-			if p.items == "" && p.inline == nil {
+			if !p.array || !w.objectItems(p) {
 				w.t.Errorf("%s: %s is listed in specNestedFlattened but is not an array of objects", typeName, key)
 				continue
 			}
 			w.expanded[key] = true
-			w.checkNested(typeName, key, specProperty{readOnly: p.readOnly, items: p.items, inline: p.inline}, a, depth+1)
+			w.checkNested(typeName, key, specProperty{readOnly: p.readOnly, items: p.items, inline: p.inline, array: true}, a, depth+1)
 			continue
 		}
 		if _, listed := specUnmodelled[key]; listed {
@@ -584,4 +676,13 @@ func (w *specWalk) checkNested(typeName, key string, prop specProperty, a attrIn
 		}
 		w.checkNested(typeName, key, p, c, depth+1)
 	}
+}
+
+// objectItems reports whether an array property's items have members.
+func (w *specWalk) objectItems(p specProperty) bool {
+	if p.inline != nil {
+		return true
+	}
+	props, ok := w.spec.properties(p.items)
+	return ok && len(props) > 0
 }
