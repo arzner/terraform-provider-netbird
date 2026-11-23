@@ -303,7 +303,9 @@ func (r *DNSZone) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest
 		var planned, current types.String
 		resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("domain"), &planned)...)
 		resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("domain"), &current)...)
-		replaces = !planned.IsUnknown() && !planned.Equal(current)
+		// A domain not known yet also forces the replacement (RequiresReplace
+		// compares it with the state).
+		replaces = planned.IsUnknown() || !planned.Equal(current)
 	}
 	if !creates && !replaces {
 		return
@@ -323,14 +325,20 @@ func (r *DNSZone) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest
 		if !ok || id.IsNull() || id.IsUnknown() {
 			continue
 		}
-		if _, err := r.client.Groups.Get(ctx, id.ValueString()); err != nil {
-			if netbird.IsNotFound(err) {
-				resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Distribution group not found",
-					fmt.Sprintf("Group %q does not exist, so the zone for the new domain could not be created after the old one is deleted.", id.ValueString()))
-				continue
-			}
-			resp.Diagnostics.AddAttributeWarning(path.Root("distribution_groups"), "Distribution group not checked",
-				fmt.Sprintf("Group %q could not be looked up before the replacement: %s", id.ValueString(), err))
+		group, err := r.client.Groups.Get(ctx, id.ValueString())
+		switch {
+		case err != nil && netbird.IsNotFound(err):
+			resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Distribution group not found",
+				fmt.Sprintf("Group %q does not exist, so the zone for the new domain could not be created after the old one is deleted.", id.ValueString()))
+		case err != nil:
+			// Inconclusive: refuse rather than risk deleting the zone.
+			resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Distribution group not checked",
+				fmt.Sprintf("Group %q could not be looked up before the replacement, which deletes the zone first: %s. Plan again once the server answers.", id.ValueString(), err))
+		case group.Id != id.ValueString():
+			// The lookup goes through the URL, which does not carry every
+			// character the create sends (a "#..." suffix, for one).
+			resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Distribution group not found",
+				fmt.Sprintf("Group %q is not a group ID the server knows (the lookup returned %q).", id.ValueString(), group.Id))
 		}
 	}
 }
