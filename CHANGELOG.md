@@ -74,9 +74,6 @@ to 1.13.
   the newest NetBird release that opens an issue when it fails (#17).
 - Built against the NetBird client library v0.83.2 (was v0.81.0-canary.pr-7662.1); the acceptance
   suite runs against a NetBird v0.83.2 server (#3; upstream [#280](https://github.com/netbirdio/terraform-provider-netbird/pull/280) bumps to 0.83.1).
-- `netbird_reverse_proxy_service`: changing `mode` replaces the service (except setting `http`
-  where it was unset); the server refuses a mode change on update, so such a plan used to fail
-  at apply (#77).
 
 ### Removed
 

@@ -12,7 +12,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -233,7 +232,6 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 	}{
 		"new without groups":     {create: true, config: vals{"private": on}, plan: vals{"private": on, "access_groups": tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, tftypes.UnknownValue)}, wantError: true},
 		"new with groups":        {create: true, config: vals{"private": on, "access_groups": groups}, plan: vals{"private": on, "access_groups": groups}},
-		"kept private, tcp":      {config: vals{"mode": tcp}, plan: vals{"private": on, "mode": tcp, "access_groups": groups}, wantError: true},
 		"kept private, bearer":   {config: vals{"auth": bearer}, plan: vals{"private": on, "mode": http, "access_groups": groups, "auth": bearer}, wantError: true},
 		"kept private, no group": {config: vals{"access_groups": noGroups}, plan: vals{"private": on, "access_groups": noGroups}, wantError: true},
 		"kept private, fine":     {config: vals{}, plan: vals{"private": on, "mode": http, "access_groups": groups}},
@@ -254,10 +252,19 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 			config: vals{"private": on, "access_groups": groups},
 			plan:   vals{"private": on, "mode": tftypes.NewValue(tftypes.String, tftypes.UnknownValue), "access_groups": groups},
 		},
-		"made private, explicit http on a tcp service (replaced)": {
+		"made private, explicit http on a tcp service (fails in place, fine replaced)": {
 			state:  vals{"private": tftypes.NewValue(tftypes.Bool, false), "mode": tcp, "access_groups": groups},
 			config: vals{"private": on, "mode": http, "access_groups": groups},
 			plan:   vals{"private": on, "mode": http, "access_groups": groups},
+		},
+		"made private, mode from an expression": {
+			state:  vals{"private": tftypes.NewValue(tftypes.Bool, false), "mode": tcp, "access_groups": groups},
+			config: vals{"private": on, "mode": tftypes.NewValue(tftypes.String, tftypes.UnknownValue), "access_groups": groups},
+			plan:   vals{"private": on, "mode": tftypes.NewValue(tftypes.String, tftypes.UnknownValue), "access_groups": groups},
+		},
+		"private kept, mode changed to tcp": {
+			state:  vals{"private": on, "mode": http, "access_groups": groups},
+			config: vals{"mode": tcp}, plan: vals{"private": on, "mode": tcp, "access_groups": groups},
 		},
 		"no-op with an adopted blank group": {
 			state:  vals{"private": on, "mode": http, "access_groups": blankGroup},
@@ -381,26 +388,5 @@ func Test_reverseProxyService_accessPlanModifiers(t *testing.T) {
 	g1 := types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g1")})
 	if got := planList(g1); !got.Equal(g1) {
 		t.Errorf("access_groups from state: expected [g1], found %v", got)
-	}
-}
-
-func Test_modeChangeNeedsReplace(t *testing.T) {
-	for name, tc := range map[string]struct {
-		state, plan types.String
-		want        bool
-	}{
-		"tcp to http":   {types.StringValue("tcp"), types.StringValue("http"), true},
-		"http to udp":   {types.StringValue("http"), types.StringValue("udp"), true},
-		"tcp to tls":    {types.StringValue("tcp"), types.StringValue("tls"), true},
-		"unset to http": {types.StringValue(""), types.StringValue("http"), false},
-		"same":          {types.StringValue("tcp"), types.StringValue("tcp"), false},
-		"left out":      {types.StringValue("tcp"), types.StringUnknown(), false},
-		"new service":   {types.StringNull(), types.StringValue("tcp"), false},
-	} {
-		var resp stringplanmodifier.RequiresReplaceIfFuncResponse
-		modeChangeNeedsReplace(context.Background(), planmodifier.StringRequest{StateValue: tc.state, PlanValue: tc.plan}, &resp)
-		if resp.RequiresReplace != tc.want {
-			t.Errorf("%s: expected replace %v, found %v", name, tc.want, resp.RequiresReplace)
-		}
 	}
 }

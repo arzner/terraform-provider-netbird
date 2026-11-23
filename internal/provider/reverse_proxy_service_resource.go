@@ -259,13 +259,10 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"mode": schema.StringAttribute{
-				MarkdownDescription: "Service mode: \"http\" for L7 reverse proxy, \"tcp\"/\"udp\"/\"tls\" for L4 passthrough. The server does not change the mode of an existing service, so changing it replaces the service (except setting \"http\" where it was unset).",
+				MarkdownDescription: "Service mode: \"http\" for L7 reverse proxy, \"tcp\"/\"udp\"/\"tls\" for L4 passthrough",
 				Optional:            true,
 				Computed:            true,
 				Validators:          []validator.String{stringvalidator.OneOf("http", "tcp", "udp", "tls")},
-				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplaceIf(modeChangeNeedsReplace,
-					"The server does not change a service's mode on update, so a change of mode replaces the service.",
-					"The server does not change a service's mode on update, so a change of mode replaces the service.")},
 			},
 			"listen_port": schema.Int64Attribute{
 				MarkdownDescription: "Port the proxy listens on (L4/TLS only). Set to 0 for auto-assignment.",
@@ -1301,32 +1298,27 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 			// not this plan's problem.
 			return
 		}
-		// A left-out mode is not sent and the server keeps the service's
-		// mode. A configured change of mode replaces the service, so the
-		// planned mode is the one the new service gets.
-		if plan.Mode.IsUnknown() {
-			var state ReverseProxyServiceModel
-			resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-			if resp.Diagnostics.HasError() {
-				return
-			}
+		var state ReverseProxyServiceModel
+		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		switch {
+		case config.Mode.IsNull():
+			// A left-out mode is not sent and the server keeps the
+			// service's mode.
 			plan.Mode = state.Mode
+		case !config.Mode.Equal(state.Mode):
+			// A configured mode change (or one not known yet) fails in
+			// place (#77) and is planned anew against an empty state when
+			// the service is replaced, so the values kept from this state
+			// say nothing about the new service.
+			return
 		}
 	}
 	// A configuration error stops at ValidateConfig, so this reports only
 	// problems with values kept from state.
 	resp.Diagnostics.Append(privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth)...)
-}
-
-// modeChangeNeedsReplace reports a configured mode change the server refuses
-// on update: any change except between an unset mode and http.
-func modeChangeNeedsReplace(_ context.Context, req planmodifier.StringRequest, resp *stringplanmodifier.RequiresReplaceIfFuncResponse) {
-	if req.StateValue.IsNull() || req.StateValue.IsUnknown() || req.PlanValue.IsNull() || req.PlanValue.IsUnknown() {
-		return
-	}
-	httpFamily := func(mode string) bool { return mode == "" || mode == "http" }
-	old, planned := req.StateValue.ValueString(), req.PlanValue.ValueString()
-	resp.RequiresReplace = old != planned && !(httpFamily(old) && httpFamily(planned))
 }
 
 // privateRequestProblem checks the access groups the update would send for a
@@ -1383,7 +1375,7 @@ func privateServiceProblems(mode types.String, groups types.List, auth types.Obj
 	if !mode.IsNull() && !mode.IsUnknown() && mode.ValueString() != "http" {
 		diags.AddAttributeError(path.Root("mode"), "Private services are HTTP only",
 			fmt.Sprintf("private = true requires mode = \"http\", got %q. An existing service keeps its mode when mode is "+
-				"left out; setting mode = \"http\" replaces a TCP, UDP or TLS service.", mode.ValueString()))
+				"left out, and the server does not change the mode of an existing service.", mode.ValueString()))
 	}
 	if !groups.IsNull() && !groups.IsUnknown() {
 		if len(groups.Elements()) == 0 {
