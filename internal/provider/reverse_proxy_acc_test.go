@@ -692,6 +692,44 @@ func Test_ReverseProxyService_TCPMode(t *testing.T) {
 				ImportState:       true,
 				ImportStateVerify: true,
 			},
+			{
+				// The server does not change a service's mode: the update
+				// stops before writing.
+				Config: testReverseProxyServiceL4(rName, domain, peerID, "udp", 15432, `
+    options = {
+      proxy_protocol  = true
+      request_timeout = "1m0s"
+    }`),
+				ExpectError: regexp.MustCompile(`Mode cannot be changed`),
+			},
+			{
+				// With mode left out, an update keeps (and sends) the TCP
+				// mode; a request without one would be refused as a change
+				// to HTTP.
+				Config: strings.Replace(testReverseProxyServiceL4(rName, domain, peerID, "tcp", 15432, `
+    options = {
+      proxy_protocol  = true
+      request_timeout = "2m0s"
+    }`), "  mode        = \"tcp\"\n", "", 1),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionUpdate),
+					plancheck.ExpectKnownValue(rNameFull, tfjsonpath.New("mode"), knownvalue.StringExact("tcp")),
+				}},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "mode", "tcp"),
+					resource.TestCheckResourceAttr(rNameFull, "targets.0.options.request_timeout", "2m0s"),
+					func(s *terraform.State) error {
+						svc, err := testClient().ReverseProxyServices.Get(context.Background(), s.RootModule().Resources[rNameFull].Primary.Attributes["id"])
+						if err != nil {
+							return err
+						}
+						if svc.Mode == nil || *svc.Mode != "tcp" {
+							return fmt.Errorf("expected mode tcp on the server, found %v", svc.Mode)
+						}
+						return nil
+					},
+				),
+			},
 		},
 	})
 }

@@ -1782,3 +1782,22 @@ func Test_reconcileOptions(t *testing.T) {
 		t.Errorf("options that set only defaults stay as planned, found %v", got)
 	}
 }
+
+// A known mode other than the stored one is refused; a left-out or unknown
+// mode and the same mode are not.
+func Test_modeChangeProblem(t *testing.T) {
+	for name, tc := range map[string]struct {
+		stored, planned types.String
+		wantError       bool
+	}{
+		"tcp to http":  {types.StringValue("tcp"), types.StringValue("http"), true},
+		"http to udp":  {types.StringValue("http"), types.StringValue("udp"), true},
+		"tcp kept":     {types.StringValue("tcp"), types.StringValue("tcp"), false},
+		"unknown":      {types.StringValue("tcp"), types.StringUnknown(), false},
+		"none planned": {types.StringValue("tcp"), types.StringNull(), false},
+	} {
+		if got := modeChangeProblem(tc.stored, tc.planned).HasError(); got != tc.wantError {
+			t.Errorf("%s: expected error %v, found %v", name, tc.wantError, got)
+		}
+	}
+}

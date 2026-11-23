@@ -271,10 +271,13 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"mode": schema.StringAttribute{
-				MarkdownDescription: "Service mode: \"http\" for L7 reverse proxy, \"tcp\"/\"udp\"/\"tls\" for L4 passthrough",
+				MarkdownDescription: "Service mode: \"http\" for L7 reverse proxy, \"tcp\"/\"udp\"/\"tls\" for L4 passthrough. Left out, a new service is HTTP and an existing one keeps its mode. The server does not change the mode of a service: a change is a plan warning and the update stops before writing; replace the service instead (`-replace`).",
 				Optional:            true,
 				Computed:            true,
 				Validators:          []validator.String{stringvalidator.OneOf("http", "tcp", "udp", "tls")},
+				// Sent on every update: a request without a mode is validated
+				// as HTTP, which an L4 service refuses.
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"listen_port": schema.Int64Attribute{
 				MarkdownDescription: "Port the proxy listens on (L4/TLS only). Set to 0 for auto-assignment.",
@@ -1444,6 +1447,10 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 				"\n\nNothing was changed. Run plan again.")
 		return
 	}
+	if d := modeChangeProblem(prior.Mode, data.Mode); d.HasError() {
+		resp.Diagnostics.Append(d...)
+		return
+	}
 	keepLiveUnknownAccess(&serviceReq, data, live)
 	if err := privateRequestProblem(serviceReq, live.Private != nil && *live.Private); err != nil {
 		resp.Diagnostics.AddError("Private service without usable access groups", err.Error())
@@ -1580,6 +1587,10 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	}
 	if resp.Diagnostics.HasError() {
 		return
+	}
+	if !create && !config.Mode.IsNull() && !config.Mode.IsUnknown() && !state.Mode.IsNull() && !state.Mode.IsUnknown() &&
+		config.Mode.ValueString() != state.Mode.ValueString() {
+		resp.Diagnostics.Append(inPlaceOnly(modeChangeProblem(state.Mode, config.Mode))...)
 	}
 	// The mode the server will hold: a left-out mode is not sent, so an
 	// existing service keeps its own and a new one is HTTP.
@@ -2018,6 +2029,19 @@ func keptActionProblems(ctx context.Context, req api.ServiceRequest, live *api.S
 	_, _, updateOnly := actions.problems(req.Private != nil && *req.Private, mode)
 	diags.Append(updateOnly...)
 	return diags
+}
+
+// modeChangeProblem refuses a known mode other than the stored one:
+// validateProtocolChange (v0.83.2, v0.82.1) allows no change but between an
+// unset mode and HTTP, and the read reports unset as HTTP.
+func modeChangeProblem(stored, planned types.String) diag.Diagnostics {
+	var d diag.Diagnostics
+	if stored.IsNull() || stored.IsUnknown() || planned.IsNull() || planned.IsUnknown() || stored.Equal(planned) {
+		return d
+	}
+	d.AddAttributeError(path.Root("mode"), "Mode cannot be changed",
+		fmt.Sprintf("NetBird does not change the mode of a service (%q to %q). Keep the current mode, or replace the service (-replace, or a new netbird_reverse_proxy_service).", stored.ValueString(), planned.ValueString()))
+	return d
 }
 
 // inPlaceOnly turns errors that only an in-place update meets into

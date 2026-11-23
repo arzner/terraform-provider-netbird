@@ -66,6 +66,11 @@ it is based on.
 
 ### Fixed
 
+- `netbird_reverse_proxy_service`: a TCP, UDP or TLS service whose configuration leaves `mode` out
+  (for example after an import) can be updated in place again; the stored mode is kept in the plan
+  and sent, where a request without one was validated as a change to HTTP and refused. A mode
+  change is a plan warning and the update stops before writing, since the server does not change
+  the mode of a service (#77).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the
