@@ -321,7 +321,29 @@ func Test_PostureCheck_EmptyDescription(t *testing.T) {
 			{
 				// Removing it clears it on the server, read back as null.
 				Config: config(""),
-				Check:  resource.TestCheckNoResourceAttr(rNameFull, "description"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckNoResourceAttr(rNameFull, "description"),
+					func(*terraform.State) error {
+						pc, err := testClient().PostureChecks.Get(context.Background(), createdID)
+						if err != nil {
+							return err
+						}
+						if pc.Description != nil && *pc.Description != "" {
+							return fmt.Errorf("description on the server: expected empty, found %q", *pc.Description)
+						}
+						return nil
+					},
+				),
+			},
+			// A fresh import of the check without a description reads null.
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				// The data source reports what the server holds: "".
+				Config: config("") + fmt.Sprintf(`
+data "netbird_posture_check" "lookup" {
+  id = netbird_posture_check.%s.id
+}`, rName),
+				Check: resource.TestCheckResourceAttr("data.netbird_posture_check.lookup", "description", ""),
 			},
 		},
 	})

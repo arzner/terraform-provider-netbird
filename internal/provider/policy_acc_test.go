@@ -328,16 +328,32 @@ func Test_Policy_EmptyRuleDescription(t *testing.T) {
 		CheckDestroy:             testCheckGone(testClient().Policies.Get, &createdID),
 		Steps: []resource.TestStep{
 			{
-				Config: config(`description = ""`, `description = ""`),
+				// Left out: null in state, empty on the server, null on import.
+				Config: config("", ""),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					testRecordID(rNameFull, &createdID),
+					resource.TestCheckNoResourceAttr(rNameFull, "description"),
+					resource.TestCheckNoResourceAttr(rNameFull, "rule.0.description"),
+					func(*terraform.State) error {
+						p, err := testClient().Policies.Get(context.Background(), createdID)
+						if err != nil {
+							return err
+						}
+						empty := func(v *string) bool { return v == nil || *v == "" }
+						if !empty(p.Description) || len(p.Rules) != 1 || !empty(p.Rules[0].Description) {
+							return fmt.Errorf("expected empty descriptions on the server, found %v", p)
+						}
+						return nil
+					},
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				Config: config(`description = ""`, `description = ""`),
+				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(rNameFull, "description", ""),
 					resource.TestCheckResourceAttr(rNameFull, "rule.0.description", ""),
 				),
-			},
-			{
-				Config: config("", ""),
-				Check:  resource.TestCheckNoResourceAttr(rNameFull, "rule.0.description"),
 			},
 		},
 	})

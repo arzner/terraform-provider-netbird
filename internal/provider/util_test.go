@@ -258,6 +258,7 @@ func Test_emptyAsPrior(t *testing.T) {
 		"empty, not known yet":   {types.StringUnknown(), &empty, types.StringNull()},
 		"set":                    {types.StringNull(), &set, types.StringValue("x")},
 		"set over planned empty": {types.StringValue(""), &set, types.StringValue("x")},
+		"cleared outside":        {types.StringValue("x"), &empty, types.StringNull()},
 	} {
 		if got := emptyAsPrior(tc.prior, tc.v); !got.Equal(tc.want) {
 			t.Errorf("%s: expected %v, found %v", name, tc.want, got)
