@@ -145,8 +145,8 @@ existing configurations is released as a new minor version (0.x) or, from
 Manage an object either with Terraform or by hand, not both. When a setting
 that the plan shows unchanged changed after the plan was made, an in-place
 update stops before it writes anything and asks for a new plan, instead of
-reverting the change without having shown it (`netbird_peer`, and the access
-settings of `netbird_reverse_proxy_service`, so far; the rest follows in #74). A setting the plan changes gets the planned value,
+reverting the change without having shown it (`netbird_peer`, and `private` and
+`access_groups` of `netbird_reverse_proxy_service`, so far; the rest follows in #74). A setting the plan changes gets the planned value,
 as the plan shows. This protects in-place updates only: a saved plan that
 destroys or adopts an object acts on it as it is then. The NetBird API has no
 conditional updates, so a change made while an apply is writing is not
