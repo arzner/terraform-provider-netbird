@@ -66,6 +66,10 @@ it is based on.
 
 ### Fixed
 
+- `netbird_reverse_proxy_service`: auth secrets the API does not return (`password_auth.password`,
+  `pin_auth.pin`) are read as null instead of `""`, so an imported service matches a configuration
+  that leaves them out; also in the data source (#60; upstream
+  [#213](https://github.com/netbirdio/terraform-provider-netbird/pull/213)).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the

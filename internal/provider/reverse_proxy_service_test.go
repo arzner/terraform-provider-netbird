@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 	"reflect"
 	"testing"
 
@@ -1780,5 +1782,60 @@ func Test_reconcileOptions(t *testing.T) {
 	got, _ = reconcileOptions(options(n, n, types.BoolValue(false)), types.ObjectNull(optsType.AttrTypes))
 	if got.IsNull() || !got.Attributes()["skip_tls_verify"].Equal(types.BoolValue(false)) {
 		t.Errorf("options that set only defaults stay as planned, found %v", got)
+	}
+}
+
+// The API never returns auth secrets: a blank password or pin reads as null,
+// so it matches a configuration that leaves the secret out, and a null maps back to a blank
+// inside an enabled block, which the server reads as "keep the current one".
+func Test_reverseProxyServiceRoundtrip_redactedSecrets(t *testing.T) {
+	ctx := context.Background()
+	original := &api.Service{
+		Id:      "svc-secrets",
+		Name:    "secrets",
+		Domain:  "secrets.example.com",
+		Enabled: true,
+		Targets: []api.ServiceTarget{{
+			TargetId: "peer1", TargetType: api.ServiceTargetTargetTypePeer,
+			Port: 8080, Protocol: api.ServiceTargetProtocolHttp, Enabled: true,
+		}},
+		Auth: api.ServiceAuthConfig{
+			PasswordAuth: &api.PasswordAuthConfig{Enabled: true},
+			PinAuth:      &api.PINAuthConfig{Enabled: true},
+			HeaderAuths:  &[]api.HeaderAuthConfig{{Enabled: true, Header: "X-Key"}},
+		},
+	}
+	var model ReverseProxyServiceModel
+	if d := reverseProxyServiceAPIToTerraform(ctx, original, &model); d.HasError() {
+		t.Fatal(d)
+	}
+	var auth ReverseProxyServiceAuthModel
+	var pw ReverseProxyPasswordAuthModel
+	var pin ReverseProxyPinAuthModel
+	var headers []ReverseProxyHeaderAuthModel
+	for _, d := range []diag.Diagnostics{
+		model.Auth.As(ctx, &auth, basetypes.ObjectAsOptions{}),
+		auth.PasswordAuth.As(ctx, &pw, basetypes.ObjectAsOptions{}),
+		auth.PinAuth.As(ctx, &pin, basetypes.ObjectAsOptions{}),
+		auth.HeaderAuths.ElementsAs(ctx, &headers, false),
+	} {
+		if d.HasError() {
+			t.Fatal(d)
+		}
+	}
+	if !pw.Password.IsNull() || !pin.Pin.IsNull() {
+		t.Fatalf("expected null password and pin, found %v %v", pw.Password, pin.Pin)
+	}
+	// A header value is required: a blank stays a blank, as before.
+	if len(headers) != 1 || !headers[0].Value.Equal(types.StringValue("")) {
+		t.Fatalf("expected a blank header value, found %v", headers)
+	}
+	req, d := reverseProxyServiceTerraformToAPI(ctx, &model)
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	if req.Auth.PasswordAuth == nil || !req.Auth.PasswordAuth.Enabled || req.Auth.PasswordAuth.Password != "" ||
+		req.Auth.PinAuth == nil || !req.Auth.PinAuth.Enabled || req.Auth.PinAuth.Pin != "" {
+		t.Errorf("expected enabled blocks with blank secrets, found %+v", req.Auth)
 	}
 }
