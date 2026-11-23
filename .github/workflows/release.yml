@@ -42,3 +42,15 @@ jobs:
           # GitHub sets the GITHUB_TOKEN secret automatically.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
+      # GoReleaser can publish a release whose notes are not the ones it was
+      # given (it did for v0.1.0), so the published body is compared with them.
+      - name: Check the published release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json body --jq .body > "$RUNNER_TEMP/published.md"
+          if ! diff -q <(tr -d '\r' < "$RUNNER_TEMP/published.md" | sed -e '/^$/d') <(sed -e '/^$/d' "$RUNNER_TEMP/release-notes.md") >/dev/null; then
+            echo "::error::the published release notes differ from the CHANGELOG.md section"
+            diff <(tr -d '\r' < "$RUNNER_TEMP/published.md" | sed -e '/^$/d') <(sed -e '/^$/d' "$RUNNER_TEMP/release-notes.md") | head -40
+            exit 1
+          fi
