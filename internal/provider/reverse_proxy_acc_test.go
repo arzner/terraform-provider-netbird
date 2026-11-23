@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"github.com/netbirdio/netbird/shared/management/http/api"
 	"regexp"
 	"strings"
 	"testing"
@@ -1028,6 +1029,129 @@ data "netbird_reverse_proxy_service" "test" {
 					resource.TestCheckResourceAttr("data.netbird_reverse_proxy_service.test", "private", "false"),
 				),
 			},
+		},
+	})
+}
+
+// Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream covers the
+// per-target access action, the CrowdSec mode and direct upstream targets.
+func Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream(t *testing.T) {
+	cluster := testRequireProxyCluster(t)
+	rName := "s" + acctest.RandStringFromCharSet(8, acctest.CharSetAlpha)
+	domain := rName + "." + cluster.Address
+	rNameFull := "netbird_reverse_proxy_service." + rName
+	var createdID string
+	peerID1 := testPeerID(t, "peer1")
+	peerID2 := testPeerID(t, "peer3")
+	groupID := e2eGroupAllID()
+	crowdsec := "off"
+	if cluster.SupportsCrowdsec != nil && *cluster.SupportsCrowdsec {
+		crowdsec = "observe"
+	}
+	// adminAction is the second target's access_action line ("" leaves it out);
+	// direct toggles direct_upstream on the first target of a private service.
+	config := func(adminAction string, direct bool) string {
+		options, private := "", "false"
+		if direct {
+			options = `
+    options     = { direct_upstream = true }`
+			private = "true"
+		}
+		return fmt.Sprintf(`
+resource "netbird_reverse_proxy_service" %q {
+  name          = %q
+  domain        = %q
+  mode          = "http"
+  private       = %s
+  access_groups = [%q]
+  auth          = {}
+
+  access_restrictions = {
+    crowdsec_mode = %q
+  }
+
+  targets = [{
+    target_id   = %q
+    target_type = "peer"
+    port        = 8080
+    protocol    = "http"%s
+  }, {
+    target_id   = %q
+    target_type = "peer"
+    port        = 8081
+    protocol    = "http"
+    path        = "/admin"
+    %s
+  }]
+}`, rName, rName, domain, private, groupID, crowdsec, peerID1, options, peerID2, adminAction)
+	}
+	onServer := func(action string, direct bool) resource.TestCheckFunc {
+		return func(s *terraform.State) error {
+			svc, err := testClient().ReverseProxyServices.Get(context.Background(), s.RootModule().Resources[rNameFull].Primary.Attributes["id"])
+			if err != nil {
+				return fmt.Errorf("get service: %w", err)
+			}
+			for _, target := range svc.Targets {
+				switch target.TargetId {
+				case peerID1:
+					if target.AccessAction == nil || *target.AccessAction != api.ServiceTargetAccessActionInherit {
+						return fmt.Errorf("first target: expected inherit, found %v", target.AccessAction)
+					}
+					if got := target.Options != nil && target.Options.DirectUpstream != nil && *target.Options.DirectUpstream; got != direct {
+						return fmt.Errorf("first target: expected direct_upstream %t, found %t", direct, got)
+					}
+				case peerID2:
+					if target.AccessAction == nil || string(*target.AccessAction) != action {
+						return fmt.Errorf("admin target: expected %s, found %v", action, target.AccessAction)
+					}
+				}
+			}
+			if svc.AccessRestrictions == nil || svc.AccessRestrictions.CrowdsecMode == nil || string(*svc.AccessRestrictions.CrowdsecMode) != crowdsec {
+				return fmt.Errorf("crowdsec_mode on the server: expected %s, found %+v", crowdsec, svc.AccessRestrictions)
+			}
+			return nil
+		}
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().ReverseProxyServices.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: config(`access_action = "block"`, false),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "targets.0.access_action", "inherit"),
+					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "block"),
+					resource.TestCheckResourceAttr(rNameFull, "access_restrictions.crowdsec_mode", crowdsec),
+					onServer("block", false),
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				Config:           config(`access_action = "bypass"`, false),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "bypass"),
+					onServer("bypass", false),
+				),
+			},
+			{
+				// Left out, the action stays as it is: no change planned.
+				Config:   config("", false),
+				PlanOnly: true,
+			},
+			{
+				// A private service refuses bypass; block with a direct upstream
+				// target is fine on the harness cluster (private mode).
+				Config: config(`access_action = "block"`, true),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "targets.0.options.direct_upstream", "true"),
+					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "block"),
+					onServer("block", true),
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 		},
 	})
 }

@@ -134,6 +134,10 @@ func (d *ReverseProxyServiceDataSource) Schema(ctx context.Context, req datasour
 							MarkdownDescription: "Whether this target is enabled",
 							Computed:            true,
 						},
+						"access_action": schema.StringAttribute{
+							MarkdownDescription: "Access action once this target's path prefix is selected: inherit, bypass or block",
+							Computed:            true,
+						},
 						"options": schema.SingleNestedAttribute{
 							MarkdownDescription: "Per-target options",
 							Computed:            true,
@@ -162,6 +166,10 @@ func (d *ReverseProxyServiceDataSource) Schema(ctx context.Context, req datasour
 								},
 								"session_idle_timeout": schema.StringAttribute{
 									MarkdownDescription: "Idle timeout before a UDP session is reaped (UDP only)",
+									Computed:            true,
+								},
+								"direct_upstream": schema.BoolAttribute{
+									MarkdownDescription: "Whether the proxy dials this target through the host network instead of its embedded NetBird client",
 									Computed:            true,
 								},
 							},
@@ -267,6 +275,10 @@ func (d *ReverseProxyServiceDataSource) Schema(ctx context.Context, req datasour
 						MarkdownDescription: "ISO 3166-1 alpha-2 country codes to block",
 						Computed:            true,
 						ElementType:         types.StringType,
+					},
+					"crowdsec_mode": schema.StringAttribute{
+						MarkdownDescription: "CrowdSec IP reputation mode: off, enforce or observe",
+						Computed:            true,
 					},
 				},
 			},

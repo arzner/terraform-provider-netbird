@@ -425,7 +425,7 @@ func Test_reverseProxyServiceRoundtrip_l4Options(t *testing.T) {
 
 func Test_reverseProxyServiceTargetModelTFType(t *testing.T) {
 	tfType := ReverseProxyServiceTargetModel{}.TFType()
-	expectedKeys := []string{"target_id", "target_type", "host", "port", "protocol", "path", "enabled", "options"}
+	expectedKeys := []string{"target_id", "target_type", "host", "port", "protocol", "path", "enabled", "access_action", "options"}
 	for _, key := range expectedKeys {
 		if _, ok := tfType.AttrTypes[key]; !ok {
 			t.Errorf("Expected key %s in TFType, not found", key)
@@ -448,7 +448,7 @@ func Test_reverseProxyServiceAuthModelTFType(t *testing.T) {
 
 func Test_reverseProxyTargetOptionsModelTFType(t *testing.T) {
 	tfType := ReverseProxyTargetOptionsModel{}.TFType()
-	expectedKeys := []string{"skip_tls_verify", "request_timeout", "path_rewrite", "custom_headers", "proxy_protocol", "session_idle_timeout"}
+	expectedKeys := []string{"skip_tls_verify", "request_timeout", "path_rewrite", "custom_headers", "proxy_protocol", "session_idle_timeout", "direct_upstream"}
 	for _, key := range expectedKeys {
 		if _, ok := tfType.AttrTypes[key]; !ok {
 			t.Errorf("Expected key %s in TFType, not found", key)
@@ -827,8 +827,8 @@ func Test_reverseProxyServiceTFTypeConsistency(t *testing.T) {
 		t.Error("Target options type doesn't match TargetOptions TFType")
 	}
 
-	if len(targetType.AttrTypes) != 8 {
-		t.Errorf("Expected 8 target attributes, got %d", len(targetType.AttrTypes))
+	if len(targetType.AttrTypes) != 9 {
+		t.Errorf("Expected 9 target attributes, got %d", len(targetType.AttrTypes))
 	}
 }
 
@@ -1397,4 +1397,68 @@ func mustObjectValue(ctx context.Context, attrTypes map[string]attr.Type, val an
 		panic("failed to create object value in test helper")
 	}
 	return obj
+}
+
+func Test_reverseProxyNewFieldsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	inherit, block := api.ServiceTargetAccessActionInherit, api.ServiceTargetAccessActionBlock
+	mode := api.AccessRestrictionsCrowdsecModeObserve
+	yes, no := true, false
+	svc := &api.Service{
+		Id: "s", Name: "n", Domain: "d.example", Enabled: true,
+		Targets: []api.ServiceTarget{
+			{TargetId: "a", TargetType: "peer", Port: 80, Protocol: "http", Enabled: true, AccessAction: &inherit, Options: &api.ServiceTargetOptions{DirectUpstream: &no}},
+			{TargetId: "b", TargetType: "peer", Port: 80, Protocol: "http", Enabled: true, AccessAction: &block, Options: &api.ServiceTargetOptions{DirectUpstream: &yes}},
+		},
+		AccessRestrictions: &api.AccessRestrictions{CrowdsecMode: &mode},
+	}
+	var data ReverseProxyServiceModel
+	if d := reverseProxyServiceAPIToTerraform(ctx, svc, &data); d.HasError() {
+		t.Fatal(d)
+	}
+	var targets []ReverseProxyServiceTargetModel
+	if d := data.Targets.ElementsAs(ctx, &targets, false); d.HasError() {
+		t.Fatal(d)
+	}
+	if targets[0].AccessAction.ValueString() != "inherit" || targets[1].AccessAction.ValueString() != "block" {
+		t.Errorf("access_action: found %v, %v", targets[0].AccessAction, targets[1].AccessAction)
+	}
+	// direct_upstream=false is the default and reads as no options at all.
+	if !targets[0].Options.IsNull() {
+		t.Errorf("options with only direct_upstream=false should read as null, found %v", targets[0].Options)
+	}
+	if v := targets[1].Options.Attributes()["direct_upstream"]; !v.Equal(types.BoolValue(true)) {
+		t.Errorf("direct_upstream: found %v", v)
+	}
+	if v := data.AccessRestrictions.Attributes()["crowdsec_mode"]; !v.Equal(types.StringValue("observe")) {
+		t.Errorf("crowdsec_mode: found %v", v)
+	}
+
+	// Back to a request: configured values are sent, an unknown action is not.
+	data.Targets, _ = types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), []ReverseProxyServiceTargetModel{
+		dataTarget(targets[0], types.StringUnknown()), dataTarget(targets[1], types.StringValue("block")),
+	})
+	data.Auth = types.ObjectNull(ReverseProxyServiceAuthModel{}.TFType().AttrTypes)
+	req, d := reverseProxyServiceTerraformToAPI(ctx, &data)
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	got := *req.Targets
+	if got[0].AccessAction != nil {
+		t.Errorf("an unknown access_action must not be sent, found %v", *got[0].AccessAction)
+	}
+	if got[1].AccessAction == nil || *got[1].AccessAction != block {
+		t.Errorf("configured access_action: found %v", got[1].AccessAction)
+	}
+	if got[1].Options == nil || got[1].Options.DirectUpstream == nil || !*got[1].Options.DirectUpstream {
+		t.Errorf("direct_upstream not sent: %+v", got[1].Options)
+	}
+	if req.AccessRestrictions == nil || req.AccessRestrictions.CrowdsecMode == nil || *req.AccessRestrictions.CrowdsecMode != mode {
+		t.Errorf("crowdsec_mode not sent: %+v", req.AccessRestrictions)
+	}
+}
+
+func dataTarget(m ReverseProxyServiceTargetModel, action types.String) ReverseProxyServiceTargetModel {
+	m.AccessAction = action
+	return m
 }

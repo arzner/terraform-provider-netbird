@@ -57,28 +57,30 @@ type ReverseProxyServiceModel struct {
 
 // ReverseProxyServiceTargetModel describes a service target.
 type ReverseProxyServiceTargetModel struct {
-	TargetId   types.String `tfsdk:"target_id"`
-	TargetType types.String `tfsdk:"target_type"`
-	Host       types.String `tfsdk:"host"`
-	Port       types.Int64  `tfsdk:"port"`
-	Protocol   types.String `tfsdk:"protocol"`
-	Path       types.String `tfsdk:"path"`
-	Enabled    types.Bool   `tfsdk:"enabled"`
-	Options    types.Object `tfsdk:"options"`
+	TargetId     types.String `tfsdk:"target_id"`
+	TargetType   types.String `tfsdk:"target_type"`
+	Host         types.String `tfsdk:"host"`
+	Port         types.Int64  `tfsdk:"port"`
+	Protocol     types.String `tfsdk:"protocol"`
+	Path         types.String `tfsdk:"path"`
+	Enabled      types.Bool   `tfsdk:"enabled"`
+	AccessAction types.String `tfsdk:"access_action"`
+	Options      types.Object `tfsdk:"options"`
 }
 
 // TFType returns the Terraform object type for service targets.
 func (m ReverseProxyServiceTargetModel) TFType() types.ObjectType {
 	return types.ObjectType{
 		AttrTypes: map[string]attr.Type{
-			"target_id":   types.StringType,
-			"target_type": types.StringType,
-			"host":        types.StringType,
-			"port":        types.Int64Type,
-			"protocol":    types.StringType,
-			"path":        types.StringType,
-			"enabled":     types.BoolType,
-			"options":     ReverseProxyTargetOptionsModel{}.TFType(),
+			"target_id":     types.StringType,
+			"target_type":   types.StringType,
+			"host":          types.StringType,
+			"port":          types.Int64Type,
+			"protocol":      types.StringType,
+			"path":          types.StringType,
+			"enabled":       types.BoolType,
+			"access_action": types.StringType,
+			"options":       ReverseProxyTargetOptionsModel{}.TFType(),
 		},
 	}
 }
@@ -91,6 +93,7 @@ type ReverseProxyTargetOptionsModel struct {
 	CustomHeaders      types.Map    `tfsdk:"custom_headers"`
 	ProxyProtocol      types.Bool   `tfsdk:"proxy_protocol"`
 	SessionIdleTimeout types.String `tfsdk:"session_idle_timeout"`
+	DirectUpstream     types.Bool   `tfsdk:"direct_upstream"`
 }
 
 // TFType returns the Terraform object type for target options.
@@ -105,6 +108,7 @@ func (m ReverseProxyTargetOptionsModel) TFType() types.ObjectType {
 			},
 			"proxy_protocol":       types.BoolType,
 			"session_idle_timeout": types.StringType,
+			"direct_upstream":      types.BoolType,
 		},
 	}
 }
@@ -215,10 +219,11 @@ func (m ReverseProxyHeaderAuthModel) TFType() types.ObjectType {
 
 // ReverseProxyAccessRestrictionsModel describes access restrictions.
 type ReverseProxyAccessRestrictionsModel struct {
-	AllowedCidrs     types.List `tfsdk:"allowed_cidrs"`
-	BlockedCidrs     types.List `tfsdk:"blocked_cidrs"`
-	AllowedCountries types.List `tfsdk:"allowed_countries"`
-	BlockedCountries types.List `tfsdk:"blocked_countries"`
+	AllowedCidrs     types.List   `tfsdk:"allowed_cidrs"`
+	BlockedCidrs     types.List   `tfsdk:"blocked_cidrs"`
+	AllowedCountries types.List   `tfsdk:"allowed_countries"`
+	BlockedCountries types.List   `tfsdk:"blocked_countries"`
+	CrowdsecMode     types.String `tfsdk:"crowdsec_mode"`
 }
 
 // TFType returns the Terraform object type for access restrictions.
@@ -229,6 +234,7 @@ func (m ReverseProxyAccessRestrictionsModel) TFType() types.ObjectType {
 			"blocked_cidrs":     types.ListType{ElemType: types.StringType},
 			"allowed_countries": types.ListType{ElemType: types.StringType},
 			"blocked_countries": types.ListType{ElemType: types.StringType},
+			"crowdsec_mode":     types.StringType,
 		},
 	}
 }
@@ -350,6 +356,12 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 							Computed:            true,
 							Default:             booldefault.StaticBool(true),
 						},
+						"access_action": schema.StringAttribute{
+							MarkdownDescription: "Access action once this target's path prefix is selected (HTTP services only): `inherit` applies the service's authentication, `bypass` skips it (not allowed for private services), `block` denies access. `bypass` and `block` need a path other than `/`. Left out, the server keeps the target's current action (`inherit` for a new target).",
+							Optional:            true,
+							Computed:            true,
+							Validators:          []validator.String{stringvalidator.OneOf("inherit", "bypass", "block")},
+						},
 						"options": schema.SingleNestedAttribute{
 							MarkdownDescription: "Per-target options",
 							Optional:            true,
@@ -379,6 +391,10 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 								},
 								"session_idle_timeout": schema.StringAttribute{
 									MarkdownDescription: "Idle timeout before a UDP session is reaped, as a Go duration string (e.g. \"30s\", \"2m\"). Maximum 10m. (UDP only)",
+									Optional:            true,
+								},
+								"direct_upstream": schema.BoolAttribute{
+									MarkdownDescription: "Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services, localhost sidecars). Defaults to false.",
 									Optional:            true,
 								},
 							},
@@ -485,6 +501,11 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 						Optional:            true,
 						ElementType:         types.StringType,
 					},
+					"crowdsec_mode": schema.StringAttribute{
+						MarkdownDescription: "CrowdSec IP reputation mode: `off`, `enforce` or `observe`. Only available when the proxy cluster supports CrowdSec. Left out, the server treats it as `off`.",
+						Optional:            true,
+						Validators:          []validator.String{stringvalidator.OneOf("off", "enforce", "observe")},
+					},
 				},
 			},
 		},
@@ -516,7 +537,8 @@ func targetOptionsAPIToTerraform(ctx context.Context, opts *api.ServiceTargetOpt
 	// If all fields are at zero/nil, treat as no options set.
 	if opts.SkipTlsVerify == nil && opts.RequestTimeout == nil && opts.PathRewrite == nil &&
 		opts.CustomHeaders == nil && opts.SessionIdleTimeout == nil &&
-		(opts.ProxyProtocol == nil || !*opts.ProxyProtocol) {
+		(opts.ProxyProtocol == nil || !*opts.ProxyProtocol) &&
+		(opts.DirectUpstream == nil || !*opts.DirectUpstream) {
 		return types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes), nil
 	}
 
@@ -527,10 +549,17 @@ func targetOptionsAPIToTerraform(ctx context.Context, opts *api.ServiceTargetOpt
 		proxyProtocol = opts.ProxyProtocol
 	}
 
+	// direct_upstream=false is the server default, treated like proxy_protocol.
+	var directUpstream *bool
+	if opts.DirectUpstream != nil && *opts.DirectUpstream {
+		directUpstream = opts.DirectUpstream
+	}
+
 	model := ReverseProxyTargetOptionsModel{
 		SkipTLSVerify:  types.BoolPointerValue(opts.SkipTlsVerify),
 		RequestTimeout: types.StringPointerValue(opts.RequestTimeout),
 		ProxyProtocol:  types.BoolPointerValue(proxyProtocol),
+		DirectUpstream: types.BoolPointerValue(directUpstream),
 	}
 
 	if opts.PathRewrite != nil {
@@ -596,6 +625,11 @@ func targetOptionsTerraformToAPI(ctx context.Context, opts types.Object) (*api.S
 	if v, ok := attrs["session_idle_timeout"].(types.String); ok && !v.IsNull() && !v.IsUnknown() {
 		s := v.ValueString()
 		result.SessionIdleTimeout = &s
+		hasValue = true
+	}
+	if v, ok := attrs["direct_upstream"].(types.Bool); ok && !v.IsNull() && !v.IsUnknown() {
+		b := v.ValueBool()
+		result.DirectUpstream = &b
 		hasValue = true
 	}
 
@@ -669,6 +703,11 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 			Host:       types.StringPointerValue(t.Host),
 			Path:       types.StringPointerValue(t.Path),
 			Options:    opts,
+		}
+		if t.AccessAction != nil {
+			target.AccessAction = types.StringValue(string(*t.AccessAction))
+		} else {
+			target.AccessAction = types.StringNull()
 		}
 		targets = append(targets, target)
 	}
@@ -765,6 +804,11 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 			ret.Append(d...)
 		} else {
 			arModel.BlockedCountries = types.ListNull(types.StringType)
+		}
+		if svc.AccessRestrictions.CrowdsecMode != nil {
+			arModel.CrowdsecMode = types.StringValue(string(*svc.AccessRestrictions.CrowdsecMode))
+		} else {
+			arModel.CrowdsecMode = types.StringNull()
 		}
 		data.AccessRestrictions, d = types.ObjectValueFrom(ctx, ReverseProxyAccessRestrictionsModel{}.TFType().AttrTypes, arModel)
 		ret.Append(d...)
@@ -952,6 +996,12 @@ func reverseProxyServiceTerraformToAPI(ctx context.Context, data *ReverseProxySe
 			v := t.Path.ValueString()
 			target.Path = &v
 		}
+		// Left out (unknown in the plan), the server keeps the action the target
+		// at this path has now.
+		if !t.AccessAction.IsNull() && !t.AccessAction.IsUnknown() {
+			v := api.ServiceTargetAccessAction(t.AccessAction.ValueString())
+			target.AccessAction = &v
+		}
 
 		opts, d := targetOptionsTerraformToAPI(ctx, t.Options)
 		ret.Append(d...)
@@ -1050,6 +1100,11 @@ func reverseProxyServiceTerraformToAPI(ctx context.Context, data *ReverseProxySe
 			var countries []string
 			ret.Append(v.ElementsAs(ctx, &countries, false)...)
 			ar.BlockedCountries = &countries
+			hasAR = true
+		}
+		if v, ok := arAttrs["crowdsec_mode"].(types.String); ok && !v.IsNull() && !v.IsUnknown() {
+			mode := api.AccessRestrictionsCrowdsecMode(v.ValueString())
+			ar.CrowdsecMode = &mode
 			hasAR = true
 		}
 		if hasAR {

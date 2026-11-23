@@ -14,6 +14,10 @@ it is based on.
   (reachable over the tunnel by the given groups, with a server-generated access policy);
   the private-service rules (HTTP mode, at least one group, no bearer auth) are checked at
   plan time. Also in the data source (#25).
+- `netbird_reverse_proxy_service`: `access_restrictions.crowdsec_mode` (CrowdSec IP reputation),
+  `targets[].access_action` (`inherit`, `bypass` or `block` for a target's path; left out, the
+  server keeps the current action) and `targets[].options.direct_upstream` (dial through the
+  proxy host's network). Also in the data source (#45).
 
 ## [0.1.0] - 2026-11-23
 
