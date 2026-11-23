@@ -308,7 +308,7 @@ func (r *Peer) Create(ctx context.Context, req resource.CreateRequest, resp *res
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if ipv6 := peerIPv6Request(config.Ipv6, peer.Ipv6); ipv6 != nil {
+	if ipv6 := peerIPv6Request(configuredOnly(data.Ipv6, config.Ipv6), peer.Ipv6); ipv6 != nil {
 		updateRequest.Ipv6 = ipv6
 		updateRequired = true
 	}
@@ -397,7 +397,7 @@ func (r *Peer) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		LoginExpirationEnabled:      data.LoginExpirationEnabled.ValueBool(),
 		Name:                        data.Name.ValueString(),
 		SshEnabled:                  data.SshEnabled.ValueBool(),
-		Ipv6:                        peerIPv6Request(config.Ipv6, current.Ipv6),
+		Ipv6:                        peerIPv6Request(configuredOnly(data.Ipv6, config.Ipv6), current.Ipv6),
 	})
 
 	if err != nil {
@@ -453,4 +453,14 @@ func peerIPv6Request(planned types.String, current *string) *string {
 		return nil
 	}
 	return planned.ValueStringPointer()
+}
+
+// configuredOnly returns the planned value when the configuration sets the
+// attribute and null otherwise: whether to send comes from the configuration,
+// what to send from the plan (which honours ignore_changes).
+func configuredOnly(planned, configured types.String) types.String {
+	if configured.IsNull() {
+		return types.StringNull()
+	}
+	return planned
 }

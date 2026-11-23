@@ -81,3 +81,13 @@ func Test_peerIPv6Request(t *testing.T) {
 		t.Errorf("no current address: expected fd00::8, found %v", got)
 	}
 }
+
+func Test_configuredOnly(t *testing.T) {
+	if got := configuredOnly(types.StringValue("fd00::7"), types.StringNull()); !got.IsNull() {
+		t.Errorf("left out of the configuration: expected null, found %v", got)
+	}
+	// ignore_changes keeps the live address in the plan while HCL says otherwise.
+	if got := configuredOnly(types.StringValue("fd00::7"), types.StringValue("fd00::9")); got.ValueString() != "fd00::7" {
+		t.Errorf("configured: expected the planned value, found %v", got)
+	}
+}
