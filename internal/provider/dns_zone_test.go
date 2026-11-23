@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -97,8 +96,8 @@ func Test_zoneDomain(t *testing.T) {
 	}
 }
 
-// Test_dnsZone_groupLookupStaysOnEndpoint: a malformed group ID with path
-// segments is looked up as one escaped segment of /api/groups/.
+// Test_dnsZone_groupLookupStaysOnEndpoint: a group ID with path segments is
+// refused without a request.
 func Test_dnsZone_groupLookupStaysOnEndpoint(t *testing.T) {
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +140,7 @@ func Test_dnsZone_groupLookupStaysOnEndpoint(t *testing.T) {
 	if !resp.Diagnostics.HasError() {
 		t.Fatal("expected the missing group to be refused")
 	}
-	if len(paths) != 1 || !strings.HasPrefix(paths[0], "/api/groups/") || strings.Count(paths[0], "/") != 3 {
-		t.Errorf("expected one request for a single segment under /api/groups/, found %v", paths)
+	if len(paths) != 0 {
+		t.Errorf("expected no request for a path-like group ID, found %v", paths)
 	}
 }

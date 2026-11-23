@@ -329,8 +329,15 @@ func (r *DNSZone) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest
 		if !ok || id.IsNull() || id.IsUnknown() {
 			continue
 		}
-		// The client puts the ID into the URL path as it is: escape it, so
-		// the authenticated GET stays on the group endpoint.
+		// The client puts the ID into the URL path as it is, and the server
+		// cleans dot segments: an ID that is not one plain segment is refused
+		// without a request, so the authenticated GET stays on the group
+		// endpoint.
+		if !plainPathSegment(id.ValueString()) {
+			resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Invalid group ID",
+				fmt.Sprintf("%q is not a group ID.", id.ValueString()))
+			return
+		}
 		group, err := r.client.Groups.Get(ctx, url.PathEscape(id.ValueString()))
 		switch {
 		case err != nil && netbird.IsNotFound(err):
@@ -347,4 +354,10 @@ func (r *DNSZone) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest
 				fmt.Sprintf("Group %q is not a group ID the server knows (the lookup returned %q).", id.ValueString(), group.Id))
 		}
 	}
+}
+
+// plainPathSegment reports whether v can stand as one URL path segment
+// without the server's path cleaning moving the request elsewhere.
+func plainPathSegment(v string) bool {
+	return v != "." && v != ".." && !strings.ContainsAny(v, "/\\?#%")
 }
