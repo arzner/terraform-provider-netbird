@@ -369,7 +369,7 @@ func (r *Peer) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 			if !mapped.HasError() {
 				resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 			}
-			resp.Diagnostics.AddError("Error updating Peer", err.Error()+"\n\nThe peer as the server has it now is saved to state.")
+			resp.Diagnostics.AddError("Error updating Peer", err.Error()+"\n\nThe peer as the server last reported it is saved to state.")
 			return
 		}
 		resp.Diagnostics.AddError("Error updating Peer", err.Error())
@@ -462,16 +462,22 @@ func peerRequest(live *api.Peer, plan, config PeerModel) (api.PeerRequest, bool)
 // validates the rest of an update, so a refused combined update would still
 // move it.
 //
-// When the address request fails, the server may still have moved the address
-// (it commits before it notifies the network map) and the first request may
-// have changed other settings, so the peer is read back. observed is true when
-// the returned peer is what the server has now; the caller records it.
+// A failed request may still have taken effect: the server commits a peer
+// update before it notifies the network map, and that notification can fail.
+// So after any failed request the peer is read back; observed is true when the
+// returned peer is a server response the caller can record. If the read-back
+// fails too, the last successful response is returned and the error says the
+// rest is unconfirmed.
 func (r *Peer) applyPeer(ctx context.Context, live *api.Peer, plan, config PeerModel) (peer *api.Peer, observed bool, err error) {
 	peer = live
 	written := false
 	if req, changed := peerRequest(peer, plan, config); changed {
 		updated, err := r.client.Peers.Update(ctx, peer.Id, req)
 		if err != nil {
+			// Stop before the address request either way.
+			if current, getErr := r.client.Peers.Get(ctx, peer.Id); getErr == nil {
+				return current, true, err
+			}
 			return nil, false, err
 		}
 		peer, written = updated, true
@@ -484,8 +490,11 @@ func (r *Peer) applyPeer(ctx context.Context, live *api.Peer, plan, config PeerM
 			if current, getErr := r.client.Peers.Get(ctx, peer.Id); getErr == nil {
 				return current, true, err
 			}
+			if !written {
+				return nil, false, err
+			}
 			// Unreadable: what the first request returned is the best record.
-			return peer, written, err
+			return peer, true, fmt.Errorf("%w (the peer could not be read back; its IPv6 address is unconfirmed)", err)
 		}
 		peer = updated
 	}

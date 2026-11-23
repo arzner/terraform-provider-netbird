@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -37,19 +38,26 @@ func Test_applyPeer_sendsIPv6Separately(t *testing.T) {
 		failFirst    bool
 		failSecond   bool
 		addressOnly  bool
+		failGet      bool
 		wantPuts     int
 		wantErr      bool
 		wantObserved bool
 	}{
-		"both succeed":         {wantPuts: 2},
-		"first update refused": {failFirst: true, wantPuts: 1, wantErr: true},
-		"address refused":      {failSecond: true, wantPuts: 2, wantErr: true, wantObserved: true},
-		"address-only failure": {addressOnly: true, failFirst: true, wantPuts: 1, wantErr: true, wantObserved: true},
+		"both succeed":               {wantPuts: 2},
+		"first update refused":       {failFirst: true, wantPuts: 1, wantErr: true, wantObserved: true},
+		"address refused":            {failSecond: true, wantPuts: 2, wantErr: true, wantObserved: true},
+		"address-only failure":       {addressOnly: true, failFirst: true, wantPuts: 1, wantErr: true, wantObserved: true},
+		"address and read-back fail": {failSecond: true, failGet: true, wantPuts: 2, wantErr: true, wantObserved: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var puts []map[string]any
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
+				if r.Method == http.MethodGet && tc.failGet {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = io.WriteString(w, `{"message":"unavailable","code":500}`)
+					return
+				}
 				if r.Method == http.MethodGet {
 					// The read-back after a failed address request: distinct from
 					// every PUT response, so the test sees whether it was used.
@@ -83,8 +91,16 @@ func Test_applyPeer_sendsIPv6Separately(t *testing.T) {
 			if (err != nil) != tc.wantErr || observed != tc.wantObserved {
 				t.Fatalf("expected error %v observed %v, found %v %v", tc.wantErr, tc.wantObserved, err, observed)
 			}
-			if tc.wantObserved && (peer == nil || peer.Name != "read-back" || peer.Ipv6 == nil || *peer.Ipv6 != "fd00::9") {
-				t.Errorf("a failed address request must return the peer as read back, found %+v", peer)
+			switch {
+			case tc.failGet:
+				// The first response is the record; the address is unconfirmed.
+				if peer == nil || peer.Name != "new" || !strings.Contains(err.Error(), "unconfirmed") {
+					t.Errorf("expected the first response and an unconfirmed address, found %+v, %v", peer, err)
+				}
+			case tc.wantObserved:
+				if peer == nil || peer.Name != "read-back" || peer.Ipv6 == nil || *peer.Ipv6 != "fd00::9" {
+					t.Errorf("a failed request must return the peer as read back, found %+v", peer)
+				}
 			}
 			if len(puts) != tc.wantPuts {
 				t.Fatalf("expected %d requests, found %d: %v", tc.wantPuts, len(puts), puts)
