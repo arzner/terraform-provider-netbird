@@ -118,9 +118,9 @@ func Test_identityProviderTerraformToAPI(t *testing.T) {
 	}
 }
 
-// Test_identityProviderTypes compares the accepted types with the constants
-// of the server's IdentityProviderType in the pinned netbird module, so a
-// type NetBird adds or drops fails here instead of at plan time for users.
+// Test_identityProviderTypes compares the accepted types with the ones the
+// server's IdentityProviderType.IsValid accepts in the pinned netbird module,
+// so a type NetBird adds or drops fails here instead of at plan time.
 func Test_identityProviderTypes(t *testing.T) {
 	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/netbirdio/netbird").Output()
 	if err != nil {
@@ -131,32 +131,60 @@ func Test_identityProviderTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse %s: %v", file, err)
 	}
-	var server []string
+	// The constants by name, then the names IsValid's switch accepts.
+	values := map[string]string{}
+	var accepted []string
 	for _, decl := range parsed.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST {
-			continue
-		}
-		for _, spec := range gen.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok {
+		switch d := decl.(type) {
+		case *ast.GenDecl:
+			if d.Tok != token.CONST {
 				continue
 			}
-			if id, ok := vs.Type.(*ast.Ident); !ok || id.Name != "IdentityProviderType" {
-				continue
-			}
-			for _, v := range vs.Values {
-				if lit, ok := v.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					server = append(server, strings.Trim(lit.Value, `"`))
+			for _, spec := range d.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, name := range vs.Names {
+					if i < len(vs.Values) {
+						if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+							values[name.Name] = strings.Trim(lit.Value, `"`)
+						}
+					}
 				}
 			}
+		case *ast.FuncDecl:
+			if d.Name.Name != "IsValid" || d.Recv == nil || len(d.Recv.List) != 1 {
+				continue
+			}
+			if id, ok := d.Recv.List[0].Type.(*ast.Ident); !ok || id.Name != "IdentityProviderType" {
+				continue
+			}
+			ast.Inspect(d.Body, func(n ast.Node) bool {
+				if cc, ok := n.(*ast.CaseClause); ok {
+					for _, e := range cc.List {
+						if id, ok := e.(*ast.Ident); ok {
+							accepted = append(accepted, id.Name)
+						}
+					}
+				}
+				return true
+			})
 		}
+	}
+	var server []string
+	for _, name := range accepted {
+		v, ok := values[name]
+		if !ok {
+			t.Fatalf("IsValid accepts %s, which is not a string constant in %s", name, file)
+		}
+		server = append(server, v)
 	}
 	slices.Sort(server)
 	if len(server) == 0 {
-		t.Fatalf("no IdentityProviderType constants found in %s", file)
+		t.Fatalf("IdentityProviderType.IsValid accepts no type in %s", file)
 	}
 	if !slices.Equal(server, identityProviderTypes) {
-		t.Errorf("the server defines the types %v, the provider accepts %v", server, identityProviderTypes)
+		t.Errorf("the server accepts the types %v, the provider %v", server, identityProviderTypes)
 	}
 }

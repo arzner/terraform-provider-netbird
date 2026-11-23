@@ -64,9 +64,10 @@ func (r *IdentityProvider) Schema(ctx context.Context, req resource.SchemaReques
 				Required:            true,
 			},
 			"type": schema.StringAttribute{
-				MarkdownDescription: "Type of identity provider (adfs, authentik, entra, google, keycloak, microsoft, oidc, okta, pocketid, zitadel). google and microsoft have a built-in issuer; the others need `issuer`.",
+				MarkdownDescription: "Type of identity provider (adfs, authentik, entra, google, keycloak, microsoft, oidc, okta, pocketid, zitadel). google and microsoft have a built-in issuer, used with `issuer = \"\"`; the others need an issuer URL. The server does not change the type of an existing provider, so a new type replaces it.",
 				Required:            true,
 				Validators:          []validator.String{stringvalidator.OneOf(identityProviderTypes...)},
+				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"client_id": schema.StringAttribute{
 				MarkdownDescription: "OAuth2 client ID",

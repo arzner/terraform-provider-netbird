@@ -68,7 +68,8 @@ it is based on.
 
 - `netbird_identity_provider`: the types `authentik`, `keycloak` and `adfs`, which the server
   accepts, are no longer refused at plan time; the accepted list is checked against the server
-  source at the pinned version (#54; upstream
+  source at the pinned version. Changing `type` replaces the provider, since the server refuses
+  to change it in place (#54; upstream
   [#163](https://github.com/netbirdio/terraform-provider-netbird/issues/163),
   [#255](https://github.com/netbirdio/terraform-provider-netbird/issues/255)).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example

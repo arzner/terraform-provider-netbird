@@ -31,7 +31,7 @@ resource "netbird_identity_provider" "example" {
 - `client_secret` (String, Sensitive) OAuth2 client secret
 - `issuer` (String) OIDC issuer URL
 - `name` (String) Human-readable name for the identity provider
-- `type` (String) Type of identity provider (adfs, authentik, entra, google, keycloak, microsoft, oidc, okta, pocketid, zitadel). google and microsoft have a built-in issuer; the others need `issuer`.
+- `type` (String) Type of identity provider (adfs, authentik, entra, google, keycloak, microsoft, oidc, okta, pocketid, zitadel). google and microsoft have a built-in issuer, used with `issuer = ""`; the others need an issuer URL. The server does not change the type of an existing provider, so a new type replaces it.
 
 ### Read-Only
 
