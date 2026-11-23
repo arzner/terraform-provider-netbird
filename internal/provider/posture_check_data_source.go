@@ -209,6 +209,9 @@ func (d *PostureCheckDataSource) Read(ctx context.Context, req datasource.ReadRe
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	// A lookup has no configured spelling to keep: report what the server
+	// holds, "" for a check without a description.
+	data.Description = types.StringPointerValue(postureCheck.Description)
 
 	// Save data into Terraform state
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)

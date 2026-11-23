@@ -244,3 +244,24 @@ func Test_policyAPIToTerraform_listOrder(t *testing.T) {
 		t.Errorf("configured destination order should be kept, got %s", got)
 	}
 }
+
+func Test_emptyAsPrior(t *testing.T) {
+	empty, set := "", "x"
+	for name, tc := range map[string]struct {
+		prior types.String
+		v     *string
+		want  types.String
+	}{
+		"empty, planned empty":   {types.StringValue(""), &empty, types.StringValue("")},
+		"empty, left out":        {types.StringNull(), &empty, types.StringNull()},
+		"absent, left out":       {types.StringNull(), nil, types.StringNull()},
+		"empty, not known yet":   {types.StringUnknown(), &empty, types.StringNull()},
+		"set":                    {types.StringNull(), &set, types.StringValue("x")},
+		"set over planned empty": {types.StringValue(""), &set, types.StringValue("x")},
+		"cleared outside":        {types.StringValue("x"), &empty, types.StringNull()},
+	} {
+		if got := emptyAsPrior(tc.prior, tc.v); !got.Equal(tc.want) {
+			t.Errorf("%s: expected %v, found %v", name, tc.want, got)
+		}
+	}
+}

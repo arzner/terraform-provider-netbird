@@ -66,6 +66,12 @@ it is based on.
 
 ### Fixed
 
+- `netbird_posture_check` and `netbird_policy`: an empty description no longer fails the apply.
+  The server reports `""` for a description that is not set, so a posture check created without
+  one, and a policy or rule with `description = ""`, read back differently from the plan. An empty
+  value from the server now keeps the planned or stored spelling (`""` or none) (#58, #59; upstream
+  [#153](https://github.com/netbirdio/terraform-provider-netbird/pull/153),
+  [#154](https://github.com/netbirdio/terraform-provider-netbird/pull/154)).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the

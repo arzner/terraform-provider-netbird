@@ -295,3 +295,66 @@ func testPolicyResourceResources(rName, name, description, rAction, rProt, rSour
 	}
 }`, rName, name, description, rAction, rProt, name, rSourceID, rSourceType, rDestID, rDestType, pStart, pEnd)
 }
+
+// Test_Policy_EmptyRuleDescription: description = "" on a policy and a rule
+// reads back as "" (it used to read as null and fail the apply), and a
+// description left out stays null.
+func Test_Policy_EmptyRuleDescription(t *testing.T) {
+	testE2E(t)
+	rName := "p" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_policy." + rName
+	var createdID string
+	config := func(policyDescription, ruleDescription string) string {
+		return fmt.Sprintf(`resource "netbird_policy" %q {
+  name    = %q
+  enabled = true
+  %s
+
+  rule {
+    name          = %q
+    action        = "accept"
+    bidirectional = true
+    enabled       = true
+    protocol      = "all"
+    sources       = [%q]
+    destinations  = [%q]
+    %s
+  }
+}`, rName, rName, policyDescription, rName, e2eGroupAllID(), e2eGroupAllID(), ruleDescription)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().Policies.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				// Left out: null in state, empty on the server, null on import.
+				Config: config("", ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckNoResourceAttr(rNameFull, "description"),
+					resource.TestCheckNoResourceAttr(rNameFull, "rule.0.description"),
+					func(*terraform.State) error {
+						p, err := testClient().Policies.Get(context.Background(), createdID)
+						if err != nil {
+							return err
+						}
+						empty := func(v *string) bool { return v == nil || *v == "" }
+						if !empty(p.Description) || len(p.Rules) != 1 || !empty(p.Rules[0].Description) {
+							return fmt.Errorf("expected empty descriptions on the server, found %v", p)
+						}
+						return nil
+					},
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				Config: config(`description = ""`, `description = ""`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "description", ""),
+					resource.TestCheckResourceAttr(rNameFull, "rule.0.description", ""),
+				),
+			},
+		},
+	})
+}
