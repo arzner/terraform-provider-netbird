@@ -384,15 +384,15 @@ func immutableUserChanges(plan, state UserModel) diag.Diagnostics {
 	changed := func(p, s attr.Value) bool { return !p.IsNull() && !p.IsUnknown() && !p.Equal(s) }
 	if changed(plan.Email, state.Email) {
 		d.AddAttributeError(path.Root("email"), "Email cannot be changed",
-			fmt.Sprintf("NetBird does not change a user's email (%q). Keep the current email in the configuration, or leave it out.", state.Email.ValueString()))
+			"NetBird does not change a user's email. Keep the current email in the configuration, or leave it out.")
 	}
 	if changed(plan.Name, state.Name) {
 		if state.IsServiceUser.ValueBool() {
 			d.AddAttributeError(path.Root("name"), "Name cannot be changed",
-				fmt.Sprintf("NetBird does not change a service user's name (%q). Keep the current name, or declare a new netbird_user under the new name (with new tokens) and remove this one.", state.Name.ValueString()))
+				"NetBird does not change a service user's name. Keep the current name, or declare a new netbird_user under the new name (with new tokens) and remove this one.")
 		} else {
 			d.AddAttributeError(path.Root("name"), "Name cannot be changed",
-				fmt.Sprintf("A regular user's name (%q) comes from the identity provider and NetBird does not change it. Keep the current name in the configuration, or leave it out.", state.Name.ValueString()))
+				"A regular user's name comes from the identity provider and NetBird does not change it. Keep the current name in the configuration, or leave it out.")
 		}
 	}
 	if changed(plan.IsServiceUser, state.IsServiceUser) {

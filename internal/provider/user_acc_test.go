@@ -10,8 +10,10 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
 
@@ -109,16 +111,31 @@ func Test_User_ServiceUserNameAndKind(t *testing.T) {
 }`, rName, name, extra)
 	}
 	// fromApply sets the name from a value Terraform knows only at apply.
-	fromApply := func(_, name string) string {
+	fromApply := func(name, role string) string {
 		return fmt.Sprintf(`resource "terraform_data" "name" {
   input = %q
 }
 
 resource "netbird_user" %q {
   name            = terraform_data.name.output
-  role            = "user"
+  role            = %q
   is_service_user = true
-}`, name, rName)
+}`, name, rName, role)
+	}
+	roleOnServer := func(want string) error {
+		users, err := testClient().Users.List(context.Background())
+		if err != nil {
+			return err
+		}
+		for _, u := range users {
+			if u.Id == createdID {
+				if u.Name != rName || u.Role != want {
+					return fmt.Errorf("user %s on the server: expected %s with role %s, found %s with role %s", createdID, rName, want, u.Name, u.Role)
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("user %s is not on the server", createdID)
 	}
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testEnsureManagementRunning(t) },
@@ -152,29 +169,24 @@ resource "netbird_user" %q {
 			},
 			{
 				// A name known only at apply that resolves to the current one
-				// applies.
-				Config: fromApply(rName, rName),
+				// applies, with the role change next to it.
+				Config: fromApply(rName, "auditor"),
+				Check:  func(*terraform.State) error { return roleOnServer("auditor") },
 			},
 			{
 				// One that resolves to another name is refused at apply,
-				// before anything is written.
-				Config:      fromApply(rName, rName+"-renamed"),
+				// before anything is written (the role change too).
+				Config:      fromApply(rName+"-renamed", "network_admin"),
 				ExpectError: regexp.MustCompile(`Name cannot be changed`),
 			},
 			{
-				Config: config(rName, "is_service_user = true"),
-				Check: func(*terraform.State) error {
-					users, err := testClient().Users.List(context.Background())
-					if err != nil {
-						return err
+				PreConfig: func() {
+					if err := roleOnServer("auditor"); err != nil {
+						t.Fatal(err)
 					}
-					for _, u := range users {
-						if u.Id == createdID && u.Name == rName {
-							return nil
-						}
-					}
-					return fmt.Errorf("user %s is not on the server as %s", createdID, rName)
 				},
+				Config: config(rName, "is_service_user = true"),
+				Check:  func(*terraform.State) error { return roleOnServer("user") },
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 			{
@@ -188,6 +200,41 @@ resource "netbird_user" %q {
 					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionNoop),
 				}},
 			},
+		},
+	})
+}
+
+// Test_User_CreateChecks: a new user is planned as the create will make it,
+// and one the create cannot make as configured is refused at plan time. No
+// step applies, so no invitation is sent.
+func Test_User_CreateChecks(t *testing.T) {
+	testE2E(t)
+	rName := "u" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_user." + rName
+	config := func(body string) string {
+		return fmt.Sprintf(`resource "netbird_user" %q {
+  name = %q
+  %s
+}`, rName, rName, body)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				// Left out, the kind is planned as a regular user.
+				Config:             config(`email = "` + rName + `@example.com"`),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: true,
+				ConfigPlanChecks: resource.ConfigPlanChecks{PostApplyPreRefresh: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionCreate),
+					plancheck.ExpectKnownValue(rNameFull, tfjsonpath.New("is_service_user"), knownvalue.Bool(false)),
+				}},
+			},
+			{Config: config(`email = "` + rName + `@example.com"` + "\n  is_blocked = true"), PlanOnly: true, ExpectError: regexp.MustCompile(`Cannot create a blocked user`)},
+			{Config: config("is_service_user = true\n  role = \"owner\""), PlanOnly: true, ExpectError: regexp.MustCompile(`Cannot create an owner`)},
+			{Config: config("is_service_user = true\n  email = \"" + rName + "@example.com\""), PlanOnly: true, ExpectError: regexp.MustCompile(`Service users have no email`)},
+			{Config: config(""), PlanOnly: true, ExpectError: regexp.MustCompile(`Name and email required`)},
 		},
 	})
 }

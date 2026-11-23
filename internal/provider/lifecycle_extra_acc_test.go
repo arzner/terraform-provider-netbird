@@ -12,6 +12,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -126,18 +127,14 @@ resource "netbird_dns_record" "%[1]s" {
 	})
 }
 
-// Test_Replace_UserServiceUser changes what kind of account a user is. The
-// server has no way to convert one into the other, which is why the attribute
-// forces replacement, and this is the assertion that says so.
-func Test_Replace_UserServiceUser(t *testing.T) {
+// Test_Lifecycle_UserKindChangeRefused changes what kind of account a user
+// is. The server has no way to convert one into the other, and replacing the
+// user would delete it and its tokens first, so the change is refused at plan
+// time and the user stays as it is.
+func Test_Lifecycle_UserKindChangeRefused(t *testing.T) {
 	testE2E(t)
 	rName := "u" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
 	address := "netbird_user." + rName
-	// The email moves with the kind of account, because the server insists on
-	// both halves: a person cannot be created without one, and a service user
-	// that is given one fails the apply — the address is dropped and returned
-	// empty, which Terraform reports as the provider contradicting its own plan.
-	// That second half is a defect in its own right, and not this test's subject.
 	serviceUser := fmt.Sprintf(`resource "netbird_user" "%[1]s" {
   name            = "%[1]s"
   is_service_user = true
@@ -153,9 +150,23 @@ func Test_Replace_UserServiceUser(t *testing.T) {
   auto_groups     = []
 }
 `, rName)
-	replaceCase(t, address, serviceUser, person,
-		resource.TestCheckResourceAttr(address, "is_service_user", "false"),
-	)
+	var id string
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckAbsentFromList(testClient().Users.List, func(u api.User) string { return u.Id }, &id),
+		Steps: []resource.TestStep{
+			{Config: serviceUser, Check: testRecordID(address, &id)},
+			{Config: person, PlanOnly: true, ExpectError: regexp.MustCompile(`User kind cannot be changed`)},
+			{
+				Config: serviceUser,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPtr(address, "id", &id),
+					resource.TestCheckResourceAttr(address, "is_service_user", "true"),
+				),
+			},
+		},
+	})
 }
 
 // Test_SetupKey_ImportThenApply is the case the expiry_seconds plan modifier
