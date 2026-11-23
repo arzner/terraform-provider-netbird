@@ -10,6 +10,21 @@ var specRenamed = map[string]string{
 	"CreateSetupKeyRequest.expires_in":      "expiry_seconds",
 	"PersonalAccessTokenRequest.expires_in": "expiration_days",
 	"PolicyUpdate.rules":                    "rule",
+
+	// The OS version check flattens each {min_version} or {min_kernel_version}
+	// object into one string attribute.
+	"OSVersionCheck.android": "android_min_version",
+	"OSVersionCheck.darwin":  "darwin_min_version",
+	"OSVersionCheck.ios":     "ios_min_version",
+	"OSVersionCheck.linux":   "linux_min_kernel_version",
+	"OSVersionCheck.windows": "windows_min_kernel_version",
+}
+
+// specNestedFlattened lists nested array properties whose item members the
+// provider models directly on the parent block, as "Schema.property".
+var specNestedFlattened = map[string]bool{
+	// process_check is a list of processes, one block per process.
+	"ProcessCheck.processes": true,
 }
 
 // specUnmodelled lists the spec request properties a resource deliberately
@@ -17,6 +32,12 @@ var specRenamed = map[string]string{
 // reviewer can check; a property that later gets modelled or leaves the spec
 // fails Test_SpecConformance until it is removed here.
 var specUnmodelled = map[string]string{
+	"PolicyRuleUpdate.sourceResource":      "not modelled yet (#44)",
+	"PolicyRuleUpdate.destinationResource": "not modelled yet (#44)",
+	"AccessRestrictions.crowdsec_mode":     "not modelled yet (#45); server default off",
+	"ServiceTarget.access_action":          "not modelled yet (#45); server default inherit",
+	"ServiceTargetOptions.direct_upstream": "not modelled yet (#45); server default false",
+
 	// Account settings the resource does not manage yet (#23). The raw update
 	// sends the account's current value back unchanged, so they are kept.
 	"AccountSettings.agent_network_only":               "not modelled yet (#23); kept by the raw update",

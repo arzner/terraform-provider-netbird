@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -22,10 +23,11 @@ import (
 // NetBird release adds therefore fails this test until someone decides what the
 // provider does with it, instead of being reset silently on a user's account.
 //
-// Top-level request properties are checked, plus the nested objects whose
-// members the provider flattens into top-level attributes or blocks (account
-// extra settings, posture checks, guardrail checks, policy limits). Other
-// nested objects, such as policy rules, are not compared yet. Read-only
+// Top-level request properties are checked, the nested objects whose members
+// the provider flattens into top-level attributes or blocks (account extra
+// settings, posture checks, guardrail checks, policy limits), and, recursively,
+// every nested object or array of objects that a nested attribute or block
+// models (policy rules, reverse-proxy targets and auth, and so on). Read-only
 // properties need no attribute; if one has a configurable attribute, that is
 // an error.
 func Test_SpecConformance(t *testing.T) {
@@ -81,6 +83,7 @@ func Test_SpecConformance(t *testing.T) {
 				if prop.readOnly && a.configurable {
 					t.Errorf("%s: %s is read-only in the spec but %q is configurable", rm.typeName, key, a.name)
 				}
+				checkNested(t, spec, rm.typeName, prop, a, seenAllowlist, checked, 1)
 			}
 		}
 	}
@@ -91,6 +94,11 @@ func Test_SpecConformance(t *testing.T) {
 		}
 		if !seenAllowlist[key] {
 			t.Errorf("specUnmodelled lists %s, which no checked schema has any more; remove it", key)
+		}
+	}
+	for key := range specNestedFlattened {
+		if !checked[key] {
+			t.Errorf("specNestedFlattened lists %s, which no checked schema has any more; remove it", key)
 		}
 	}
 	for key := range specRenamed {
@@ -155,9 +163,13 @@ var specResources = []specResource{
 type attrInfo struct {
 	name         string
 	configurable bool
+	// children are the attributes and blocks of a nested attribute or block;
+	// nil for a plain attribute.
+	children map[string]attrInfo
 }
 
-// resourceAttributes returns the resource's top-level attributes and blocks.
+// resourceAttributes returns the resource's attributes and blocks, with the
+// members of nested ones.
 func resourceAttributes(t *testing.T, r resource.Resource) map[string]attrInfo {
 	t.Helper()
 	var resp resource.SchemaResponse
@@ -165,12 +177,36 @@ func resourceAttributes(t *testing.T, r resource.Resource) map[string]attrInfo {
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("schema: %v", resp.Diagnostics)
 	}
+	return schemaMembers(resp.Schema.Attributes, resp.Schema.Blocks)
+}
+
+func schemaMembers(attributes map[string]rschema.Attribute, blocks map[string]rschema.Block) map[string]attrInfo {
 	out := map[string]attrInfo{}
-	for name, a := range resp.Schema.Attributes {
-		out[name] = attrInfo{name: name, configurable: a.IsRequired() || a.IsOptional()}
+	for name, a := range attributes {
+		info := attrInfo{name: name, configurable: a.IsRequired() || a.IsOptional()}
+		switch n := a.(type) {
+		case rschema.SingleNestedAttribute:
+			info.children = schemaMembers(n.Attributes, nil)
+		case rschema.ListNestedAttribute:
+			info.children = schemaMembers(n.NestedObject.Attributes, nil)
+		case rschema.SetNestedAttribute:
+			info.children = schemaMembers(n.NestedObject.Attributes, nil)
+		case rschema.MapNestedAttribute:
+			info.children = schemaMembers(n.NestedObject.Attributes, nil)
+		}
+		out[name] = info
 	}
-	for name := range resp.Schema.Blocks {
-		out[name] = attrInfo{name: name, configurable: true}
+	for name, b := range blocks {
+		info := attrInfo{name: name, configurable: true}
+		switch n := b.(type) {
+		case rschema.SingleNestedBlock:
+			info.children = schemaMembers(n.Attributes, n.Blocks)
+		case rschema.ListNestedBlock:
+			info.children = schemaMembers(n.NestedObject.Attributes, n.NestedObject.Blocks)
+		case rschema.SetNestedBlock:
+			info.children = schemaMembers(n.NestedObject.Attributes, n.NestedObject.Blocks)
+		}
+		out[name] = info
 	}
 	return out
 }
@@ -189,6 +225,8 @@ func attrName(key, property string) string {
 type specProperty struct {
 	readOnly bool
 	ref      string
+	// items is the component an array property's items refer to.
+	items string
 }
 
 type openAPISpec struct {
@@ -230,6 +268,7 @@ type schemaDoc struct {
 	AllOf      []schemaDoc          `yaml:"allOf"`
 	ReadOnly   bool                 `yaml:"readOnly"`
 	Properties map[string]schemaDoc `yaml:"properties"`
+	Items      *schemaDoc           `yaml:"items"`
 }
 
 func refName(ref string) string {
@@ -244,6 +283,9 @@ func (s openAPISpec) property(d schemaDoc, depth int) (specProperty, bool) {
 		return specProperty{}, false
 	}
 	out := specProperty{readOnly: d.ReadOnly}
+	if d.Items != nil && d.Items.Ref != "" {
+		out.items = refName(d.Items.Ref)
+	}
 	if d.Ref != "" {
 		inner, ok := s.schemas[refName(d.Ref)]
 		if !ok {
@@ -304,6 +346,9 @@ func (s openAPISpec) properties(name string) (map[string]specProperty, bool) {
 				prop.readOnly = prop.readOnly || prev.readOnly
 				if prop.ref == "" {
 					prop.ref = prev.ref
+				}
+				if prop.items == "" {
+					prop.items = prev.items
 				}
 			}
 			out[p] = prop
@@ -369,6 +414,10 @@ schemas:
           chainedTwice:
             allOf:
               - $ref: '#/components/schemas/AliasOfAlias'
+          children:
+            type: array
+            items:
+              $ref: '#/components/schemas/Child'
 `
 	if err := yaml.Unmarshal([]byte(fixture), &doc); err != nil {
 		t.Fatal(err)
@@ -387,6 +436,7 @@ schemas:
 		"plain":        {},
 		"chained":      {readOnly: true, ref: "Alias"},
 		"chainedTwice": {readOnly: true, ref: "AliasOfAlias"},
+		"children":     {items: "Child"},
 	}
 	for name, w := range want {
 		if got := props[name]; got != w {
@@ -398,5 +448,57 @@ schemas:
 	}
 	if _, ok := s.properties("Missing"); ok {
 		t.Error("an unknown schema must not resolve")
+	}
+}
+
+// checkNested compares the members of the component a nested attribute or
+// block models (prop.ref for an object, prop.items for an array of objects)
+// with the attribute's own members, with the same rules as the top level.
+func checkNested(t *testing.T, spec openAPISpec, typeName string, prop specProperty, a attrInfo, seen, checked map[string]bool, depth int) {
+	t.Helper()
+	component := prop.ref
+	if component == "" {
+		component = prop.items
+	}
+	if a.children == nil || component == "" || depth > 6 {
+		return
+	}
+	props, ok := spec.properties(component)
+	if !ok {
+		t.Errorf("%s: nested schema %s of %q is not in the spec", typeName, component, a.name)
+		return
+	}
+	for _, name := range sortedKeys(props) {
+		p := props[name]
+		key := component + "." + name
+		checked[key] = true
+		if specNestedFlattened[key] {
+			// The provider spreads this array's item members over the parent.
+			if p.items == "" {
+				t.Errorf("%s: %s is listed in specNestedFlattened but is not an array of objects", typeName, key)
+				continue
+			}
+			checkNested(t, spec, typeName, specProperty{items: p.items}, a, seen, checked, depth+1)
+			continue
+		}
+		if _, listed := specUnmodelled[key]; listed {
+			seen[key] = true
+			if c, modelled := a.children[attrName(key, name)]; modelled {
+				t.Errorf("%s: %s is listed in specUnmodelled but modelled by %q; remove it from the list", typeName, key, c.name)
+			}
+			continue
+		}
+		c, modelled := a.children[attrName(key, name)]
+		if !modelled && p.readOnly {
+			continue
+		}
+		if !modelled {
+			t.Errorf("%s: %s (NetBird %s, inside %q) is neither modelled nor listed in specUnmodelled", typeName, key, spec.version, a.name)
+			continue
+		}
+		if p.readOnly && c.configurable {
+			t.Errorf("%s: %s is read-only in the spec but %q is configurable", typeName, key, c.name)
+		}
+		checkNested(t, spec, typeName, p, c, seen, checked, depth+1)
 	}
 }
