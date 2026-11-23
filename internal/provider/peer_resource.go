@@ -367,7 +367,8 @@ func (r *Peer) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 	}
 	// A new id adopts another peer: the prior state describes a different
 	// device and is no baseline for it.
-	if prior.Id.Equal(data.Id) {
+	retarget := !prior.Id.Equal(data.Id)
+	if !retarget {
 		if changed := peerChangedSincePlan(prior, data, live); len(changed) > 0 {
 			resp.Diagnostics.AddError("Peer changed after the plan",
 				"The peer changed after this plan was made, outside Terraform or on the server as a result of another "+
@@ -378,8 +379,10 @@ func (r *Peer) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 	}
 	peer, observed, err := r.applyPeer(ctx, live, data, config)
 	if err != nil {
-		if observed {
-			// Record what took effect, so the next plan starts from it.
+		if observed && !retarget {
+			// Record what took effect, so the next plan starts from it. Not
+			// when adopting another peer failed: the state keeps the peer it
+			// manages, as a failed create saves nothing.
 			mapped := peerAPIToTerraform(ctx, peer, &data)
 			resp.Diagnostics.Append(mapped...)
 			if !mapped.HasError() {
@@ -388,7 +391,12 @@ func (r *Peer) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 			resp.Diagnostics.AddError("Error updating Peer", err.Error()+"\n\nThe peer as the server last reported it is saved to state.")
 			return
 		}
-		resp.Diagnostics.AddError("Error updating Peer", err.Error())
+		detail := err.Error()
+		if observed && retarget {
+			detail += fmt.Sprintf("\n\nAdopting peer %s failed and may have partly taken effect on it; the state still manages peer %s.",
+				data.Id.ValueString(), prior.Id.ValueString())
+		}
+		resp.Diagnostics.AddError("Error updating Peer", detail)
 		return
 	}
 
@@ -428,33 +436,29 @@ func (r *Peer) ImportState(ctx context.Context, req resource.ImportStateRequest,
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
-// peerChangedSincePlan lists the planned attributes whose live value differs
-// both from the state the plan was made from and from the plan: someone changed
-// them outside Terraform after the plan, and applying it would overwrite that
-// change (or, for an attribute the configuration leaves out, end with a value
-// the plan did not promise). The NetBird API has no conditional updates, so
-// this check before the first write is the guard against a stale plan.
+// peerChangedSincePlan lists the attributes the plan shows unchanged whose
+// live value differs from the state the plan was made from: they changed after
+// the plan, outside Terraform or on the server because of another change in
+// this apply, and applying the plan would either revert that change without
+// having shown it (the attribute is configured) or record a value the plan did
+// not promise (it is left out). An attribute the plan changes is not listed:
+// the plan shows its new value, and that is what the apply writes. The NetBird
+// API has no conditional updates, so this check before the write is the guard
+// against a stale plan.
 func peerChangedSincePlan(prior, plan PeerModel, live *api.Peer) []string {
-	liveIPv6 := types.StringPointerValue(live.Ipv6)
 	var changed []string
 	str := func(name string, prior, plan, live types.String) {
-		if !plan.IsUnknown() && !live.Equal(prior) && !live.Equal(plan) {
-			if name == "ipv6" && prior.IsNull() && !plan.IsNull() {
-				// No address when planned and one configured: the server may have
-				// assigned one meanwhile (for example when this apply enabled IPv6
-				// for the peer's group); the configured address replaces it.
-				return
-			}
+		if plan.Equal(prior) && !live.Equal(prior) {
 			changed = append(changed, fmt.Sprintf("- %s: %s when planned, now %s", name, prior, live))
 		}
 	}
 	boolean := func(name string, prior, plan types.Bool, live bool) {
-		if !plan.IsUnknown() && !prior.IsNull() && prior.ValueBool() != live && plan.ValueBool() != live {
+		if plan.Equal(prior) && !prior.IsNull() && prior.ValueBool() != live {
 			changed = append(changed, fmt.Sprintf("- %s: %t when planned, now %t", name, prior.ValueBool(), live))
 		}
 	}
 	str("name", prior.Name, plan.Name, types.StringValue(live.Name))
-	str("ipv6", prior.Ipv6, plan.Ipv6, liveIPv6)
+	str("ipv6", prior.Ipv6, plan.Ipv6, types.StringPointerValue(live.Ipv6))
 	boolean("ssh_enabled", prior.SshEnabled, plan.SshEnabled, live.SshEnabled)
 	boolean("login_expiration_enabled", prior.LoginExpirationEnabled, plan.LoginExpirationEnabled, live.LoginExpirationEnabled)
 	boolean("inactivity_expiration_enabled", prior.InactivityExpirationEnabled, plan.InactivityExpirationEnabled, live.InactivityExpirationEnabled)

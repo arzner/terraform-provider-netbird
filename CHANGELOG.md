@@ -34,8 +34,9 @@ it is based on.
   the server's current values even if they changed between plan and apply (previously the
   planned prior state was sent back).
 - `netbird_peer` updates start from the live peer and change only the attributes the
-  configuration sets. When the peer changed after the plan, an in-place update stops before
-  writing anything and asks for a new plan (#74 extends this to the other resources). An
+  configuration sets. When a setting the plan shows unchanged changed after the plan, an
+  in-place update stops before writing anything and asks for a new plan (#74 extends this to
+  the other resources). An
   address the server refuses (outside the account range, peer not in an IPv6-enabled group,
   already in use) changes nothing else, and changing login or inactivity expiration on a peer
   added with a setup key is refused before anything is sent.

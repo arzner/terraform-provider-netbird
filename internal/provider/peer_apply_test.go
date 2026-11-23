@@ -123,14 +123,14 @@ func Test_peerChangedSincePlan(t *testing.T) {
 		live  func(*api.Peer)
 		want  []string
 	}{
-		"nothing changed":  {},
-		"planned change":   {plan: func(p *PeerModel) { p.Name = types.StringValue("b") }},
-		"done already":     {plan: func(p *PeerModel) { p.Name = types.StringValue("b") }, live: func(l *api.Peer) { l.Name = "b" }},
-		"overwritten name": {plan: func(p *PeerModel) { p.Name = types.StringValue("b") }, live: func(l *api.Peer) { l.Name = "c" }, want: []string{"name"}},
-		"unplanned rename": {live: func(l *api.Peer) { l.Name = "c" }, want: []string{"name"}},
-		"moved address":    {live: func(l *api.Peer) { l.Ipv6 = ptr("fd00::2") }, want: []string{"ipv6"}},
-		"removed address":  {live: func(l *api.Peer) { l.Ipv6 = nil }, want: []string{"ipv6"}},
-		"ssh switched on":  {live: func(l *api.Peer) { l.SshEnabled = true }, want: []string{"ssh_enabled"}},
+		"nothing changed":     {},
+		"planned change":      {plan: func(p *PeerModel) { p.Name = types.StringValue("b") }},
+		"done already":        {plan: func(p *PeerModel) { p.Name = types.StringValue("b") }, live: func(l *api.Peer) { l.Name = "b" }},
+		"planned rename wins": {plan: func(p *PeerModel) { p.Name = types.StringValue("b") }, live: func(l *api.Peer) { l.Name = "c" }},
+		"unplanned rename":    {live: func(l *api.Peer) { l.Name = "c" }, want: []string{"name"}},
+		"moved address":       {live: func(l *api.Peer) { l.Ipv6 = ptr("fd00::2") }, want: []string{"ipv6"}},
+		"removed address":     {live: func(l *api.Peer) { l.Ipv6 = nil }, want: []string{"ipv6"}},
+		"ssh switched on":     {live: func(l *api.Peer) { l.SshEnabled = true }, want: []string{"ssh_enabled"}},
 		"address assigned, one configured": {
 			prior: func(p *PeerModel) { p.Ipv6 = types.StringNull() },
 			plan:  func(p *PeerModel) { p.Ipv6 = types.StringValue("fd00::5") }},

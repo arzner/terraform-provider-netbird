@@ -204,6 +204,14 @@ func Test_Peer_IPv6(t *testing.T) {
 }`, rName, peerID, name, ipv6)
 	}
 	config := func(ipv6 string) string { return named(peer.Name, ipv6) }
+	withExpiry := func(ipv6 string, loginExpiration bool) string {
+		return fmt.Sprintf(`resource "netbird_peer" %q {
+  id                       = %q
+  name                     = %q
+  ipv6                     = %q
+  login_expiration_enabled = %t
+}`, rName, peerID, peer.Name, ipv6, loginExpiration)
+	}
 	// Checked in the next step's PreConfig, before its apply could repair a
 	// partial write.
 	onServerBefore := func(name, ipv6 string) func() {
@@ -235,22 +243,28 @@ func Test_Peer_IPv6(t *testing.T) {
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		CheckDestroy:             testCheckGone(testClient().Peers.Get, &gone),
 		Steps: []resource.TestStep{
-			{Config: config(""), Check: resource.ComposeAggregateTestCheckFunc(
-				resource.TestCheckResourceAttr(rNameFull, "ipv6", original), onServer(original))},
-			{Config: config(moved), ConfigPlanChecks: updatesInPlace(rNameFull), Check: resource.ComposeAggregateTestCheckFunc(
+			// Adopting with a move and an expiration change, which the server
+			// refuses for a peer added with a setup key (as the fixtures are):
+			// refused before anything is sent, so the address stays.
+			{Config: withExpiry(moved, !peer.LoginExpirationEnabled), ExpectError: regexp.MustCompile(`added with SSO login`)},
+			// Adopting with a move.
+			{PreConfig: onServerBefore(peer.Name, original), Config: config(moved), Check: resource.ComposeAggregateTestCheckFunc(
 				resource.TestCheckResourceAttr(rNameFull, "ipv6", moved), onServer(moved))},
 			// Moving the address makes the agent reconnect, so its connection
 			// status and last-seen time move on between the apply and the import.
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true,
 				ImportStateVerifyIgnore: []string{"connected", "last_seen"}},
+			// Left out, the address is kept.
+			{Config: config(""), Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr(rNameFull, "ipv6", moved), onServer(moved))},
 			{Config: config(strings.ToUpper(moved)), ExpectError: regexp.MustCompile(`not in canonical form`)},
-			// A rename together with an address the server refuses: the address
-			// goes first and alone, so the refusal leaves the name as it was.
-			{Config: named(peer.Name+"-x", outside), ExpectError: regexp.MustCompile(`not within the account IPv6 range`)},
-			// Renamed outside Terraform between plan and apply, with an address
-			// move pending: the apply stops before writing anything, and the
-			// outside change survives.
-			{PreConfig: onServerBefore(peer.Name, moved), Config: named(peer.Name+"-s", movedAgain),
+			// A rename together with an address the server refuses: the server
+			// checks the address first, so the refusal leaves the name as it was.
+			{Config: named(peer.Name+"-x", outside), ExpectError: regexp.MustCompile(`(?i)not within the account IPv6 range`)},
+			// Renamed outside Terraform between plan and apply while the plan
+			// keeps the name and moves the address: the apply stops before
+			// writing anything, and the outside change survives.
+			{PreConfig: onServerBefore(peer.Name, moved), Config: config(movedAgain),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					testExpectUpdateInPlace(rNameFull), testPeerRenamedOutside(peerID, peer.Name+"-o")}},
 				ExpectError: regexp.MustCompile(`Peer changed after the plan`)},
