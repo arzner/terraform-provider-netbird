@@ -14,8 +14,11 @@ if ! [[ $pinned =~ ^v0\.([0-9]+)\.[0-9]+$ ]]; then
   exit 1
 fi
 previous_minor=$((BASH_REMATCH[1] - 1))
-version=$(gh api "repos/netbirdio/netbird/releases?per_page=100" --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' |
-  grep -E "^v0\.${previous_minor}\.[0-9]+$" | sort -V | tail -1)
+# Every page: the line before the pinned one can be further back than the
+# newest hundred releases. No match is not an error here; the check below
+# reports it.
+version=$(gh api --paginate "repos/netbirdio/netbird/releases?per_page=100" --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' |
+  { grep -E "^v0\.${previous_minor}\.[0-9]+$" || true; } | sort -V | tail -1)
 if ! [[ $version =~ ^v0\.${previous_minor}\.[0-9]+$ ]]; then
   echo "::error::no release of v0.${previous_minor}.x found"
   exit 1
