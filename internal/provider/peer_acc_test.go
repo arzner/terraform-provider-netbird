@@ -218,7 +218,10 @@ func Test_Peer_IPv6(t *testing.T) {
 				resource.TestCheckResourceAttr(rNameFull, "ipv6", original), onServer(original))},
 			{Config: config(moved), ConfigPlanChecks: updatesInPlace(rNameFull), Check: resource.ComposeAggregateTestCheckFunc(
 				resource.TestCheckResourceAttr(rNameFull, "ipv6", moved), onServer(moved))},
-			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			// Moving the address makes the agent reconnect, so its connection
+			// status and last-seen time move on between the apply and the import.
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true,
+				ImportStateVerifyIgnore: []string{"connected", "last_seen"}},
 			{Config: config(strings.ToUpper(moved)), ExpectError: regexp.MustCompile(`not in canonical form`)},
 			{Config: config(original), Check: resource.ComposeAggregateTestCheckFunc(
 				resource.TestCheckResourceAttr(rNameFull, "ipv6", original), onServer(original))},
