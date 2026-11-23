@@ -16,7 +16,4 @@ var specRenamed = map[string]string{
 // does not model, as "Schema.property": "reason". Every entry needs a reason a
 // reviewer can check; a property that later gets modelled or leaves the spec
 // fails Test_SpecConformance until it is removed here.
-var specUnmodelled = map[string]string{
-	"ServiceRequest.private":       "not modelled yet (#25)",
-	"ServiceRequest.access_groups": "not modelled yet (#25); only used with private",
-}
+var specUnmodelled = map[string]string{}
