@@ -279,7 +279,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				// as HTTP, which an L4 service refuses. A null stored mode
 				// (state from before the attribute) stays unknown, and the
 				// update takes the live one.
-				PlanModifiers: []planmodifier.String{useNonNullStateForUnknown{}},
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseNonNullStateForUnknown()},
 			},
 			"listen_port": schema.Int64Attribute{
 				MarkdownDescription: "Port the proxy listens on (L4/TLS only). Set to 0 for auto-assignment.",
@@ -1442,15 +1442,20 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 		resp.Diagnostics.AddError("Error reading reverse proxy service", err.Error())
 		return
 	}
+	// Against the live mode: a state from before the attribute holds none.
+	liveMode := types.StringValue("http")
+	if live.Mode != nil && *live.Mode != "" {
+		liveMode = types.StringValue(string(*live.Mode))
+	}
+	if d := modeChangeProblem(liveMode, data.Mode); d.HasError() {
+		resp.Diagnostics.Append(d...)
+		return
+	}
 	if changed := serviceAccessChangedSincePlan(prior, data, live); len(changed) > 0 {
 		resp.Diagnostics.AddError("Reverse proxy service changed after the plan",
 			"The service's access settings changed after this plan was made, so applying the plan would overwrite "+
 				"that change although the plan shows the setting unchanged:\n\n"+strings.Join(changed, "\n")+
 				"\n\nNothing was changed. Run plan again.")
-		return
-	}
-	if d := modeChangeProblem(prior.Mode, data.Mode); d.HasError() {
-		resp.Diagnostics.Append(d...)
 		return
 	}
 	if serviceReq.Mode == nil && live.Mode != nil && *live.Mode != "" {
@@ -2036,25 +2041,6 @@ func keptActionProblems(ctx context.Context, req api.ServiceRequest, live *api.S
 	_, _, updateOnly := actions.problems(req.Private != nil && *req.Private, mode)
 	diags.Append(updateOnly...)
 	return diags
-}
-
-// useNonNullStateForUnknown plans a left-out string as its stored value
-// when there is one, and leaves it unknown otherwise.
-type useNonNullStateForUnknown struct{}
-
-func (useNonNullStateForUnknown) Description(context.Context) string {
-	return "Keeps a non-null stored value when the configuration leaves the attribute out."
-}
-
-func (m useNonNullStateForUnknown) MarkdownDescription(ctx context.Context) string {
-	return m.Description(ctx)
-}
-
-func (useNonNullStateForUnknown) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
-	if req.StateValue.IsNull() || !req.PlanValue.IsUnknown() || req.ConfigValue.IsUnknown() {
-		return
-	}
-	resp.PlanValue = req.StateValue
 }
 
 // modeChangeProblem refuses a known mode other than the stored one:
