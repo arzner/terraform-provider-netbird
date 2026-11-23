@@ -74,6 +74,9 @@ func Test_Peer_Create(t *testing.T) {
 				ResourceName:      rNameFull,
 				ImportState:       true,
 				ImportStateVerify: true,
+				// The agent keeps reporting in, so last_seen can move on
+				// between the apply and the import.
+				ImportStateVerifyIgnore: []string{"last_seen"},
 			},
 		},
 	})
