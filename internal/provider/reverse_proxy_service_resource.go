@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
@@ -307,6 +308,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.List{listplanmodifier.UseStateForUnknown()},
+				Validators:          []validator.List{listvalidator.NoNullValues()},
 			},
 			"targets": schema.ListNestedAttribute{
 				MarkdownDescription: "List of target backends for this service",
