@@ -693,14 +693,14 @@ func Test_ReverseProxyService_TCPMode(t *testing.T) {
 				ImportStateVerify: true,
 			},
 			{
-				// The server does not change a service's mode: the update
-				// stops before writing.
-				Config: testReverseProxyServiceL4(rName, domain, peerID, "udp", 15432, `
-    options = {
-      proxy_protocol  = true
-      request_timeout = "1m0s"
-    }`),
-				ExpectError: regexp.MustCompile(`Mode cannot be changed`),
+				// The server does not change a service's mode: the plan
+				// passes with a warning (a replacement would be fine), and the
+				// update stops before writing.
+				Config: testReverseProxyServiceL4(rName, domain, peerID, "udp", 15432, ""),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionUpdate),
+				}},
+				ExpectError: regexp.MustCompile(`(?s)Error running apply.*Mode cannot be changed`),
 			},
 			{
 				// With mode left out, an update keeps (and sends) the TCP
@@ -725,6 +725,10 @@ func Test_ReverseProxyService_TCPMode(t *testing.T) {
 						}
 						if svc.Mode == nil || *svc.Mode != "tcp" {
 							return fmt.Errorf("expected mode tcp on the server, found %v", svc.Mode)
+						}
+						if len(svc.Targets) != 1 || svc.Targets[0].Options == nil || svc.Targets[0].Options.RequestTimeout == nil ||
+							*svc.Targets[0].Options.RequestTimeout != "2m0s" {
+							return fmt.Errorf("expected request_timeout 2m0s on the server, found %+v", svc.Targets)
 						}
 						return nil
 					},

@@ -276,8 +276,10 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Computed:            true,
 				Validators:          []validator.String{stringvalidator.OneOf("http", "tcp", "udp", "tls")},
 				// Sent on every update: a request without a mode is validated
-				// as HTTP, which an L4 service refuses.
-				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				// as HTTP, which an L4 service refuses. A null stored mode
+				// (state from before the attribute) stays unknown, and the
+				// update takes the live one.
+				PlanModifiers: []planmodifier.String{useNonNullStateForUnknown{}},
 			},
 			"listen_port": schema.Int64Attribute{
 				MarkdownDescription: "Port the proxy listens on (L4/TLS only). Set to 0 for auto-assignment.",
@@ -663,10 +665,10 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 	data.Domain = types.StringValue(svc.Domain)
 	data.Enabled = types.BoolValue(svc.Enabled)
 
-	if svc.Mode != nil {
+	// An unset mode is HTTP; the server reports it as nil or "".
+	data.Mode = types.StringValue("http")
+	if svc.Mode != nil && *svc.Mode != "" {
 		data.Mode = types.StringValue(string(*svc.Mode))
-	} else {
-		data.Mode = types.StringValue("http")
 	}
 
 	if svc.ListenPort != nil {
@@ -1451,6 +1453,11 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 		resp.Diagnostics.Append(d...)
 		return
 	}
+	if serviceReq.Mode == nil && live.Mode != nil && *live.Mode != "" {
+		// A mode the plan does not know is the live one.
+		mode := api.ServiceRequestMode(*live.Mode)
+		serviceReq.Mode = &mode
+	}
 	keepLiveUnknownAccess(&serviceReq, data, live)
 	if err := privateRequestProblem(serviceReq, live.Private != nil && *live.Private); err != nil {
 		resp.Diagnostics.AddError("Private service without usable access groups", err.Error())
@@ -2029,6 +2036,25 @@ func keptActionProblems(ctx context.Context, req api.ServiceRequest, live *api.S
 	_, _, updateOnly := actions.problems(req.Private != nil && *req.Private, mode)
 	diags.Append(updateOnly...)
 	return diags
+}
+
+// useNonNullStateForUnknown plans a left-out string as its stored value
+// when there is one, and leaves it unknown otherwise.
+type useNonNullStateForUnknown struct{}
+
+func (useNonNullStateForUnknown) Description(context.Context) string {
+	return "Keeps a non-null stored value when the configuration leaves the attribute out."
+}
+
+func (m useNonNullStateForUnknown) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (useNonNullStateForUnknown) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+	if req.StateValue.IsNull() || !req.PlanValue.IsUnknown() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	resp.PlanValue = req.StateValue
 }
 
 // modeChangeProblem refuses a known mode other than the stored one:

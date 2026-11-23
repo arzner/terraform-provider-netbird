@@ -1801,3 +1801,18 @@ func Test_modeChangeProblem(t *testing.T) {
 		}
 	}
 }
+
+// The server reports an unset mode as nil or as "": both read as HTTP.
+func Test_reverseProxyServiceAPIToTerraform_unsetMode(t *testing.T) {
+	empty := api.ServiceMode("")
+	for name, mode := range map[string]*api.ServiceMode{"nil": nil, "empty": &empty} {
+		var model ReverseProxyServiceModel
+		svc := &api.Service{Id: "s1", Name: "s", Domain: "s.example", Mode: mode}
+		if d := reverseProxyServiceAPIToTerraform(context.Background(), svc, &model); d.HasError() {
+			t.Fatalf("%s: %v", name, d)
+		}
+		if model.Mode.ValueString() != "http" {
+			t.Errorf("%s: expected http, found %v", name, model.Mode)
+		}
+	}
+}
