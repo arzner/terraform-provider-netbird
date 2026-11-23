@@ -291,3 +291,45 @@ func Test_IdentityProvider_IgnoredTypeIssuer(t *testing.T) {
 		},
 	})
 }
+
+// Test_IdentityProvider_IgnoredIssuerReplacement: with the issuer ignored, a
+// type change still replaces the provider with the configured issuer.
+func Test_IdentityProvider_IgnoredIssuerReplacement(t *testing.T) {
+	testE2E(t)
+	rName := "idp" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_identity_provider." + rName
+	var firstID, createdID string
+	config := func(idpType, issuer string) string {
+		return fmt.Sprintf(`resource "netbird_identity_provider" %q {
+  name          = %q
+  type          = %q
+  client_id     = "client-id"
+  client_secret = "client-secret"
+  issuer        = %q
+  lifecycle {
+    ignore_changes = [issuer]
+  }
+}`, rName, rName, idpType, issuer)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().IdentityProviders.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: config("google", ""),
+				Check:  testRecordID(rNameFull, &firstID),
+			},
+			{
+				Config: config("keycloak", "https://oauth.id.jumpcloud.com/"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionDestroyBeforeCreate),
+				}},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					idpTypeOnServer(&createdID, "keycloak"),
+				),
+			},
+		},
+	})
+}

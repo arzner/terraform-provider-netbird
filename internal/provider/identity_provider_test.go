@@ -356,3 +356,44 @@ func Test_keepKnownType(t *testing.T) {
 		})
 	}
 }
+
+// The type/issuer pair is checked on in-place updates; a type change is a
+// replacement whose create is planned again from the configuration.
+func Test_identityProviderModifyPlan(t *testing.T) {
+	ctx := context.Background()
+	r := &IdentityProvider{}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	value := func(idpType, issuer string) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["type"] = tftypes.NewValue(tftypes.String, idpType)
+		values["issuer"] = tftypes.NewValue(tftypes.String, issuer)
+		return tftypes.NewValue(typ, values)
+	}
+	for name, tc := range map[string]struct {
+		state, plan tftypes.Value
+		wantError   bool
+	}{
+		"ignored type keeps keycloak":   {value("keycloak", "https://x.example/"), value("keycloak", ""), true},
+		"ignored issuer, type replaced": {value("google", ""), value("keycloak", ""), false},
+		"in place with an issuer":       {value("keycloak", "https://x.example/"), value("keycloak", "https://y.example/"), false},
+		"built-in issuer kept in place": {value("google", ""), value("google", ""), false},
+	} {
+		req := resource.ModifyPlanRequest{
+			Plan:  tfsdk.Plan{Schema: sch.Schema, Raw: tc.plan},
+			State: tfsdk.State{Schema: sch.Schema, Raw: tc.state},
+		}
+		resp := resource.ModifyPlanResponse{Plan: req.Plan}
+		r.ModifyPlan(ctx, req, &resp)
+		if resp.Diagnostics.HasError() != tc.wantError {
+			t.Errorf("%s: expected error %v, found %v", name, tc.wantError, resp.Diagnostics)
+		}
+	}
+}

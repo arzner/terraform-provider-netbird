@@ -350,6 +350,16 @@ func (r *IdentityProvider) ModifyPlan(ctx context.Context, req resource.ModifyPl
 	if resp.Diagnostics.HasError() || idpType.IsNull() || idpType.IsUnknown() || issuer.IsNull() || issuer.IsUnknown() {
 		return
 	}
+	// A new type replaces the provider, and Terraform plans that create
+	// again from the configuration (an ignored issuer included), so only an
+	// in-place update is checked here.
+	if !req.State.Raw.IsNull() {
+		var stored types.String
+		resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("type"), &stored)...)
+		if !stored.Equal(idpType) {
+			return
+		}
+	}
 	if issuer.ValueString() == "" && !builtInIssuer[idpType.ValueString()] {
 		resp.Diagnostics.AddAttributeError(path.Root("issuer"), "Issuer required",
 			fmt.Sprintf("The plan keeps type %q, which has no built-in issuer; set issuer to the provider's issuer URL.", idpType.ValueString()))
