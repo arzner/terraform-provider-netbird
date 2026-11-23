@@ -1093,6 +1093,13 @@ resource "netbird_reverse_proxy_service" %q {
 			if err != nil {
 				return fmt.Errorf("get service: %w", err)
 			}
+			seen := map[string]int{}
+			for _, target := range svc.Targets {
+				seen[normalizedPath(target.Path)]++
+			}
+			if len(svc.Targets) != 2 || seen["/"] != 1 || seen["/admin"] != 1 {
+				return fmt.Errorf("expected one target at / and one at /admin, found %v", seen)
+			}
 			for _, target := range svc.Targets {
 				switch normalizedPath(target.Path) {
 				case "/":

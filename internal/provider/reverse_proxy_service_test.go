@@ -1577,3 +1577,29 @@ func Test_preserveTargetPlanValues_samePathPairsOnce(t *testing.T) {
 		t.Errorf("each planned target pairs once: found %s, %s", out[0].Host.ValueString(), out[1].Host.ValueString())
 	}
 }
+
+// Targets of one backend that share a path pair on port and protocol: on
+// create with the paths left out, and on refresh after one was removed.
+func Test_matchPlanTargets_portDecides(t *testing.T) {
+	target := func(port int64, path types.String, host string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("peer1"), Port: types.Int64Value(port), Protocol: types.StringValue("http"),
+			Path: path, Host: types.StringValue(host),
+		}
+	}
+	unknown, root := types.StringUnknown(), types.StringValue("/")
+	// Create: both paths unknown in the plan.
+	got := matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target(8080, unknown, "a"), target(8081, unknown, "b")},
+		[]ReverseProxyServiceTargetModel{target(8081, root, ""), target(8080, root, "")})
+	if got[0].Host.ValueString() != "b" || got[1].Host.ValueString() != "a" {
+		t.Errorf("create: expected 8081->b and 8080->a, found %v", got)
+	}
+	// Refresh after 8080 was removed outside Terraform.
+	got = matchPlanTargets(
+		[]ReverseProxyServiceTargetModel{target(8080, root, "a"), target(8081, root, "b")},
+		[]ReverseProxyServiceTargetModel{target(8081, root, "")})
+	if len(got) != 1 || got[0].Host.ValueString() != "b" {
+		t.Errorf("refresh: the survivor must pair with its own prior target, found %v", got)
+	}
+}

@@ -936,11 +936,13 @@ func preserveTargetPlanValues(ctx context.Context, planTargets, apiTargets types
 
 // matchPlanTargets pairs each API target with at most one planned target, and
 // each planned target with at most one API target. One backend can serve
-// several paths, so a pair needs the same ID and the same effective path (a
-// left-out path is the server's "/"). A planned target whose path is not
-// known yet pairs with the one remaining API target of its ID. An API target
-// left unpaired keeps its server values, so a change made outside Terraform
-// (a moved path, for example) shows in the next plan.
+// several paths, and several ports on one path, so a pair needs the same ID
+// and effective path (a left-out path is the server's "/"), and port and
+// protocol decide between targets that share both. A planned target whose path
+// is not known yet pairs on ID, port and protocol, or with the one remaining
+// API target of its ID. An API target left unpaired keeps its server values,
+// so a change made outside Terraform (a moved path, a removed target) shows
+// in the next plan.
 func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]ReverseProxyServiceTargetModel {
 	path := func(v types.String) string {
 		if v.IsNull() || v.ValueString() == "" {
@@ -948,30 +950,37 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 		}
 		return v.ValueString()
 	}
+	samePath := func(p, l ReverseProxyServiceTargetModel) bool {
+		return !p.Path.IsUnknown() && path(p.Path) == path(l.Path)
+	}
+	unknownPath := func(p, _ ReverseProxyServiceTargetModel) bool { return p.Path.IsUnknown() }
+	sameEndpoint := func(p, l ReverseProxyServiceTargetModel) bool {
+		return p.Port.Equal(l.Port) && p.Protocol.Equal(l.Protocol)
+	}
 	out := map[int]ReverseProxyServiceTargetModel{}
 	used := make([]bool, len(planned))
-	for i, l := range live {
+	// pair matches unpaired targets of the same ID; with onlyOne it pairs a
+	// planned target only when exactly one API target qualifies.
+	pair := func(match func(p, l ReverseProxyServiceTargetModel) bool, onlyOne bool) {
 		for j, p := range planned {
-			if !used[j] && !p.Path.IsUnknown() && p.TargetId.Equal(l.TargetId) && path(p.Path) == path(l.Path) {
-				out[i], used[j] = p, true
-				break
+			if used[j] {
+				continue
+			}
+			var found []int
+			for i, l := range live {
+				if _, taken := out[i]; !taken && l.TargetId.Equal(p.TargetId) && match(p, l) {
+					found = append(found, i)
+				}
+			}
+			if len(found) == 1 || (!onlyOne && len(found) > 0) {
+				out[found[0]], used[j] = p, true
 			}
 		}
 	}
-	for j, p := range planned {
-		if used[j] || !p.Path.IsUnknown() {
-			continue
-		}
-		var only []int
-		for i, l := range live {
-			if _, taken := out[i]; !taken && l.TargetId.Equal(p.TargetId) {
-				only = append(only, i)
-			}
-		}
-		if len(only) == 1 {
-			out[only[0]], used[j] = p, true
-		}
-	}
+	pair(func(p, l ReverseProxyServiceTargetModel) bool { return samePath(p, l) && sameEndpoint(p, l) }, false)
+	pair(samePath, true)
+	pair(func(p, l ReverseProxyServiceTargetModel) bool { return unknownPath(p, l) && sameEndpoint(p, l) }, true)
+	pair(unknownPath, true)
 	return out
 }
 

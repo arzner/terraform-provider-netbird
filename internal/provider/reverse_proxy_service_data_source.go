@@ -169,7 +169,7 @@ func (d *ReverseProxyServiceDataSource) Schema(ctx context.Context, req datasour
 									Computed:            true,
 								},
 								"direct_upstream": schema.BoolAttribute{
-									MarkdownDescription: "Whether the proxy dials this target through the host network instead of its embedded NetBird client",
+									MarkdownDescription: "Whether the target is set to be dialed through the proxy host's network instead of its embedded NetBird client (honoured for HTTP services; NetBird v0.83 stores but does not apply it for TCP/UDP)",
 									Computed:            true,
 								},
 							},
