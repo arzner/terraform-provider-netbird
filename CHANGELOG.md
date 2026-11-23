@@ -67,7 +67,7 @@ it is based on.
 ### Fixed
 
 - `netbird_network_resource`: `groups` is optional. A resource can exist without groups, for
-  access through policies that name it directly, and with `groups` left out an update keeps the
+  access through policies that name it as `destination_resource`, and with `groups` left out an update keeps the
   groups the resource has, including ones a `netbird_group` adds, instead of removing them;
   `[]` removes all (#55; upstream
   [#166](https://github.com/netbirdio/terraform-provider-netbird/issues/166),

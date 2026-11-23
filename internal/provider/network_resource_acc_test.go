@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 
 	"github.com/netbirdio/netbird/shared/management/http/api"
@@ -133,8 +134,9 @@ func testNetworkResourceResource(rName, networkID, address, groups, name string)
 }
 
 // Test_NetworkResource_WithoutGroups: a resource can exist without groups,
-// and with groups left out its membership is not managed here, so a group
-// that adds it through netbird_group.resources keeps it across an update.
+// and with groups left out its membership is not managed here, so groups
+// that add it, through netbird_group.resources or the API after the plan,
+// keep it across an update.
 func Test_NetworkResource_WithoutGroups(t *testing.T) {
 	testE2E(t)
 	rName := "nre" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
@@ -148,11 +150,21 @@ func Test_NetworkResource_WithoutGroups(t *testing.T) {
 }
 %s`, rName, e2eNetworkID(), name, extra)
 	}
-	group := fmt.Sprintf(`
+	// groups attaches the resource to the first group; the second group
+	// starts without resources (left out, so the API may add some).
+	groups := func(firstResources, secondResources string) string {
+		return fmt.Sprintf(`
 resource "netbird_group" "%[1]s" {
   name      = "%[1]s"
-  resources = [netbird_network_resource.%[1]s.id]
-}`, rName)
+  resources = %[2]s
+}
+
+resource "netbird_group" "%[1]s_second" {
+  name = "%[1]s-second"
+  %[3]s
+}`, rName, firstResources, secondResources)
+	}
+	attached := fmt.Sprintf("[netbird_network_resource.%s.id]", rName)
 	groupsOnServer := func(want ...string) resource.TestCheckFunc {
 		return func(s *terraform.State) error {
 			res, err := testClient().Networks.Resources(e2eNetworkID()).Get(context.Background(), createdID)
@@ -175,6 +187,7 @@ resource "netbird_group" "%[1]s" {
 			return nil
 		}
 	}
+	var secondID string
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testEnsureManagementRunning(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -196,20 +209,46 @@ resource "netbird_group" "%[1]s" {
 			},
 			{
 				// A group adds the resource; the resource does not fight it.
-				Config: config(rName, group),
-				Check:  groupsOnServer("netbird_group." + rName),
-			},
-			{
-				// An update with groups left out keeps that membership.
-				Config:           config(rName+"-renamed", group),
-				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Config: config(rName, groups(attached, "")),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr(rNameFull, "name", rName+"-renamed"),
+					testRecordID("netbird_group."+rName+"_second", &secondID),
 					groupsOnServer("netbird_group."+rName),
 				),
 			},
+			{
+				// An update with groups left out keeps that membership, and
+				// one the API adds after the plan.
+				Config: config(rName+"-renamed", groups(attached, "")),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					testExpectUpdateInPlace(rNameFull),
+					groupGetsResource{group: &secondID, name: rName + "-second", resource: &createdID},
+				}},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "name", rName+"-renamed"),
+					resource.TestCheckResourceAttr(rNameFull, "groups.#", "2"),
+					groupsOnServer("netbird_group."+rName, "netbird_group."+rName+"_second"),
+				),
+			},
+			{
+				// Detach before teardown: the server refuses to delete a
+				// group that still has resources.
+				Config: config(rName+"-renamed", groups("[]", "resources = []")),
+				Check:  groupsOnServer(),
+			},
 		},
 	})
+}
+
+// groupGetsResource is a plan check that adds a network resource to a group
+// through the API between plan and apply, as another tool would.
+type groupGetsResource struct {
+	group, resource *string
+	name            string
+}
+
+func (c groupGetsResource) CheckPlan(ctx context.Context, _ plancheck.CheckPlanRequest, resp *plancheck.CheckPlanResponse) {
+	resources := []api.Resource{{Id: *c.resource, Type: api.ResourceTypeSubnet}}
+	_, resp.Error = testClient().Groups.Update(ctx, *c.group, api.GroupRequest{Name: c.name, Resources: &resources})
 }
 
 // Test_NetworkResource_EmptyGroups: groups = [] removes the resource from

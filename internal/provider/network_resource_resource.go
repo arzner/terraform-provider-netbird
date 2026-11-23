@@ -93,7 +93,7 @@ func (r *NetworkResource) Schema(ctx context.Context, req resource.SchemaRequest
 				Default:             booldefault.StaticBool(true),
 			},
 			"groups": schema.SetAttribute{
-				MarkdownDescription: "Group IDs containing the resource. Left out, the resource's groups are not managed here: a new resource starts without groups, and an update keeps the groups the resource has, including ones a `netbird_group`'s `resources` adds. `[]` removes it from every group. A resource without groups is reached through policies that name it directly (`source_resource`, `destination_resource`).",
+				MarkdownDescription: "Group IDs containing the resource. Left out, the resource's groups are not managed here: a new resource starts without groups, and an update keeps the groups the resource has, including ones a `netbird_group`'s `resources` adds. `[]` removes it from every group. A resource without groups is reached through policies that name it as `destination_resource`.",
 				Optional:            true,
 				Computed:            true,
 				ElementType:         types.StringType,
@@ -238,6 +238,17 @@ func (r *NetworkResource) Update(ctx context.Context, req resource.UpdateRequest
 		groups = make([]string, len(live.Groups))
 		for i, g := range live.Groups {
 			groups[i] = g.Id
+		}
+		// A known planned set (a no-change value, or one kept by
+		// ignore_changes) must still be what the resource has: sending a
+		// different set would return a result the plan did not show.
+		if !data.Groups.IsUnknown() && !data.Groups.IsNull() {
+			planned := stringSetDefault(ctx, data.Groups, []string{})
+			if !sameStrings(planned, groups) {
+				resp.Diagnostics.AddError("Network resource groups changed after the plan",
+					fmt.Sprintf("The resource's groups were %v when planned and are %v now, changed outside this resource. Nothing was changed. Run plan again.", sortedCopy(planned), sortedCopy(groups)))
+				return
+			}
 		}
 	}
 
