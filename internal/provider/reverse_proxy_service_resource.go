@@ -259,10 +259,13 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"mode": schema.StringAttribute{
-				MarkdownDescription: "Service mode: \"http\" for L7 reverse proxy, \"tcp\"/\"udp\"/\"tls\" for L4 passthrough",
+				MarkdownDescription: "Service mode: \"http\" for L7 reverse proxy, \"tcp\"/\"udp\"/\"tls\" for L4 passthrough. The server does not change the mode of an existing service, so changing it replaces the service (except setting \"http\" where it was unset).",
 				Optional:            true,
 				Computed:            true,
 				Validators:          []validator.String{stringvalidator.OneOf("http", "tcp", "udp", "tls")},
+				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplaceIf(modeChangeNeedsReplace,
+					"The server does not change a service's mode on update, so a change of mode replaces the service.",
+					"The server does not change a service's mode on update, so a change of mode replaces the service.")},
 			},
 			"listen_port": schema.Int64Attribute{
 				MarkdownDescription: "Port the proxy listens on (L4/TLS only). Set to 0 for auto-assignment.",
@@ -303,7 +306,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseNonNullStateForUnknown()},
 			},
 			"access_groups": schema.ListAttribute{
-				MarkdownDescription: "Group IDs whose peers may reach the private service over the tunnel. Required when `private` is true; ignored otherwise. A proxy reuses a peer's granted access for up to five minutes by default (`NB_PROXY_TUNNEL_CACHE_TTL`), so removing a group can take that long to reach a peer that another policy still lets reach the proxy.",
+				MarkdownDescription: "Group IDs whose peers may reach the private service over the tunnel. Required when `private` is true; ignored otherwise. A proxy reuses a peer's granted access for up to five minutes by default (`NB_PROXY_TUNNEL_CACHE_TTL`), so removing a group can take that long to reach a peer that another policy still lets reach the proxy. IDs are not checked for existence: when a service turns private with the groups left out, it keeps the IDs it has, and an ID of a deleted group grants nothing.",
 				ElementType:         types.StringType,
 				Optional:            true,
 				Computed:            true,
@@ -1298,14 +1301,15 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 			// not this plan's problem.
 			return
 		}
-		// The server keeps a service's mode between HTTP and TCP, UDP or TLS,
-		// whatever the plan says.
-		var state ReverseProxyServiceModel
-		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-		if plan.Mode.IsUnknown() || (!state.Mode.IsNull() && !state.Mode.IsUnknown() && state.Mode.ValueString() != "http") {
+		// A left-out mode is not sent and the server keeps the service's
+		// mode. A configured change of mode replaces the service, so the
+		// planned mode is the one the new service gets.
+		if plan.Mode.IsUnknown() {
+			var state ReverseProxyServiceModel
+			resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
 			plan.Mode = state.Mode
 		}
 	}
@@ -1314,14 +1318,26 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	resp.Diagnostics.Append(privateServiceProblems(plan.Mode, plan.AccessGroups, plan.Auth)...)
 }
 
+// modeChangeNeedsReplace reports a configured mode change the server refuses
+// on update: any change except between an unset mode and http.
+func modeChangeNeedsReplace(_ context.Context, req planmodifier.StringRequest, resp *stringplanmodifier.RequiresReplaceIfFuncResponse) {
+	if req.StateValue.IsNull() || req.StateValue.IsUnknown() || req.PlanValue.IsNull() || req.PlanValue.IsUnknown() {
+		return
+	}
+	httpFamily := func(mode string) bool { return mode == "" || mode == "http" }
+	old, planned := req.StateValue.ValueString(), req.PlanValue.ValueString()
+	resp.RequiresReplace = old != planned && !(httpFamily(old) && httpFamily(planned))
+}
+
 // privateRequestProblem checks the access groups the update would send for a
 // private service once the live values of unknown settings are merged in;
 // the plan could not see those.
 func privateRequestProblem(req api.ServiceRequest) error {
-	if req.Private == nil || !*req.Private || req.AccessGroups == nil {
+	if req.Private == nil || !*req.Private {
 		return nil
 	}
-	if len(*req.AccessGroups) == 0 {
+	// The server omits an empty list, so nil from a live read means none.
+	if req.AccessGroups == nil || len(*req.AccessGroups) == 0 {
 		return fmt.Errorf("the service would be private with no access groups. Nothing was changed; set access_groups")
 	}
 	for _, id := range *req.AccessGroups {
@@ -1366,8 +1382,8 @@ func privateServiceProblems(mode types.String, groups types.List, auth types.Obj
 	var diags diag.Diagnostics
 	if !mode.IsNull() && !mode.IsUnknown() && mode.ValueString() != "http" {
 		diags.AddAttributeError(path.Root("mode"), "Private services are HTTP only",
-			fmt.Sprintf("private = true requires mode = \"http\", got %q. The server does not change a service's "+
-				"mode between HTTP and TCP, UDP or TLS, so an existing non-HTTP service cannot become private.", mode.ValueString()))
+			fmt.Sprintf("private = true requires mode = \"http\", got %q. An existing service keeps its mode when mode is "+
+				"left out; setting mode = \"http\" replaces a TCP, UDP or TLS service.", mode.ValueString()))
 	}
 	if !groups.IsNull() && !groups.IsUnknown() {
 		if len(groups.Elements()) == 0 {

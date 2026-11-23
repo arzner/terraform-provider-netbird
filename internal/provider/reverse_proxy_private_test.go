@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -253,10 +254,10 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 			config: vals{"private": on, "access_groups": groups},
 			plan:   vals{"private": on, "mode": tftypes.NewValue(tftypes.String, tftypes.UnknownValue), "access_groups": groups},
 		},
-		"made private, explicit http on a tcp service": {
+		"made private, explicit http on a tcp service (replaced)": {
 			state:  vals{"private": tftypes.NewValue(tftypes.Bool, false), "mode": tcp, "access_groups": groups},
 			config: vals{"private": on, "mode": http, "access_groups": groups},
-			plan:   vals{"private": on, "mode": http, "access_groups": groups}, wantError: true,
+			plan:   vals{"private": on, "mode": http, "access_groups": groups},
 		},
 		"no-op with an adopted blank group": {
 			state:  vals{"private": on, "mode": http, "access_groups": blankGroup},
@@ -323,11 +324,12 @@ func Test_privateRequestProblem(t *testing.T) {
 		req       api.ServiceRequest
 		wantError bool
 	}{
-		"private with a group":    {api.ServiceRequest{Private: &on, AccessGroups: &[]string{"g1"}}, false},
-		"private, blank live ID":  {api.ServiceRequest{Private: &on, AccessGroups: &[]string{"g1", " "}}, true},
-		"private, no live groups": {api.ServiceRequest{Private: &on, AccessGroups: &[]string{}}, true},
-		"public, blank ID":        {api.ServiceRequest{Private: &off, AccessGroups: &[]string{" "}}, false},
-		"private left out":        {api.ServiceRequest{AccessGroups: &[]string{" "}}, false},
+		"private with a group":                  {api.ServiceRequest{Private: &on, AccessGroups: &[]string{"g1"}}, false},
+		"private, blank live ID":                {api.ServiceRequest{Private: &on, AccessGroups: &[]string{"g1", " "}}, true},
+		"private, no live groups":               {api.ServiceRequest{Private: &on, AccessGroups: &[]string{}}, true},
+		"private, groups omitted by the server": {api.ServiceRequest{Private: &on}, true},
+		"public, blank ID":                      {api.ServiceRequest{Private: &off, AccessGroups: &[]string{" "}}, false},
+		"private left out":                      {api.ServiceRequest{AccessGroups: &[]string{" "}}, false},
 	} {
 		if err := privateRequestProblem(tc.req); (err != nil) != tc.wantError {
 			t.Errorf("%s: expected error %v, found %v", name, tc.wantError, err)
@@ -379,5 +381,26 @@ func Test_reverseProxyService_accessPlanModifiers(t *testing.T) {
 	g1 := types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g1")})
 	if got := planList(g1); !got.Equal(g1) {
 		t.Errorf("access_groups from state: expected [g1], found %v", got)
+	}
+}
+
+func Test_modeChangeNeedsReplace(t *testing.T) {
+	for name, tc := range map[string]struct {
+		state, plan types.String
+		want        bool
+	}{
+		"tcp to http":   {types.StringValue("tcp"), types.StringValue("http"), true},
+		"http to udp":   {types.StringValue("http"), types.StringValue("udp"), true},
+		"tcp to tls":    {types.StringValue("tcp"), types.StringValue("tls"), true},
+		"unset to http": {types.StringValue(""), types.StringValue("http"), false},
+		"same":          {types.StringValue("tcp"), types.StringValue("tcp"), false},
+		"left out":      {types.StringValue("tcp"), types.StringUnknown(), false},
+		"new service":   {types.StringNull(), types.StringValue("tcp"), false},
+	} {
+		var resp stringplanmodifier.RequiresReplaceIfFuncResponse
+		modeChangeNeedsReplace(context.Background(), planmodifier.StringRequest{StateValue: tc.state, PlanValue: tc.plan}, &resp)
+		if resp.RequiresReplace != tc.want {
+			t.Errorf("%s: expected replace %v, found %v", name, tc.want, resp.RequiresReplace)
+		}
 	}
 }
