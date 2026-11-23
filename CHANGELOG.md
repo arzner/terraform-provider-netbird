@@ -66,6 +66,13 @@ it is based on.
 
 ### Fixed
 
+- `netbird_network_resource`: `groups` is optional. A resource can exist without groups, for
+  access through policies that name it directly, and with `groups` left out an update keeps the
+  groups the resource has, including ones a `netbird_group` adds, instead of removing them;
+  `[]` removes all (#55; upstream
+  [#166](https://github.com/netbirdio/terraform-provider-netbird/issues/166),
+  [#156](https://github.com/netbirdio/terraform-provider-netbird/issues/156),
+  [#230](https://github.com/netbirdio/terraform-provider-netbird/issues/230)).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the

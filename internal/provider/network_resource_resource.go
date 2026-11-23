@@ -93,10 +93,11 @@ func (r *NetworkResource) Schema(ctx context.Context, req resource.SchemaRequest
 				Default:             booldefault.StaticBool(true),
 			},
 			"groups": schema.SetAttribute{
-				MarkdownDescription: "Group IDs containing the resource",
-				Required:            true,
+				MarkdownDescription: "Group IDs containing the resource. Left out, the resource's groups are not managed here: a new resource starts without groups, and an update keeps the groups the resource has, including ones a `netbird_group`'s `resources` adds. `[]` removes it from every group. A resource without groups is reached through policies that name it directly (`source_resource`, `destination_resource`).",
+				Optional:            true,
+				Computed:            true,
 				ElementType:         types.StringType,
-				Validators:          []validator.Set{setvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1)), setvalidator.SizeAtLeast(1)},
+				Validators:          []validator.Set{setvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1))},
 			},
 		},
 	}
@@ -219,12 +220,33 @@ func (r *NetworkResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
+	// The server sets the resource's groups to exactly the ones sent. Left
+	// out of the configuration, they are not managed here, so the update
+	// sends the groups the resource has now (netbird_group may add some).
+	var configured types.Set
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("groups"), &configured)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	groups := stringSetDefault(ctx, data.Groups, []string{})
+	if configured.IsNull() {
+		live, err := r.client.Networks.Resources(data.NetworkId.ValueString()).Get(ctx, data.Id.ValueString())
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading NetworkResource", err.Error())
+			return
+		}
+		groups = make([]string, len(live.Groups))
+		for i, g := range live.Groups {
+			groups[i] = g.Id
+		}
+	}
+
 	networkResourceReq := api.NetworkResourceRequest{
 		Name:        data.Name.ValueString(),
 		Description: data.Description.ValueStringPointer(),
 		Address:     data.Address.ValueString(),
 		Enabled:     data.Enabled.ValueBool(),
-		Groups:      stringSetDefault(ctx, data.Groups, []string{}),
+		Groups:      groups,
 	}
 
 	networkResource, err := r.client.Networks.Resources(data.NetworkId.ValueString()).Update(ctx, data.Id.ValueString(), networkResourceReq)
