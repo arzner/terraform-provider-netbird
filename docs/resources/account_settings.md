@@ -76,3 +76,15 @@ resource "netbird_account_settings" "example" {
 Optional:
 
 - `agent_network` (Boolean) Shows (true) or hides (false) the Agent Network menu regardless of the deployment feature flag. Left out, the current value is kept; it cannot be reset to the server default from Terraform.
+
+## Import
+
+Import is supported using the following syntax:
+
+```shell
+# The account settings of the account the token belongs to
+terraform import netbird_account_settings.example current
+
+# Or by account ID (GET /api/accounts)
+terraform import netbird_account_settings.example account_id
+```

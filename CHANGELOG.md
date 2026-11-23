@@ -10,6 +10,8 @@ it is based on.
 
 ### Added
 
+- `netbird_account_settings` can be imported with the ID `current`: the account of the token,
+  when the token sees exactly one account (#19).
 - `netbird_account_settings`: `metrics_push_enabled`, `auto_update_always`,
   `peer_hostname_collision_rejected`, `agent_network_only` and `dashboard_features`, also in
   the data source (#23). `agent_network_only = true` together with
@@ -17,6 +19,8 @@ it is based on.
 
 ### Changed
 
+- NetBird 0.82 is supported too: the acceptance suite also runs against the newest release of the
+  previous NetBird minor line (v0.82.1 today), and passes with the 0.1.0 provider code (#32).
 - `netbird_account_settings` sends only the settings the configuration sets; the others keep
   the server's current values even if they changed between plan and apply (previously the
   planned prior state was sent back).
