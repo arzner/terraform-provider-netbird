@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -42,6 +43,20 @@ data "netbird_users" "%[1]s" {
 		resource.TestCheckResourceAttrPair(ds, "ids.0", "netbird_user."+rName, "id"),
 		checkUsersAgainstAPI(ds, func(u api.User) bool { return u.Name == rName }),
 	))
+
+	// A null auto group is refused before any request.
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: fmt.Sprintf(`
+data "netbird_users" "%s" {
+  auto_groups = [null]
+}
+`, rName),
+			ExpectError: regexp.MustCompile(`Null List Value`),
+		}},
+	})
 
 	// An email no user has is an empty result, where netbird_user fails with No match.
 	missing := fmt.Sprintf(`
