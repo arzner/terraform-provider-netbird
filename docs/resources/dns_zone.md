@@ -27,12 +27,12 @@ resource "netbird_dns_zone" "internal" {
 
 ### Required
 
-- `domain` (String) Zone domain (FQDN). The server does not change the domain of a zone, so a new domain replaces the zone; its records are replaced with it, and their names have to move to the new domain too.
+- `domain` (String) Zone domain (FQDN, no wildcard, no trailing dot; checked at plan time the way the server does). The server does not change the domain of a zone, so a new domain replaces the zone. The server deletes the old zone with all its records: records managed by `netbird_dns_record` are created again in the new zone (their names have to move to the new domain too), records added outside Terraform are lost.
 - `name` (String) DNS Zone name identifier
 
 ### Optional
 
-- `distribution_groups` (Set of String) Group IDs that define groups of peers that will resolve this zone
+- `distribution_groups` (Set of String) Group IDs that define groups of peers that will resolve this zone. Needed to create the zone, also when a new domain replaces it; left out on an existing zone, its groups are kept.
 - `enable_search_domain` (Boolean) Enable this zone as a search domain
 - `enabled` (Boolean) DNS Zone status
 

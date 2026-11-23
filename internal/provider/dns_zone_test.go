@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
@@ -65,6 +67,24 @@ func Test_dnsZoneAPIToTerraform(t *testing.T) {
 
 		if !reflect.DeepEqual(out, c.expected) {
 			t.Fatalf("Expected:\n%#v\nFound:\n%#v", c.expected, out)
+		}
+	}
+}
+
+func Test_zoneDomain(t *testing.T) {
+	for d, ok := range map[string]bool{
+		"example.com":   true,
+		"lan":           true,
+		"test.local":    true,
+		"example.com.":  false,
+		"*.example.com": false,
+		"-bad.example":  false,
+		"a..b":          false,
+	} {
+		var resp validator.StringResponse
+		zoneDomain{}.ValidateString(context.Background(), validator.StringRequest{Path: path.Root("domain"), ConfigValue: types.StringValue(d)}, &resp)
+		if resp.Diagnostics.HasError() == ok {
+			t.Errorf("%q: expected valid %v, found %v", d, ok, resp.Diagnostics)
 		}
 	}
 }

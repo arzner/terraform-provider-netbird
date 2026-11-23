@@ -66,8 +66,12 @@ it is based on.
 
 ### Fixed
 
-- `netbird_dns_zone`: changing `domain` replaces the zone, and its records with it, instead of
-  planning an update the server refuses (#57; upstream
+- `netbird_dns_zone`: changing `domain` replaces the zone instead of planning an update the
+  server refuses. The server deletes the old zone's records; records managed by
+  `netbird_dns_record` are created again in the new zone, records added outside Terraform are lost.
+  What would fail the create is refused at plan time, before the old zone is deleted: a domain the
+  server refuses (a wildcard or a trailing dot), a name longer than 255 characters, and no
+  `distribution_groups` (#57; upstream
   [#188](https://github.com/netbirdio/terraform-provider-netbird/issues/188)).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails

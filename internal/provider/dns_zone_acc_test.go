@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -111,7 +112,7 @@ func Test_DNSZone_DomainReplaces(t *testing.T) {
 	rName := "r" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
 	zoneFull := "netbird_dns_zone." + zoneName
 	recordFull := "netbird_dns_record." + rName
-	var firstZone, zoneID string
+	var firstZone, zoneID, firstRecord string
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testEnsureManagementRunning(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -119,7 +120,20 @@ func Test_DNSZone_DomainReplaces(t *testing.T) {
 		Steps: []resource.TestStep{
 			{
 				Config: testDNSRecordResource(zoneName, "before.local", rName, "www", "A", "192.168.1.1", 300),
-				Check:  testRecordID(zoneFull, &firstZone),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(zoneFull, &firstZone),
+					testRecordID(recordFull, &firstRecord),
+				),
+			},
+			{
+				// A domain the server refuses fails the plan, so the zone
+				// is not deleted for a create that cannot succeed.
+				Config:      testDNSRecordResource(zoneName, "after.local.", rName, "www", "A", "192.168.1.1", 300),
+				ExpectError: regexp.MustCompile(`Invalid zone domain`),
+			},
+			{
+				Config:   testDNSRecordResource(zoneName, "before.local", rName, "www", "A", "192.168.1.1", 300),
+				PlanOnly: true,
 			},
 			{
 				Config: testDNSRecordResource(zoneName, "after.local", rName, "www", "A", "192.168.1.1", 300),
@@ -142,10 +156,22 @@ func Test_DNSZone_DomainReplaces(t *testing.T) {
 						if zone.Domain != "after.local" {
 							return fmt.Errorf("domain on the server: expected after.local, found %s", zone.Domain)
 						}
+						recordID := s.RootModule().Resources[recordFull].Primary.ID
+						if recordID == firstRecord {
+							return fmt.Errorf("the record kept its ID %s; expected a new one in the new zone", recordID)
+						}
+						found := false
+						for _, rec := range zone.Records {
+							found = found || (rec.Id == recordID && rec.Name == "www.after.local")
+						}
+						if !found {
+							return fmt.Errorf("the new zone does not hold record %s (www.after.local): %+v", recordID, zone.Records)
+						}
 						return testCheckGone(testClient().DNSZones.GetZone, &firstZone)(s)
 					},
 				),
 			},
+			{ResourceName: zoneFull, ImportState: true, ImportStateVerify: true},
 		},
 	})
 }
