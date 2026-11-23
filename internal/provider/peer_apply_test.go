@@ -33,7 +33,7 @@ func Test_peerRequest_keepsLiveValuesOfUnconfiguredAttributes(t *testing.T) {
 	}
 }
 
-func Test_applyPeer_sendsIPv6Separately(t *testing.T) {
+func Test_applyPeer_sendsIPv6FirstAndAlone(t *testing.T) {
 	for name, tc := range map[string]struct {
 		failFirst    bool
 		failSecond   bool
@@ -42,26 +42,33 @@ func Test_applyPeer_sendsIPv6Separately(t *testing.T) {
 		wantPuts     int
 		wantErr      bool
 		wantObserved bool
+		wantPeer     string // name of the returned record: "read-back", "first" or ""
 	}{
-		"both succeed":               {wantPuts: 2},
-		"first update refused":       {failFirst: true, wantPuts: 1, wantErr: true, wantObserved: true},
-		"address refused":            {failSecond: true, wantPuts: 2, wantErr: true, wantObserved: true},
-		"address-only failure":       {addressOnly: true, failFirst: true, wantPuts: 1, wantErr: true, wantObserved: true},
-		"address and read-back fail": {failSecond: true, failGet: true, wantPuts: 2, wantErr: true, wantObserved: true},
+		"both succeed":                {wantPuts: 2},
+		"address only":                {addressOnly: true, wantPuts: 1},
+		"address refused":             {failFirst: true, wantPuts: 1, wantErr: true, wantObserved: true, wantPeer: "read-back"},
+		"settings refused":            {failSecond: true, wantPuts: 2, wantErr: true, wantObserved: true, wantPeer: "read-back"},
+		"address and read-back fail":  {failFirst: true, failGet: true, wantPuts: 1, wantErr: true},
+		"settings and read-back fail": {failSecond: true, failGet: true, wantPuts: 2, wantErr: true, wantObserved: true, wantPeer: "first"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var puts []map[string]any
+			// The server's peer: a PUT applies the request, a GET returns it
+			// marked, so the test sees whether the read-back was used.
+			state := map[string]any{"id": "p", "name": "old", "ipv6": "fd00::7"}
+			if tc.addressOnly {
+				state["name"] = "new"
+			}
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				if r.Method == http.MethodGet && tc.failGet {
-					w.WriteHeader(http.StatusInternalServerError)
-					_, _ = io.WriteString(w, `{"message":"unavailable","code":500}`)
-					return
-				}
 				if r.Method == http.MethodGet {
-					// The read-back after a failed address request: distinct from
-					// every PUT response, so the test sees whether it was used.
-					_, _ = io.WriteString(w, `{"id":"p","name":"read-back","ipv6":"fd00::9"}`)
+					if tc.failGet {
+						w.WriteHeader(http.StatusInternalServerError)
+						_, _ = io.WriteString(w, `{"message":"unavailable","code":500}`)
+						return
+					}
+					out, _ := json.Marshal(map[string]any{"id": "p", "name": state["name"], "ipv6": state["ipv6"], "dns_label": "read-back"})
+					_, _ = w.Write(out)
 					return
 				}
 				var body map[string]any
@@ -72,44 +79,90 @@ func Test_applyPeer_sendsIPv6Separately(t *testing.T) {
 					_, _ = io.WriteString(w, `{"message":"refused","code":422}`)
 					return
 				}
-				ipv6 := "fd00::7"
-				if v, ok := body["ipv6"].(string); ok {
-					ipv6 = v
+				state["name"] = body["name"]
+				if v, ok := body["ipv6"]; ok {
+					state["ipv6"] = v
 				}
-				out, _ := json.Marshal(map[string]any{"id": "p", "name": body["name"], "ipv6": ipv6, "ssh_enabled": body["ssh_enabled"]})
+				out, _ := json.Marshal(map[string]any{"id": "p", "name": state["name"], "ipv6": state["ipv6"], "dns_label": "first"})
 				_, _ = w.Write(out)
 			}))
 			defer srv.Close()
 			r := &Peer{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
-			live := &api.Peer{Id: "p", Name: "old", Ipv6: ptr("fd00::7")}
+			live := &api.Peer{Id: "p", Name: state["name"].(string), Ipv6: ptr("fd00::7")}
 			plan := PeerModel{Name: types.StringValue("new"), Ipv6: types.StringValue("fd00::9")}
 			config := PeerModel{Name: types.StringValue("new"), Ipv6: types.StringValue("fd00::9")}
-			if tc.addressOnly {
-				live.Name = "new"
-			}
 			peer, observed, err := r.applyPeer(context.Background(), live, plan, config)
 			if (err != nil) != tc.wantErr || observed != tc.wantObserved {
 				t.Fatalf("expected error %v observed %v, found %v %v", tc.wantErr, tc.wantObserved, err, observed)
 			}
-			switch {
-			case tc.failGet:
-				// The first response is the record; the address is unconfirmed.
-				if peer == nil || peer.Name != "new" || !strings.Contains(err.Error(), "unconfirmed") {
-					t.Errorf("expected the first response and an unconfirmed address, found %+v, %v", peer, err)
+			if tc.failGet && !strings.Contains(err.Error(), "unconfirmed") {
+				t.Errorf("a failed read-back must say what is unconfirmed, found %v", err)
+			}
+			switch tc.wantPeer {
+			case "":
+				if tc.wantErr && peer != nil {
+					t.Errorf("nothing confirmed: expected no record, found %+v", peer)
 				}
-			case tc.wantObserved:
-				if peer == nil || peer.Name != "read-back" || peer.Ipv6 == nil || *peer.Ipv6 != "fd00::9" {
-					t.Errorf("a failed request must return the peer as read back, found %+v", peer)
+			default:
+				if peer == nil || peer.DnsLabel != tc.wantPeer {
+					t.Errorf("expected the %s response as the record, found %+v", tc.wantPeer, peer)
 				}
 			}
 			if len(puts) != tc.wantPuts {
 				t.Fatalf("expected %d requests, found %d: %v", tc.wantPuts, len(puts), puts)
 			}
-			if _, sent := puts[0]["ipv6"]; sent && !tc.addressOnly {
-				t.Errorf("the first request must not carry the address, found %v", puts[0]["ipv6"])
+			if puts[0]["ipv6"] != "fd00::9" || puts[0]["name"] != live.Name {
+				t.Errorf("the first request must carry only the address, found %v", puts[0])
 			}
-			if tc.wantPuts == 2 && (puts[1]["ipv6"] != "fd00::9" || puts[1]["name"] != "new") {
-				t.Errorf("the second request must carry the address and the applied name, found %v", puts[1])
+			if tc.wantPuts == 2 {
+				if _, sent := puts[1]["ipv6"]; sent || puts[1]["name"] != "new" {
+					t.Errorf("the second request must carry the settings without the address, found %v", puts[1])
+				}
+			}
+			if !tc.wantErr && (peer.Name != "new" || peer.Ipv6 == nil || *peer.Ipv6 != "fd00::9") {
+				t.Errorf("expected the final peer renamed and moved, found %+v", peer)
+			}
+		})
+	}
+}
+
+func Test_peerChangedSincePlan(t *testing.T) {
+	prior := PeerModel{Name: types.StringValue("a"), Ipv6: types.StringValue("fd00::1"), SshEnabled: types.BoolValue(false),
+		LoginExpirationEnabled: types.BoolValue(true), InactivityExpirationEnabled: types.BoolValue(false), ApprovalRequired: types.BoolValue(false)}
+	for name, tc := range map[string]struct {
+		plan func(*PeerModel)
+		live func(*api.Peer)
+		want []string
+	}{
+		"nothing changed":       {},
+		"planned change":        {plan: func(p *PeerModel) { p.Name = types.StringValue("b") }},
+		"done already":          {plan: func(p *PeerModel) { p.Name = types.StringValue("b") }, live: func(l *api.Peer) { l.Name = "b" }},
+		"overwritten name":      {plan: func(p *PeerModel) { p.Name = types.StringValue("b") }, live: func(l *api.Peer) { l.Name = "c" }, want: []string{"name"}},
+		"unplanned rename":      {live: func(l *api.Peer) { l.Name = "c" }, want: []string{"name"}},
+		"moved address":         {live: func(l *api.Peer) { l.Ipv6 = ptr("fd00::2") }, want: []string{"ipv6"}},
+		"removed address":       {live: func(l *api.Peer) { l.Ipv6 = nil }, want: []string{"ipv6"}},
+		"ssh switched on":       {live: func(l *api.Peer) { l.SshEnabled = true }, want: []string{"ssh_enabled"}},
+		"unknown is no promise": {plan: func(p *PeerModel) { p.Name = types.StringUnknown() }, live: func(l *api.Peer) { l.Name = "c" }},
+		"several": {live: func(l *api.Peer) { l.LoginExpirationEnabled = false; l.ApprovalRequired = true },
+			want: []string{"login_expiration_enabled", "approval_required"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			plan := prior
+			if tc.plan != nil {
+				tc.plan(&plan)
+			}
+			live := &api.Peer{Name: "a", Ipv6: ptr("fd00::1"), LoginExpirationEnabled: true}
+			if tc.live != nil {
+				tc.live(live)
+			}
+			got := peerChangedSincePlan(prior, plan, live)
+			if len(got) != len(tc.want) {
+				t.Fatalf("expected %v, found %v", tc.want, got)
+			}
+			for i, w := range tc.want {
+				if !strings.HasPrefix(got[i], "- "+w+":") {
+					t.Errorf("expected %s at %d, found %q", w, i, got[i])
+				}
 			}
 		})
 	}

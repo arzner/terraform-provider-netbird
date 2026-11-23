@@ -140,6 +140,15 @@ labelled `netbird-latest` when it fails. A NetBird change that breaks
 existing configurations is released as a new minor version (0.x) or, from
 1.0, a major version, and spelled out in the changelog.
 
+### Changes made outside Terraform
+
+Manage an object either with Terraform or by hand, not both. When an object
+changed outside Terraform after the plan was made, an apply stops before it
+writes anything and asks for a new plan, instead of overwriting the change
+(`netbird_peer` so far; the other resources follow in #74). The NetBird API
+has no conditional updates, so a change made while an apply is writing is not
+detected.
+
 ### Verifying a release
 
 Each release carries `SHA256SUMS` and its detached signature `SHA256SUMS.sig`,

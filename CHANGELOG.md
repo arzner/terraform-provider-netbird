@@ -34,8 +34,10 @@ it is based on.
   the server's current values even if they changed between plan and apply (previously the
   planned prior state was sent back).
 - `netbird_peer` updates start from the live peer and change only the attributes the
-  configuration sets, so a setting changed outside Terraform after the plan (for example SSH)
-  is not reverted; a new IPv6 address is sent in a second request after the others succeed.
+  configuration sets. When the peer changed outside Terraform after the plan, the apply stops
+  before writing anything and asks for a new plan (#74 extends this to the other resources).
+  A new IPv6 address is sent first and alone, so an address the server refuses (outside the
+  account range, peer not in an IPv6-enabled group, already in use) changes nothing else.
 
 ## [0.1.0] - 2026-11-23
 

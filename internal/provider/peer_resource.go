@@ -355,9 +355,20 @@ func (r *Peer) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	var prior PeerModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	live, err := r.client.Peers.Get(ctx, data.Id.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Error getting Peer", err.Error())
+		return
+	}
+	if changed := peerChangedSincePlan(prior, data, live); len(changed) > 0 {
+		resp.Diagnostics.AddError("Peer changed after the plan",
+			"The peer was changed outside Terraform after this plan was made, so applying it would overwrite that change:\n\n"+
+				strings.Join(changed, "\n")+"\n\nNothing was changed. Run plan again.")
 		return
 	}
 	peer, observed, err := r.applyPeer(ctx, live, data, config)
@@ -412,6 +423,34 @@ func (r *Peer) ImportState(ctx context.Context, req resource.ImportStateRequest,
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
+// peerChangedSincePlan lists the planned attributes whose live value differs
+// both from the state the plan was made from and from the plan: someone changed
+// them outside Terraform after the plan, and applying it would overwrite that
+// change (or, for an attribute the configuration leaves out, end with a value
+// the plan did not promise). The NetBird API has no conditional updates, so
+// this check before the first write is the guard against a stale plan.
+func peerChangedSincePlan(prior, plan PeerModel, live *api.Peer) []string {
+	liveIPv6 := types.StringPointerValue(live.Ipv6)
+	var changed []string
+	str := func(name string, prior, plan, live types.String) {
+		if !plan.IsUnknown() && !live.Equal(prior) && !live.Equal(plan) {
+			changed = append(changed, fmt.Sprintf("- %s: %s when planned, now %s", name, prior, live))
+		}
+	}
+	boolean := func(name string, prior, plan types.Bool, live bool) {
+		if !plan.IsUnknown() && !prior.IsNull() && prior.ValueBool() != live && plan.ValueBool() != live {
+			changed = append(changed, fmt.Sprintf("- %s: %t when planned, now %t", name, prior.ValueBool(), live))
+		}
+	}
+	str("name", prior.Name, plan.Name, types.StringValue(live.Name))
+	str("ipv6", prior.Ipv6, plan.Ipv6, liveIPv6)
+	boolean("ssh_enabled", prior.SshEnabled, plan.SshEnabled, live.SshEnabled)
+	boolean("login_expiration_enabled", prior.LoginExpirationEnabled, plan.LoginExpirationEnabled, live.LoginExpirationEnabled)
+	boolean("inactivity_expiration_enabled", prior.InactivityExpirationEnabled, plan.InactivityExpirationEnabled, live.InactivityExpirationEnabled)
+	boolean("approval_required", prior.ApprovalRequired, plan.ApprovalRequired, live.ApprovalRequired)
+	return changed
+}
+
 // peerIPv6Request returns the IPv6 address to send when the plan sets one that
 // differs from the current address, and nil otherwise: the server keeps the
 // address when the field is omitted, and moving a peer to its own address is
@@ -457,44 +496,49 @@ func peerRequest(live *api.Peer, plan, config PeerModel) (api.PeerRequest, bool)
 	return req, changed
 }
 
-// applyPeer applies the plan to a live peer. The IPv6 address goes in a second
-// request after the others succeed: the server moves the address before it
-// validates the rest of an update, so a refused combined update would still
-// move it.
+// applyPeer applies the plan to a live peer in up to two requests. A new IPv6
+// address goes first and alone (every other field as the server has it): the
+// server checks the address (account range, IPv6-enabled groups, collisions)
+// and moves it before it looks at the rest of an update, so on its own it
+// either moves or is refused before anything else has changed. The other
+// settings follow in a second request.
 //
 // A failed request may still have taken effect: the server commits a peer
 // update before it notifies the network map, and that notification can fail.
 // So after any failed request the peer is read back; observed is true when the
 // returned peer is a server response the caller can record. If the read-back
-// fails too, the last successful response is returned and the error says the
-// rest is unconfirmed.
+// fails too, the error says what is unconfirmed, and the last successful
+// response (if any) is returned as the record.
+//
+// Changes made outside Terraform between the two requests are not detected:
+// the API has no conditional updates.
 func (r *Peer) applyPeer(ctx context.Context, live *api.Peer, plan, config PeerModel) (peer *api.Peer, observed bool, err error) {
 	peer = live
 	written := false
-	if req, changed := peerRequest(peer, plan, config); changed {
-		updated, err := r.client.Peers.Update(ctx, peer.Id, req)
-		if err != nil {
-			// Stop before the address request either way.
-			if current, getErr := r.client.Peers.Get(ctx, peer.Id); getErr == nil {
-				return current, true, err
-			}
-			return nil, false, err
+	fail := func(err error, unconfirmed string) (*api.Peer, bool, error) {
+		if current, getErr := r.client.Peers.Get(ctx, peer.Id); getErr == nil {
+			return current, true, err
 		}
-		peer, written = updated, true
+		err = fmt.Errorf("%w (the peer could not be read back; %s unconfirmed)", err, unconfirmed)
+		if written {
+			return peer, true, err
+		}
+		return nil, false, err
 	}
 	if ipv6 := peerIPv6Request(configuredOnly(plan.Ipv6, config.Ipv6), peer.Ipv6); ipv6 != nil {
-		req, _ := peerRequest(peer, plan, config)
+		req, _ := peerRequest(peer, plan, PeerModel{})
 		req.Ipv6 = ipv6
 		updated, err := r.client.Peers.Update(ctx, peer.Id, req)
 		if err != nil {
-			if current, getErr := r.client.Peers.Get(ctx, peer.Id); getErr == nil {
-				return current, true, err
-			}
-			if !written {
-				return nil, false, err
-			}
-			// Unreadable: what the first request returned is the best record.
-			return peer, true, fmt.Errorf("%w (the peer could not be read back; its IPv6 address is unconfirmed)", err)
+			// Stop before the other settings either way.
+			return fail(err, "whether the IPv6 address moved is")
+		}
+		peer, written = updated, true
+	}
+	if req, changed := peerRequest(peer, plan, config); changed {
+		updated, err := r.client.Peers.Update(ctx, peer.Id, req)
+		if err != nil {
+			return fail(err, "whether the other settings took effect is")
 		}
 		peer = updated
 	}

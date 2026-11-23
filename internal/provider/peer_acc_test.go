@@ -12,7 +12,9 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/netbirdio/netbird/shared/management/http/api"
 )
 
 func Test_Peer_Create(t *testing.T) {
@@ -186,18 +188,30 @@ func Test_Peer_IPv6(t *testing.T) {
 	}
 	original := *peer.Ipv6
 	moved := testUnusedPeerIPv6(t, original)
-	config := func(ipv6 string) string {
+	outside := testOutsideAccountIPv6(t)
+	named := func(name, ipv6 string) string {
 		if ipv6 == "" {
 			return fmt.Sprintf(`resource "netbird_peer" %q {
   id   = %q
   name = %q
-}`, rName, peerID, peer.Name)
+}`, rName, peerID, name)
 		}
 		return fmt.Sprintf(`resource "netbird_peer" %q {
   id   = %q
   name = %q
   ipv6 = %q
-}`, rName, peerID, peer.Name, ipv6)
+}`, rName, peerID, name, ipv6)
+	}
+	config := func(ipv6 string) string { return named(peer.Name, ipv6) }
+	nameOnServer := func(want string) error {
+		p, err := testClient().Peers.Get(context.Background(), peerID)
+		if err != nil {
+			return err
+		}
+		if p.Name != want {
+			return fmt.Errorf("name on the server: expected %q, found %q", want, p.Name)
+		}
+		return nil
 	}
 	onServer := func(want string) resource.TestCheckFunc {
 		return func(s *terraform.State) error {
@@ -226,9 +240,65 @@ func Test_Peer_IPv6(t *testing.T) {
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true,
 				ImportStateVerifyIgnore: []string{"connected", "last_seen"}},
 			{Config: config(strings.ToUpper(moved)), ExpectError: regexp.MustCompile(`not in canonical form`)},
-			{Config: config(original), Check: resource.ComposeAggregateTestCheckFunc(
+			// A rename together with an address the server refuses: the address
+			// goes first and alone, so the refusal leaves the name as it was.
+			{Config: named(peer.Name+"-x", outside), ExpectError: regexp.MustCompile(`not within the account IPv6 range`)},
+			{Config: config(moved), Check: resource.ComposeAggregateTestCheckFunc(
+				onServer(moved), func(*terraform.State) error { return nameOnServer(peer.Name) })},
+			// Renamed outside Terraform between plan and apply: the apply stops
+			// before writing anything, and the outside change survives.
+			{Config: named(peer.Name+"-s", moved),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					testExpectUpdateInPlace(rNameFull), testPeerRenamedOutside(peerID, peer.Name+"-o")}},
+				ExpectError: regexp.MustCompile(`Peer changed after the plan`)},
+			{PreConfig: func() {
+				if err := nameOnServer(peer.Name + "-o"); err != nil {
+					t.Fatal(err)
+				}
+			}, Config: config(original), Check: resource.ComposeAggregateTestCheckFunc(
 				resource.TestCheckResourceAttr(rNameFull, "ipv6", original), onServer(original))},
 		},
+	})
+}
+
+// testOutsideAccountIPv6 returns a canonical IPv6 address just outside the
+// account's IPv6 range.
+func testOutsideAccountIPv6(t *testing.T) string {
+	t.Helper()
+	accounts, err := testClient().Accounts.List(context.Background())
+	if err != nil || len(accounts) != 1 || accounts[0].Settings.NetworkRangeV6 == nil {
+		t.Fatalf("read the account IPv6 range: %v (%d accounts)", err, len(accounts))
+	}
+	prefix, err := netip.ParsePrefix(*accounts[0].Settings.NetworkRangeV6)
+	if err != nil || prefix.Bits() == 0 {
+		t.Fatalf("parse the account IPv6 range %q: %v", *accounts[0].Settings.NetworkRangeV6, err)
+	}
+	b := prefix.Masked().Addr().As16()
+	bit := prefix.Bits() - 1 // the last bit of the prefix: flipped, the address is outside
+	b[bit/8] ^= 0x80 >> (bit % 8)
+	b[15] = 1
+	return netip.AddrFrom16(b).String()
+}
+
+// testPeerRenamedOutside is a plan check that renames the peer through the API
+// after the plan and before the apply, the way someone working outside
+// Terraform would.
+func testPeerRenamedOutside(peerID, name string) plancheck.PlanCheck {
+	return peerRenamedOutside{peerID: peerID, name: name}
+}
+
+type peerRenamedOutside struct{ peerID, name string }
+
+func (c peerRenamedOutside) CheckPlan(ctx context.Context, _ plancheck.CheckPlanRequest, resp *plancheck.CheckPlanResponse) {
+	p, err := testClient().Peers.Get(ctx, c.peerID)
+	if err != nil {
+		resp.Error = err
+		return
+	}
+	approval := p.ApprovalRequired
+	_, resp.Error = testClient().Peers.Update(ctx, c.peerID, api.PeerRequest{
+		Name: c.name, SshEnabled: p.SshEnabled, ApprovalRequired: &approval,
+		LoginExpirationEnabled: p.LoginExpirationEnabled, InactivityExpirationEnabled: p.InactivityExpirationEnabled,
 	})
 }
 
