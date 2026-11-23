@@ -6,7 +6,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
@@ -26,11 +25,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
+	nbdomain "github.com/netbirdio/netbird/shared/management/domain"
 	"github.com/netbirdio/netbird/shared/management/http/api"
-)
-
-const (
-	fqdnRegex = `^(?:[_a-z0-9](?:[_a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)?$`
 )
 
 // Ensure provider defined types fully satisfy framework interfaces.
@@ -97,7 +93,7 @@ func (r *NameserverGroup) Schema(ctx context.Context, req resource.SchemaRequest
 				Optional:            true,
 				Computed:            true,
 				Default:             listdefault.StaticValue(types.ListValueMust(types.StringType, []attr.Value{})),
-				Validators:          []validator.List{listvalidator.ValueStringsAre(stringvalidator.RegexMatches(regexp.MustCompile(fqdnRegex), "Invalid domain name"))},
+				Validators:          []validator.List{listvalidator.ValueStringsAre(nameserverDomain{})},
 			},
 			"nameservers": schema.ListNestedAttribute{
 				MarkdownDescription: "Nameserver list",
@@ -377,4 +373,36 @@ func (r *NameserverGroup) Delete(ctx context.Context, req resource.DeleteRequest
 
 func (r *NameserverGroup) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// nameserverDomain checks a match domain the way the management server does
+// (v0.83, v0.82: validateDomain in management/server/nameserver.go): no
+// wildcard, an optional trailing dot, and otherwise the server's own domain
+// validation, so single-label domains such as "lan" are accepted.
+type nameserverDomain struct{}
+
+func (nameserverDomain) Description(context.Context) string {
+	return "must be a domain name without a wildcard"
+}
+
+func (v nameserverDomain) MarkdownDescription(ctx context.Context) string { return v.Description(ctx) }
+
+func (nameserverDomain) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	if problem := nameserverDomainProblem(req.ConfigValue.ValueString()); problem != "" {
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid domain name", problem)
+	}
+}
+
+// nameserverDomainProblem returns why the server refuses a match domain, or "".
+func nameserverDomainProblem(d string) string {
+	if strings.HasPrefix(d, "*.") {
+		return "Wildcards are not allowed in nameserver match domains."
+	}
+	if _, err := nbdomain.ValidateDomains([]string{strings.TrimSuffix(d, ".")}); err != nil {
+		return fmt.Sprintf("%q is not a valid domain: %s.", d, err)
+	}
+	return ""
 }

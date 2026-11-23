@@ -5,6 +5,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"slices"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -142,4 +144,53 @@ func testNameserverGroupResource(rName, ip, port, groups string) string {
 	]
 	groups = %s
 }`, rName, rName, ip, port, groups)
+}
+
+// Test_NameserverGroup_SingleLabelDomain: match domains without a dot, such
+// as "lan", are accepted by the server and now by the plan; a wildcard is
+// refused at plan time, as the server would.
+func Test_NameserverGroup_SingleLabelDomain(t *testing.T) {
+	testE2E(t)
+	rName := "g" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_nameserver_group." + rName
+	var createdID string
+	config := func(domains string) string {
+		return fmt.Sprintf(`resource "netbird_nameserver_group" "%s" {
+  name                   = "%s"
+  nameservers            = [{ ip = "1.1.1.1", ns_type = "udp", port = 53 }]
+  groups                 = [%q]
+  primary                = false
+  domains                = %s
+  search_domains_enabled = true
+}`, rName, rName, e2eGroupAllID(), domains)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().DNS.GetNameserverGroup, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config:      config(`["*.lan"]`),
+				ExpectError: regexp.MustCompile(`(?s)Invalid domain name.*Wildcards are not allowed`),
+			},
+			{
+				Config: config(`["lan", "consul."]`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "domains.#", "2"),
+					func(*terraform.State) error {
+						ns, err := testClient().DNS.GetNameserverGroup(context.Background(), createdID)
+						if err != nil {
+							return err
+						}
+						if !slices.Contains(ns.Domains, "lan") || !slices.Contains(ns.Domains, "consul.") {
+							return fmt.Errorf("domains on the server: expected lan and consul., found %v", ns.Domains)
+						}
+						return nil
+					},
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+		},
+	})
 }

@@ -66,6 +66,11 @@ it is based on.
 
 ### Fixed
 
+- `netbird_nameserver_group`: `domains` accepts single-label match domains such as `lan` or
+  `consul`, and long names such as EKS endpoints; the plan checks them the way the server does
+  (no wildcards, an optional trailing dot) (#53; upstream
+  [#145](https://github.com/netbirdio/terraform-provider-netbird/issues/145),
+  [#146](https://github.com/netbirdio/terraform-provider-netbird/issues/146)).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the
