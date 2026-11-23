@@ -303,7 +303,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseNonNullStateForUnknown()},
 			},
 			"access_groups": schema.ListAttribute{
-				MarkdownDescription: "Group IDs whose peers may reach the private service over the tunnel. Required when `private` is true; ignored otherwise. A proxy reuses a peer's granted access for up to five minutes by default (`NB_PROXY_TUNNEL_CACHE_TTL`), so removing a group can take that long to reach a peer that another policy still lets reach the proxy. IDs are not checked for existence: when a service turns private with the groups left out, it keeps the IDs it has, and an ID of a deleted group grants nothing.",
+				MarkdownDescription: "Group IDs whose peers may reach the private service over the tunnel. Required when `private` is true; ignored otherwise. A proxy reuses a peer's granted access for up to five minutes by default (`NB_PROXY_TUNNEL_CACHE_TTL`), so removing a group, or turning a public service private, can take that long to reach a peer the proxy already admitted and that another policy still lets reach the proxy. IDs are not checked for existence: when a service turns private with the groups left out, it keeps the IDs it has, and an ID of a deleted group grants nothing.",
 				ElementType:         types.StringType,
 				Optional:            true,
 				Computed:            true,
@@ -1283,6 +1283,15 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	var plan, config ReverseProxyServiceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if req.State.Raw.IsNull() && config.Private.IsNull() {
+		// The server creates a service public unless told otherwise; show
+		// that in the plan rather than "known after apply".
+		plan.Private = types.BoolValue(false)
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("private"), plan.Private)...)
+	}
 	if resp.Diagnostics.HasError() || plan.Private.IsUnknown() || !plan.Private.ValueBool() {
 		return
 	}

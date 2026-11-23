@@ -229,6 +229,7 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 		create              bool
 		state, config, plan vals
 		wantError           bool
+		wantPublic          bool
 	}{
 		"new without groups":     {create: true, config: vals{"private": on}, plan: vals{"private": on, "access_groups": tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, tftypes.UnknownValue)}, wantError: true},
 		"new with groups":        {create: true, config: vals{"private": on, "access_groups": groups}, plan: vals{"private": on, "access_groups": groups}},
@@ -241,7 +242,8 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 			state:  vals{"private": tftypes.NewValue(tftypes.Bool, false), "access_groups": noGroups},
 			config: vals{"private": on}, plan: vals{"private": on, "mode": http, "access_groups": noGroups}, wantError: true,
 		},
-		"new without access settings": {create: true, config: vals{}, plan: vals{"mode": http}},
+		"new without access settings": {create: true, config: vals{}, plan: vals{"mode": http, "private": tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue)}, wantPublic: true},
+		"new with groups only":        {create: true, config: vals{"access_groups": groups}, plan: vals{"mode": http, "private": tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue), "access_groups": groups}, wantPublic: true},
 		"made private, mode tcp from state": {
 			state:  vals{"private": tftypes.NewValue(tftypes.Bool, false), "mode": tcp, "access_groups": groups},
 			config: vals{"private": on, "access_groups": groups},
@@ -292,6 +294,15 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 			r.ModifyPlan(ctx, req, &resp)
 			if resp.Diagnostics.HasError() != tc.wantError {
 				t.Fatalf("expected error %v, found %v", tc.wantError, resp.Diagnostics)
+			}
+			if tc.wantPublic {
+				var planned ReverseProxyServiceModel
+				if d := resp.Plan.Get(ctx, &planned); d.HasError() {
+					t.Fatal(d)
+				}
+				if !planned.Private.Equal(types.BoolValue(false)) {
+					t.Errorf("a new service with private left out must plan private = false, found %v", planned.Private)
+				}
 			}
 		})
 	}

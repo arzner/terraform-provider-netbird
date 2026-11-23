@@ -154,7 +154,7 @@ resource "netbird_reverse_proxy_service" "tls_backend" {
 
 ### Optional
 
-- `access_groups` (List of String) Group IDs whose peers may reach the private service over the tunnel. Required when `private` is true; ignored otherwise. A proxy reuses a peer's granted access for up to five minutes by default (`NB_PROXY_TUNNEL_CACHE_TTL`), so removing a group can take that long to reach a peer that another policy still lets reach the proxy. IDs are not checked for existence: when a service turns private with the groups left out, it keeps the IDs it has, and an ID of a deleted group grants nothing.
+- `access_groups` (List of String) Group IDs whose peers may reach the private service over the tunnel. Required when `private` is true; ignored otherwise. A proxy reuses a peer's granted access for up to five minutes by default (`NB_PROXY_TUNNEL_CACHE_TTL`), so removing a group, or turning a public service private, can take that long to reach a peer the proxy already admitted and that another policy still lets reach the proxy. IDs are not checked for existence: when a service turns private with the groups left out, it keeps the IDs it has, and an ID of a deleted group grants nothing.
 - `access_restrictions` (Attributes) Connection-level access restrictions based on IP or geography (see [below for nested schema](#nestedatt--access_restrictions))
 - `enabled` (Boolean) Whether the service is enabled
 - `listen_port` (Number) Port the proxy listens on (L4/TLS only). Set to 0 for auto-assignment.
