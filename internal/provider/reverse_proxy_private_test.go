@@ -1132,3 +1132,24 @@ func Test_targetOptionsDirectUpstreamDefault(t *testing.T) {
 		t.Errorf("no options read as none, found %v", obj)
 	}
 }
+
+func Test_reconcileOptions_legacyDirectUpstream(t *testing.T) {
+	optsType := ReverseProxyTargetOptionsModel{}.TFType()
+	options := func(direct types.Bool) types.Object {
+		attrs := map[string]attr.Value{}
+		for n, at := range optsType.AttrTypes {
+			attrs[n] = nullOf(at.ValueType(context.Background()))
+		}
+		attrs["custom_headers"] = types.MapNull(types.StringType)
+		attrs["request_timeout"] = types.StringValue("5s")
+		attrs["direct_upstream"] = direct
+		return types.ObjectValueMust(optsType.AttrTypes, attrs)
+	}
+	got, d := reconcileOptions(options(types.BoolNull()), options(types.BoolValue(false)))
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	if v := got.Attributes()["direct_upstream"]; !v.Equal(types.BoolValue(false)) {
+		t.Errorf("state without the attribute must refresh to the default false, found %v", v)
+	}
+}

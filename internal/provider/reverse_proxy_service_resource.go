@@ -1088,6 +1088,11 @@ func reconcileOptions(planned, live types.Object) (types.Object, diag.Diagnostic
 		}
 		if !sameOption(name, plannedValue, liveValue) {
 			attrs[name] = liveValue
+		} else if name == "direct_upstream" && plannedValue.IsNull() && !liveValue.IsNull() {
+			// State written before the attribute existed holds null; the
+			// attribute now defaults to false, so keep the server's false
+			// rather than plan null -> false after a refresh.
+			attrs[name] = liveValue
 		}
 	}
 	return types.ObjectValue(planned.AttributeTypes(context.Background()), attrs)

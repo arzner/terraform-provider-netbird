@@ -6,12 +6,15 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
 
@@ -1550,10 +1553,20 @@ func Test_ReverseProxyService_SubnetHost(t *testing.T) {
 	rName := "s" + acctest.RandStringFromCharSet(8, acctest.CharSetAlpha)
 	rNameFull := "netbird_reverse_proxy_service." + rName
 	var createdID string
-	config := func(host string) string {
+	// extra holds more target lines (path, port, access_action); the port
+	// defaults to 8080.
+	config := func(host string, extra ...string) string {
 		hostLine := ""
 		if host != "" {
 			hostLine = fmt.Sprintf("\n    host        = %q", host)
+		}
+		port := "8080"
+		for _, line := range extra {
+			if strings.HasPrefix(line, "port") {
+				port = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(line, "port")), "="))
+				continue
+			}
+			hostLine += "\n    " + line
 		}
 		return fmt.Sprintf(`
 resource "netbird_reverse_proxy_service" %q {
@@ -1565,11 +1578,11 @@ resource "netbird_reverse_proxy_service" %q {
   targets = [{
     target_id   = %q
     target_type = "subnet"%s
-    port        = 8080
+    port        = %s
     protocol    = "http"
     options     = { request_timeout = "5s", direct_upstream = false }
   }]
-}`, rName, rName, rName, cluster.Address, e2eResourceSubnetID(), hostLine)
+}`, rName, rName, rName, cluster.Address, e2eResourceSubnetID(), hostLine, port)
 	}
 	hostOnServer := func(want string) resource.TestCheckFunc {
 		return func(s *terraform.State) error {
@@ -1579,6 +1592,23 @@ resource "netbird_reverse_proxy_service" %q {
 			}
 			if len(svc.Targets) != 1 || svc.Targets[0].Host == nil || *svc.Targets[0].Host != want {
 				return fmt.Errorf("expected one target with host %q, found %+v", want, svc.Targets)
+			}
+			return nil
+		}
+	}
+	// pathOnServer checks the target's path as the server has it ("" none).
+	pathOnServer := func(want string) resource.TestCheckFunc {
+		return func(s *terraform.State) error {
+			svc, err := testClient().ReverseProxyServices.Get(context.Background(), s.RootModule().Resources[rNameFull].Primary.ID)
+			if err != nil {
+				return fmt.Errorf("get service: %w", err)
+			}
+			got := ""
+			if len(svc.Targets) == 1 && svc.Targets[0].Path != nil {
+				got = *svc.Targets[0].Path
+			}
+			if len(svc.Targets) != 1 || got != want {
+				return fmt.Errorf("expected one target with path %q, found %+v", want, svc.Targets)
 			}
 			return nil
 		}
@@ -1617,6 +1647,20 @@ resource "netbird_reverse_proxy_service" %q {
 				Config:           config("192.168.10.5"),
 				ConfigPlanChecks: updatesInPlace(rNameFull),
 				Check:            hostOnServer("192.168.10.5"),
+			},
+			{
+				Config: config("192.168.10.5", `path = "/admin"`),
+				Check:  pathOnServer("/admin"),
+			},
+			{
+				// Left out, the path is not sent: the plan shows null, the
+				// server keeps none and the next plan is empty.
+				Config: config("192.168.10.5", "port = 8081", `access_action = "inherit"`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					testExpectUpdateInPlace(rNameFull),
+					plancheck.ExpectKnownValue(rNameFull, tfjsonpath.New("targets").AtSliceIndex(0).AtMapKey("path"), knownvalue.Null()),
+				}},
+				Check: pathOnServer(""),
 			},
 			{
 				// The server keeps a subnet host as written, so an import
