@@ -34,23 +34,26 @@ func Test_peerRequest_keepsLiveValuesOfUnconfiguredAttributes(t *testing.T) {
 
 func Test_applyPeer_sendsIPv6Separately(t *testing.T) {
 	for name, tc := range map[string]struct {
-		failFirst   bool
-		failSecond  bool
-		wantPuts    int
-		wantErr     bool
-		wantPartial bool
+		failFirst    bool
+		failSecond   bool
+		addressOnly  bool
+		wantPuts     int
+		wantErr      bool
+		wantObserved bool
 	}{
 		"both succeed":         {wantPuts: 2},
 		"first update refused": {failFirst: true, wantPuts: 1, wantErr: true},
-		"address refused":      {failSecond: true, wantPuts: 2, wantErr: true, wantPartial: true},
+		"address refused":      {failSecond: true, wantPuts: 2, wantErr: true, wantObserved: true},
+		"address-only failure": {addressOnly: true, failFirst: true, wantPuts: 1, wantErr: true, wantObserved: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var puts []map[string]any
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				if r.Method == http.MethodGet {
-					// The read-back after a refused address: the rename stuck.
-					_, _ = io.WriteString(w, `{"id":"p","name":"new","ipv6":"fd00::7"}`)
+					// The read-back after a failed address request: distinct from
+					// every PUT response, so the test sees whether it was used.
+					_, _ = io.WriteString(w, `{"id":"p","name":"read-back","ipv6":"fd00::9"}`)
 					return
 				}
 				var body map[string]any
@@ -73,17 +76,20 @@ func Test_applyPeer_sendsIPv6Separately(t *testing.T) {
 			live := &api.Peer{Id: "p", Name: "old", Ipv6: ptr("fd00::7")}
 			plan := PeerModel{Name: types.StringValue("new"), Ipv6: types.StringValue("fd00::9")}
 			config := PeerModel{Name: types.StringValue("new"), Ipv6: types.StringValue("fd00::9")}
-			peer, partial, err := r.applyPeer(context.Background(), live, plan, config)
-			if (err != nil) != tc.wantErr || partial != tc.wantPartial {
-				t.Fatalf("expected error %v partial %v, found %v %v", tc.wantErr, tc.wantPartial, err, partial)
+			if tc.addressOnly {
+				live.Name = "new"
 			}
-			if tc.wantPartial && (peer == nil || peer.Name != "new" || peer.Ipv6 == nil || *peer.Ipv6 != "fd00::7") {
-				t.Errorf("a partial update must return the peer as read back, found %+v", peer)
+			peer, observed, err := r.applyPeer(context.Background(), live, plan, config)
+			if (err != nil) != tc.wantErr || observed != tc.wantObserved {
+				t.Fatalf("expected error %v observed %v, found %v %v", tc.wantErr, tc.wantObserved, err, observed)
+			}
+			if tc.wantObserved && (peer == nil || peer.Name != "read-back" || peer.Ipv6 == nil || *peer.Ipv6 != "fd00::9") {
+				t.Errorf("a failed address request must return the peer as read back, found %+v", peer)
 			}
 			if len(puts) != tc.wantPuts {
 				t.Fatalf("expected %d requests, found %d: %v", tc.wantPuts, len(puts), puts)
 			}
-			if _, sent := puts[0]["ipv6"]; sent {
+			if _, sent := puts[0]["ipv6"]; sent && !tc.addressOnly {
 				t.Errorf("the first request must not carry the address, found %v", puts[0]["ipv6"])
 			}
 			if tc.wantPuts == 2 && (puts[1]["ipv6"] != "fd00::9" || puts[1]["name"] != "new") {

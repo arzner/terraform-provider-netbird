@@ -281,13 +281,13 @@ func (r *Peer) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		return
 	}
 
-	peer, partial, err := r.applyPeer(ctx, peer, data, config)
+	peer, observed, err := r.applyPeer(ctx, peer, data, config)
 	if err != nil {
 		// Not saved: a resource that failed to create is tainted, and replacing
 		// it would deregister the device. The next apply adopts it again.
 		detail := err.Error()
-		if partial {
-			detail = "The peer's other settings were updated, then its IPv6 address was refused: " + detail
+		if observed {
+			detail += "\n\nThe update may have partly taken effect on the peer; the next apply compares it again."
 		}
 		resp.Diagnostics.AddError("Error updating Peer", detail)
 		return
@@ -360,16 +360,16 @@ func (r *Peer) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		resp.Diagnostics.AddError("Error getting Peer", err.Error())
 		return
 	}
-	peer, partial, err := r.applyPeer(ctx, live, data, config)
+	peer, observed, err := r.applyPeer(ctx, live, data, config)
 	if err != nil {
-		if partial {
+		if observed {
 			// Record what took effect, so the next plan starts from it.
 			mapped := peerAPIToTerraform(ctx, peer, &data)
 			resp.Diagnostics.Append(mapped...)
 			if !mapped.HasError() {
 				resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 			}
-			resp.Diagnostics.AddError("Error updating Peer", "The peer's other settings were updated, then its IPv6 address was refused: "+err.Error())
+			resp.Diagnostics.AddError("Error updating Peer", err.Error()+"\n\nThe peer as the server has it now is saved to state.")
 			return
 		}
 		resp.Diagnostics.AddError("Error updating Peer", err.Error())
@@ -462,30 +462,30 @@ func peerRequest(live *api.Peer, plan, config PeerModel) (api.PeerRequest, bool)
 // validates the rest of an update, so a refused combined update would still
 // move it.
 //
-// When the address request fails after the first one succeeded, it returns the
-// error together with the peer as it is now (read back, or as the first request
-// returned it), and partial is true: the other changes took effect.
-func (r *Peer) applyPeer(ctx context.Context, live *api.Peer, plan, config PeerModel) (peer *api.Peer, partial bool, err error) {
+// When the address request fails, the server may still have moved the address
+// (it commits before it notifies the network map) and the first request may
+// have changed other settings, so the peer is read back. observed is true when
+// the returned peer is what the server has now; the caller records it.
+func (r *Peer) applyPeer(ctx context.Context, live *api.Peer, plan, config PeerModel) (peer *api.Peer, observed bool, err error) {
 	peer = live
+	written := false
 	if req, changed := peerRequest(peer, plan, config); changed {
 		updated, err := r.client.Peers.Update(ctx, peer.Id, req)
 		if err != nil {
 			return nil, false, err
 		}
-		peer, partial = updated, true
+		peer, written = updated, true
 	}
 	if ipv6 := peerIPv6Request(configuredOnly(plan.Ipv6, config.Ipv6), peer.Ipv6); ipv6 != nil {
 		req, _ := peerRequest(peer, plan, config)
 		req.Ipv6 = ipv6
 		updated, err := r.client.Peers.Update(ctx, peer.Id, req)
 		if err != nil {
-			if !partial {
-				return nil, false, err
-			}
 			if current, getErr := r.client.Peers.Get(ctx, peer.Id); getErr == nil {
-				peer = current
+				return current, true, err
 			}
-			return peer, true, err
+			// Unreadable: what the first request returned is the best record.
+			return peer, written, err
 		}
 		peer = updated
 	}
