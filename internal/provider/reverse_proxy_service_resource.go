@@ -357,7 +357,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 							Default:             booldefault.StaticBool(true),
 						},
 						"access_action": schema.StringAttribute{
-							MarkdownDescription: "Access action once this target's path prefix is selected (HTTP services only): `inherit` applies the service's authentication, `bypass` skips it (not allowed for private services), `block` denies access. `bypass` and `block` need a path other than `/`. Left out, the server keeps the target's current action (`inherit` for a new target).",
+							MarkdownDescription: "Access action once this target's path prefix is selected (HTTP services only): `inherit` applies the service's authentication, `bypass` skips it (not allowed for private services), `block` denies access. Left out, the server keeps the current action of the target at this path (`inherit` for a new one).",
 							Optional:            true,
 							Computed:            true,
 							Validators:          []validator.String{stringvalidator.OneOf("inherit", "bypass", "block")},
@@ -394,7 +394,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 									Optional:            true,
 								},
 								"direct_upstream": schema.BoolAttribute{
-									MarkdownDescription: "Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services, localhost sidecars). Defaults to false.",
+									MarkdownDescription: "Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services, localhost sidecars). Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Defaults to false.",
 									Optional:            true,
 								},
 							},
@@ -910,13 +910,15 @@ func preserveTargetPlanValues(ctx context.Context, planTargets, apiTargets types
 		return apiTargets, ret
 	}
 
-	planByID := make(map[string]ReverseProxyServiceTargetModel, len(planModels))
+	// One backend can serve several paths, so a target is matched by ID and,
+	// when the ID is not unique, by path too.
+	planByID := make(map[string][]ReverseProxyServiceTargetModel, len(planModels))
 	for _, p := range planModels {
-		planByID[p.TargetId.ValueString()] = p
+		planByID[p.TargetId.ValueString()] = append(planByID[p.TargetId.ValueString()], p)
 	}
 
 	for i, apiModel := range apiModels {
-		planModel, ok := planByID[apiModel.TargetId.ValueString()]
+		planModel, ok := matchPlanTarget(planByID[apiModel.TargetId.ValueString()], apiModel)
 		if !ok {
 			continue
 		}
@@ -927,13 +929,60 @@ func preserveTargetPlanValues(ctx context.Context, planTargets, apiTargets types
 			apiModels[i].Path = planModel.Path
 		}
 		if !planModel.Options.IsNull() && !planModel.Options.IsUnknown() {
-			apiModels[i].Options = planModel.Options
+			options, d := withLiveDirectUpstream(planModel.Options, apiModel.Options)
+			ret.Append(d...)
+			apiModels[i].Options = options
 		}
 	}
 
 	result, d := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), apiModels)
 	ret.Append(d...)
 	return result, ret
+}
+
+// matchPlanTarget picks the planned target an API target corresponds to: the
+// only one with its ID, or the one with its ID and path (a planned path left
+// out is the server's default "/").
+func matchPlanTarget(candidates []ReverseProxyServiceTargetModel, api ReverseProxyServiceTargetModel) (ReverseProxyServiceTargetModel, bool) {
+	if len(candidates) == 1 {
+		return candidates[0], true
+	}
+	path := func(v types.String) string {
+		if v.IsNull() || v.IsUnknown() || v.ValueString() == "" {
+			return "/"
+		}
+		return v.ValueString()
+	}
+	for _, c := range candidates {
+		if path(c.Path) == path(api.Path) {
+			return c, true
+		}
+	}
+	return ReverseProxyServiceTargetModel{}, false
+}
+
+// withLiveDirectUpstream keeps the planned options object (the server drops
+// defaults such as false values) but takes direct_upstream from the server, so
+// a change made outside Terraform shows in the next plan. A planned false or
+// null stays as written while the server has it off.
+func withLiveDirectUpstream(planned, live types.Object) (types.Object, diag.Diagnostics) {
+	liveOn := false
+	if !live.IsNull() && !live.IsUnknown() {
+		if v, ok := live.Attributes()["direct_upstream"].(types.Bool); ok {
+			liveOn = v.ValueBool()
+		}
+	}
+	attrs := planned.Attributes()
+	current, _ := attrs["direct_upstream"].(types.Bool)
+	switch {
+	case liveOn:
+		attrs["direct_upstream"] = types.BoolValue(true)
+	case current.IsNull() || current.IsUnknown():
+		attrs["direct_upstream"] = types.BoolNull()
+	default:
+		attrs["direct_upstream"] = types.BoolValue(false)
+	}
+	return types.ObjectValue(planned.AttributeTypes(context.Background()), attrs)
 }
 
 func reverseProxyServiceTerraformToAPI(ctx context.Context, data *ReverseProxyServiceModel) (api.ServiceRequest, diag.Diagnostics) {

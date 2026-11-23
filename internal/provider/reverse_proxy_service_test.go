@@ -1462,3 +1462,69 @@ func dataTarget(m ReverseProxyServiceTargetModel, action types.String) ReversePr
 	m.AccessAction = action
 	return m
 }
+
+func Test_preserveTargetPlanValues_pathAndDirectUpstream(t *testing.T) {
+	ctx := context.Background()
+	optsType := ReverseProxyTargetOptionsModel{}.TFType()
+	options := func(direct types.Bool) types.Object {
+		attrs := map[string]attr.Value{}
+		for name, typ := range optsType.AttrTypes {
+			switch typ {
+			case types.BoolType:
+				attrs[name] = types.BoolNull()
+			case types.StringType:
+				attrs[name] = types.StringNull()
+			default:
+				attrs[name] = types.MapNull(types.StringType)
+			}
+		}
+		attrs["direct_upstream"] = direct
+		return types.ObjectValueMust(optsType.AttrTypes, attrs)
+	}
+	target := func(path string, action string, opts types.Object) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("peer"), TargetType: types.StringValue("peer"), Host: types.StringNull(),
+			Port: types.Int64Value(80), Protocol: types.StringValue("http"), Path: types.StringValue(path),
+			Enabled: types.BoolValue(true), AccessAction: types.StringValue(action), Options: opts,
+		}
+	}
+	list := func(targets ...ReverseProxyServiceTargetModel) types.List {
+		l, d := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), targets)
+		if d.HasError() {
+			t.Fatal(d)
+		}
+		return l
+	}
+	nullOpts := types.ObjectNull(optsType.AttrTypes)
+	for name, tc := range map[string]struct {
+		plannedDirect, liveDirect types.Object
+		want                      types.Bool
+	}{
+		"false as written while off":  {options(types.BoolValue(false)), nullOpts, types.BoolValue(false)},
+		"switched on outside":         {options(types.BoolValue(false)), options(types.BoolValue(true)), types.BoolValue(true)},
+		"switched off outside":        {options(types.BoolValue(true)), nullOpts, types.BoolValue(false)},
+		"left out, switched on":       {options(types.BoolNull()), options(types.BoolValue(true)), types.BoolValue(true)},
+		"left out, off stays omitted": {options(types.BoolNull()), nullOpts, types.BoolNull()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// One backend serving two paths with different actions.
+			planned := list(target("/public", "inherit", nullOpts), target("/admin", "block", tc.plannedDirect))
+			live := list(target("/admin", "block", tc.liveDirect), target("/public", "inherit", nullOpts))
+			got, d := preserveTargetPlanValues(ctx, planned, live)
+			if d.HasError() {
+				t.Fatal(d)
+			}
+			var out []ReverseProxyServiceTargetModel
+			got.ElementsAs(ctx, &out, false)
+			if out[0].Path.ValueString() != "/admin" || out[0].AccessAction.ValueString() != "block" || out[1].Path.ValueString() != "/public" {
+				t.Fatalf("targets matched to the wrong path: %+v", out)
+			}
+			if !out[1].Options.IsNull() {
+				t.Errorf("/public must keep no options, found %v", out[1].Options)
+			}
+			if v := out[0].Options.Attributes()["direct_upstream"]; !v.Equal(tc.want) {
+				t.Errorf("direct_upstream: expected %v, found %v", tc.want, v)
+			}
+		})
+	}
+}

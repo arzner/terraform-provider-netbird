@@ -1042,17 +1042,17 @@ func Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream(t *testing.T) {
 	rNameFull := "netbird_reverse_proxy_service." + rName
 	var createdID string
 	peerID1 := testPeerID(t, "peer1")
-	// peer1 and peer2 are the shared read-only fixtures; peer3 to peer6 are
-	// consumed by the peer lifecycle tests.
-	peerID2 := testPeerID(t, "peer2")
 	groupID := e2eGroupAllID()
 	crowdsec := "off"
 	if cluster.SupportsCrowdsec != nil && *cluster.SupportsCrowdsec {
 		crowdsec = "observe"
 	}
-	// adminAction is the second target's access_action line ("" leaves it out);
-	// direct toggles direct_upstream on the first target of a private service.
-	config := func(adminAction string, direct bool) string {
+	// Both targets are one backend (the shared read-only peer1) on two paths,
+	// which is how access actions are meant to be used. adminAction is the
+	// /admin target's access_action line ("" leaves it out), adminPort its
+	// port; direct toggles direct_upstream on the first target of a private
+	// service.
+	config := func(adminAction string, adminPort int, direct bool) string {
 		options, private := "", "false"
 		if direct {
 			options = `
@@ -1080,12 +1080,12 @@ resource "netbird_reverse_proxy_service" %q {
   }, {
     target_id   = %q
     target_type = "peer"
-    port        = 8081
+    port        = %d
     protocol    = "http"
     path        = "/admin"
     %s
   }]
-}`, rName, rName, domain, private, groupID, crowdsec, peerID1, options, peerID2, adminAction)
+}`, rName, rName, domain, private, groupID, crowdsec, peerID1, options, peerID1, adminPort, adminAction)
 	}
 	onServer := func(action string, direct bool) resource.TestCheckFunc {
 		return func(s *terraform.State) error {
@@ -1094,15 +1094,15 @@ resource "netbird_reverse_proxy_service" %q {
 				return fmt.Errorf("get service: %w", err)
 			}
 			for _, target := range svc.Targets {
-				switch target.TargetId {
-				case peerID1:
+				switch normalizedPath(target.Path) {
+				case "/":
 					if target.AccessAction == nil || *target.AccessAction != api.ServiceTargetAccessActionInherit {
 						return fmt.Errorf("first target: expected inherit, found %v", target.AccessAction)
 					}
 					if got := target.Options != nil && target.Options.DirectUpstream != nil && *target.Options.DirectUpstream; got != direct {
 						return fmt.Errorf("first target: expected direct_upstream %t, found %t", direct, got)
 					}
-				case peerID2:
+				case "/admin":
 					if target.AccessAction == nil || string(*target.AccessAction) != action {
 						return fmt.Errorf("admin target: expected %s, found %v", action, target.AccessAction)
 					}
@@ -1120,7 +1120,7 @@ resource "netbird_reverse_proxy_service" %q {
 		CheckDestroy:             testCheckGone(testClient().ReverseProxyServices.Get, &createdID),
 		Steps: []resource.TestStep{
 			{
-				Config: config(`access_action = "block"`, false),
+				Config: config(`access_action = "block"`, 8081, false),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					testRecordID(rNameFull, &createdID),
 					resource.TestCheckResourceAttr(rNameFull, "targets.0.access_action", "inherit"),
@@ -1131,7 +1131,7 @@ resource "netbird_reverse_proxy_service" %q {
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 			{
-				Config:           config(`access_action = "bypass"`, false),
+				Config:           config(`access_action = "bypass"`, 8081, false),
 				ConfigPlanChecks: updatesInPlace(rNameFull),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "bypass"),
@@ -1140,13 +1140,24 @@ resource "netbird_reverse_proxy_service" %q {
 			},
 			{
 				// Left out, the action stays as it is: no change planned.
-				Config:   config("", false),
+				Config:   config("", 8081, false),
 				PlanOnly: true,
+			},
+			{
+				// Left out while the target changes: the update does not send
+				// it, and the server keeps the action of the target at /admin.
+				Config:           config("", 8082, false),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "bypass"),
+					resource.TestCheckResourceAttr(rNameFull, "targets.1.port", "8082"),
+					onServer("bypass", false),
+				),
 			},
 			{
 				// A private service refuses bypass; block with a direct upstream
 				// target is fine on the harness cluster (private mode).
-				Config: config(`access_action = "block"`, true),
+				Config: config(`access_action = "block"`, 8082, true),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(rNameFull, "targets.0.options.direct_upstream", "true"),
 					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "block"),
@@ -1156,4 +1167,12 @@ resource "netbird_reverse_proxy_service" %q {
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 		},
 	})
+}
+
+// normalizedPath is the server's reading of a target path: left out is "/".
+func normalizedPath(p *string) string {
+	if p == nil || *p == "" {
+		return "/"
+	}
+	return *p
 }

@@ -247,7 +247,7 @@ Required:
 
 Optional:
 
-- `access_action` (String) Access action once this target's path prefix is selected (HTTP services only): `inherit` applies the service's authentication, `bypass` skips it (not allowed for private services), `block` denies access. `bypass` and `block` need a path other than `/`. Left out, the server keeps the target's current action (`inherit` for a new target).
+- `access_action` (String) Access action once this target's path prefix is selected (HTTP services only): `inherit` applies the service's authentication, `bypass` skips it (not allowed for private services), `block` denies access. Left out, the server keeps the current action of the target at this path (`inherit` for a new one).
 - `enabled` (Boolean) Whether this target is enabled
 - `host` (String) Backend IP or domain for this target. If omitted, the API resolves it from the target peer.
 - `options` (Attributes) Per-target options (see [below for nested schema](#nestedatt--targets--options))
@@ -259,7 +259,7 @@ Optional:
 Optional:
 
 - `custom_headers` (Map of String, Sensitive) Extra headers sent to the backend (HTTP only). Marked sensitive since values commonly carry credentials, e.g. an `Authorization` header.
-- `direct_upstream` (Boolean) Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services, localhost sidecars). Defaults to false.
+- `direct_upstream` (Boolean) Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services, localhost sidecars). Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Defaults to false.
 - `path_rewrite` (String) Controls how the request path is rewritten before forwarding. Default strips the matched prefix. "preserve" keeps the full original path. (HTTP only)
 - `proxy_protocol` (Boolean) Send PROXY Protocol v2 header to this backend (TCP/TLS only)
 - `request_timeout` (String) Per-target response timeout as a Go duration string (e.g. "30s", "2m")
