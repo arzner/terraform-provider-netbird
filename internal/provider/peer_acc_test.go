@@ -188,6 +188,7 @@ func Test_Peer_IPv6(t *testing.T) {
 	}
 	original := *peer.Ipv6
 	moved := testUnusedPeerIPv6(t, original)
+	movedAgain := testUnusedPeerIPv6(t, original, moved)
 	outside := testOutsideAccountIPv6(t)
 	named := func(name, ipv6 string) string {
 		if ipv6 == "" {
@@ -203,15 +204,18 @@ func Test_Peer_IPv6(t *testing.T) {
 }`, rName, peerID, name, ipv6)
 	}
 	config := func(ipv6 string) string { return named(peer.Name, ipv6) }
-	nameOnServer := func(want string) error {
-		p, err := testClient().Peers.Get(context.Background(), peerID)
-		if err != nil {
-			return err
+	// Checked in the next step's PreConfig, before its apply could repair a
+	// partial write.
+	onServerBefore := func(name, ipv6 string) func() {
+		return func() {
+			p, err := testClient().Peers.Get(context.Background(), peerID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.Name != name || p.Ipv6 == nil || *p.Ipv6 != ipv6 {
+				t.Fatalf("on the server: expected %q at %s, found %q at %v", name, ipv6, p.Name, p.Ipv6)
+			}
 		}
-		if p.Name != want {
-			return fmt.Errorf("name on the server: expected %q, found %q", want, p.Name)
-		}
-		return nil
 	}
 	onServer := func(want string) resource.TestCheckFunc {
 		return func(s *terraform.State) error {
@@ -243,19 +247,14 @@ func Test_Peer_IPv6(t *testing.T) {
 			// A rename together with an address the server refuses: the address
 			// goes first and alone, so the refusal leaves the name as it was.
 			{Config: named(peer.Name+"-x", outside), ExpectError: regexp.MustCompile(`not within the account IPv6 range`)},
-			{Config: config(moved), Check: resource.ComposeAggregateTestCheckFunc(
-				onServer(moved), func(*terraform.State) error { return nameOnServer(peer.Name) })},
-			// Renamed outside Terraform between plan and apply: the apply stops
-			// before writing anything, and the outside change survives.
-			{Config: named(peer.Name+"-s", moved),
+			// Renamed outside Terraform between plan and apply, with an address
+			// move pending: the apply stops before writing anything, and the
+			// outside change survives.
+			{PreConfig: onServerBefore(peer.Name, moved), Config: named(peer.Name+"-s", movedAgain),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					testExpectUpdateInPlace(rNameFull), testPeerRenamedOutside(peerID, peer.Name+"-o")}},
 				ExpectError: regexp.MustCompile(`Peer changed after the plan`)},
-			{PreConfig: func() {
-				if err := nameOnServer(peer.Name + "-o"); err != nil {
-					t.Fatal(err)
-				}
-			}, Config: config(original), Check: resource.ComposeAggregateTestCheckFunc(
+			{PreConfig: onServerBefore(peer.Name+"-o", moved), Config: config(original), Check: resource.ComposeAggregateTestCheckFunc(
 				resource.TestCheckResourceAttr(rNameFull, "ipv6", original), onServer(original))},
 		},
 	})
@@ -303,14 +302,17 @@ func (c peerRenamedOutside) CheckPlan(ctx context.Context, _ plancheck.CheckPlan
 }
 
 // testUnusedPeerIPv6 returns an address in the /64 of addr that no peer of
-// the account uses.
-func testUnusedPeerIPv6(t *testing.T, addr string) string {
+// the account uses and that is not one of except.
+func testUnusedPeerIPv6(t *testing.T, addr string, except ...string) string {
 	t.Helper()
 	peers, err := testClient().Peers.List(context.Background())
 	if err != nil {
 		t.Fatalf("list peers: %v", err)
 	}
 	used := map[string]bool{}
+	for _, e := range except {
+		used[e] = true
+	}
 	for _, p := range peers {
 		if p.Ipv6 != nil {
 			used[*p.Ipv6] = true

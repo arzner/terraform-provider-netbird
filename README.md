@@ -143,11 +143,12 @@ existing configurations is released as a new minor version (0.x) or, from
 ### Changes made outside Terraform
 
 Manage an object either with Terraform or by hand, not both. When an object
-changed outside Terraform after the plan was made, an apply stops before it
-writes anything and asks for a new plan, instead of overwriting the change
-(`netbird_peer` so far; the other resources follow in #74). The NetBird API
-has no conditional updates, so a change made while an apply is writing is not
-detected.
+changed after the plan was made, an in-place update stops before it writes
+anything and asks for a new plan, instead of overwriting the change
+(`netbird_peer` so far; the other resources follow in #74). This protects
+in-place updates only: a saved plan that destroys or adopts an object acts on
+it as it is then. The NetBird API has no conditional updates, so a change made
+while an apply is writing is not detected either.
 
 ### Verifying a release
 

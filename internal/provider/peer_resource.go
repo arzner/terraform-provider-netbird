@@ -365,11 +365,16 @@ func (r *Peer) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		resp.Diagnostics.AddError("Error getting Peer", err.Error())
 		return
 	}
-	if changed := peerChangedSincePlan(prior, data, live); len(changed) > 0 {
-		resp.Diagnostics.AddError("Peer changed after the plan",
-			"The peer was changed outside Terraform after this plan was made, so applying it would overwrite that change:\n\n"+
-				strings.Join(changed, "\n")+"\n\nNothing was changed. Run plan again.")
-		return
+	// A new id adopts another peer: the prior state describes a different
+	// device and is no baseline for it.
+	if prior.Id.Equal(data.Id) {
+		if changed := peerChangedSincePlan(prior, data, live); len(changed) > 0 {
+			resp.Diagnostics.AddError("Peer changed after the plan",
+				"The peer changed after this plan was made, outside Terraform or on the server as a result of another "+
+					"change in this apply, so applying the plan would overwrite that change or record values it did not plan:\n\n"+
+					strings.Join(changed, "\n")+"\n\nNothing was changed. Run plan again.")
+			return
+		}
 	}
 	peer, observed, err := r.applyPeer(ctx, live, data, config)
 	if err != nil {
@@ -434,6 +439,12 @@ func peerChangedSincePlan(prior, plan PeerModel, live *api.Peer) []string {
 	var changed []string
 	str := func(name string, prior, plan, live types.String) {
 		if !plan.IsUnknown() && !live.Equal(prior) && !live.Equal(plan) {
+			if name == "ipv6" && prior.IsNull() && !plan.IsNull() {
+				// No address when planned and one configured: the server may have
+				// assigned one meanwhile (for example when this apply enabled IPv6
+				// for the peer's group); the configured address replaces it.
+				return
+			}
 			changed = append(changed, fmt.Sprintf("- %s: %s when planned, now %s", name, prior, live))
 		}
 	}
@@ -496,51 +507,58 @@ func peerRequest(live *api.Peer, plan, config PeerModel) (api.PeerRequest, bool)
 	return req, changed
 }
 
-// applyPeer applies the plan to a live peer in up to two requests. A new IPv6
-// address goes first and alone (every other field as the server has it): the
-// server checks the address (account range, IPv6-enabled groups, collisions)
-// and moves it before it looks at the rest of an update, so on its own it
-// either moves or is refused before anything else has changed. The other
-// settings follow in a second request.
+// applyPeer applies the plan to a live peer in one request: the attributes the
+// configuration sets, a new IPv6 address if one is configured, and every other
+// field as the server has it. The server checks and moves the address first
+// and stops on a refused address before it touches anything else
+// (peers_handler.go), so a refused address changes nothing; a refusal of the
+// other settings comes after the address moved. Refusals the provider can
+// predict are reported before the request (peerRequestRefused).
 //
 // A failed request may still have taken effect: the server commits a peer
 // update before it notifies the network map, and that notification can fail.
-// So after any failed request the peer is read back; observed is true when the
+// So after a failed request the peer is read back; observed is true when the
 // returned peer is a server response the caller can record. If the read-back
-// fails too, the error says what is unconfirmed, and the last successful
-// response (if any) is returned as the record.
-//
-// Changes made outside Terraform between the two requests are not detected:
-// the API has no conditional updates.
+// fails too, both errors are reported and the outcome is unconfirmed.
 func (r *Peer) applyPeer(ctx context.Context, live *api.Peer, plan, config PeerModel) (peer *api.Peer, observed bool, err error) {
-	peer = live
-	written := false
-	fail := func(err error, unconfirmed string) (*api.Peer, bool, error) {
-		if current, getErr := r.client.Peers.Get(ctx, peer.Id); getErr == nil {
-			return current, true, err
-		}
-		err = fmt.Errorf("%w (the peer could not be read back; %s unconfirmed)", err, unconfirmed)
-		if written {
-			return peer, true, err
-		}
+	req, changed := peerRequest(live, plan, config)
+	if ipv6 := peerIPv6Request(configuredOnly(plan.Ipv6, config.Ipv6), live.Ipv6); ipv6 != nil {
+		req.Ipv6, changed = ipv6, true
+	}
+	if !changed {
+		return live, false, nil
+	}
+	if err := peerRequestRefused(live, req); err != nil {
 		return nil, false, err
 	}
-	if ipv6 := peerIPv6Request(configuredOnly(plan.Ipv6, config.Ipv6), peer.Ipv6); ipv6 != nil {
-		req, _ := peerRequest(peer, plan, PeerModel{})
-		req.Ipv6 = ipv6
-		updated, err := r.client.Peers.Update(ctx, peer.Id, req)
-		if err != nil {
-			// Stop before the other settings either way.
-			return fail(err, "whether the IPv6 address moved is")
+	updated, err := r.client.Peers.Update(ctx, live.Id, req)
+	if err != nil {
+		current, getErr := r.client.Peers.Get(ctx, live.Id)
+		if getErr == nil {
+			return current, true, err
 		}
-		peer, written = updated, true
+		return nil, false, fmt.Errorf("%w\n\nReading the peer back failed too, so whether the update took effect is unconfirmed: %v", err, getErr)
 	}
-	if req, changed := peerRequest(peer, plan, config); changed {
-		updated, err := r.client.Peers.Update(ctx, peer.Id, req)
-		if err != nil {
-			return fail(err, "whether the other settings took effect is")
-		}
-		peer = updated
+	return updated, false, nil
+}
+
+// peerRequestRefused reports an update the server is known to refuse, before
+// anything is sent: login and inactivity expiration can only be changed on
+// peers added with SSO login (AddedWithSSOLogin: a user ID), in NetBird 0.82
+// and 0.83 alike (management/server/peer.go, UpdatePeer).
+func peerRequestRefused(live *api.Peer, req api.PeerRequest) error {
+	if live.UserId != "" {
+		return nil
 	}
-	return peer, false, nil
+	var names []string
+	if req.LoginExpirationEnabled != live.LoginExpirationEnabled {
+		names = append(names, "login_expiration_enabled")
+	}
+	if req.InactivityExpirationEnabled != live.InactivityExpirationEnabled {
+		names = append(names, "inactivity_expiration_enabled")
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s can only be changed on peers added with SSO login; this peer was added with a setup key. Nothing was changed", strings.Join(names, " and "))
 }
