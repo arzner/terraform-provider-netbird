@@ -483,6 +483,7 @@ func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
 	for name, tc := range map[string]struct {
 		state, config, plan vals
 		wantError           string
+		noHint              bool // no "Service is private from its state" error
 	}{
 		"new, configured bypass": {
 			config:    vals{"private": on, "access_groups": groups, "targets": targets(target("/a", "bypass"))},
@@ -609,6 +610,13 @@ func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
 			config: vals{"name": tftypes.NewValue(tftypes.String, unknown), "targets": targets(target("", "inherit"), target("", "block"))},
 			plan:   vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, unknown), "targets": targets(target(unknownPath, "inherit"), target(unknownPath, "block"))},
 		},
+		"kept private, a duplicate path: no hint to make it public": {
+			state:     vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", "inherit"), target("/admin", "block"))},
+			config:    vals{"targets": targets(target("", nil), target("/admin", nil), target("/admin", nil))},
+			plan:      vals{"private": on, "mode": http, "access_groups": groups, "targets": targets(target("", unknown), target("/admin", unknown), target("/admin", unknown))},
+			wantError: "targets[2].path",
+			noHint:    true,
+		},
 		"block on a relative path": {
 			config:    vals{"targets": targets(target("admin", "block"))},
 			plan:      vals{"private": off, "targets": targets(target("admin", "block"))},
@@ -693,6 +701,11 @@ func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
 			}
 			if !found {
 				t.Fatalf("expected an error at %s, found %v", tc.wantError, diags)
+			}
+			for _, d := range diags.Errors() {
+				if tc.noHint && d.Summary() == "Service is private from its state" {
+					t.Errorf("making the service public does not fix %v", diags)
+				}
 			}
 		})
 	}
@@ -1046,7 +1059,8 @@ func Test_targetActionDiagnosticsOmitPaths(t *testing.T) {
 	list := types.ListValueMust(targetType, []attr.Value{
 		target("/cb?token=secret", "block"), target("/x-secret", "bypass"), target("/x-secret", "inherit"),
 	})
-	diags := targetActions(list, nil, true).problems(true, "http")
+	privacy, diags := targetActions(list, nil, true).problems(true, "http")
+	diags.Append(privacy...)
 	if diags.ErrorsCount() < 3 {
 		t.Fatalf("expected the query path, the bypass and the duplicate to be refused, found %v", diags)
 	}

@@ -366,7 +366,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 							Default:             booldefault.StaticBool(true),
 						},
 						"access_action": schema.StringAttribute{
-							MarkdownDescription: "Access action once this target's path prefix is selected (HTTP services only): `inherit` applies the service's authentication, `bypass` skips it (not allowed for private services), `block` denies access. Left out, the server keeps the current action of the target at this path (`inherit` for a new one). While a target has `bypass` or `block`, an update that sets no action anywhere must keep that path, and several targets at one path need an action on each; the plan reports both. `bypass` and `block` are refused for TCP, UDP and TLS services, need a canonical path prefix, and need each enabled target on its own path. Once any enabled target has `bypass` or `block`, the proxy checks request paths strictly for the whole service, also for targets that inherit: a request whose path has `//`, `\\`, `;`, dot segments, control characters or an escaped `/`, `\\`, `.` or `%` gets HTTP 400.",
+							MarkdownDescription: "Access action once this target's path prefix is selected (HTTP services only): `inherit` applies the service's authentication, `bypass` skips it (not allowed for private services), `block` denies access. Left out, the server keeps the current action of the target at this path (`inherit` for a new one). While a current target has `bypass` or `block`, an update that sets no action on any target must keep that target's path, and if two current targets share a path, every target of the update must set its action; the plan reports both. `bypass` and `block` are refused for TCP, UDP and TLS services, need a canonical path prefix, and need each enabled target on its own path. Once any enabled target has `bypass` or `block`, the proxy checks request paths strictly for the whole service, also for targets that inherit: a request whose path has `//`, `\\`, `;`, dot segments, control characters or an escaped `/`, `\\`, `.` or `%` gets HTTP 400.",
 							Optional:            true,
 							Computed:            true,
 							Validators:          []validator.String{stringvalidator.OneOf("inherit", "bypass", "block")},
@@ -995,7 +995,15 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 	}
 	// pair matches unpaired targets of the same ID; with onlyOne it pairs a
 	// planned target only when exactly one API target qualifies.
-	pair := func(match func(p, l ReverseProxyServiceTargetModel) bool, onlyOne bool) {
+	// For a known planned path, only live targets of that ID and path qualify.
+	byIDPath := map[[2]string][]int{}
+	for i, l := range live {
+		if !l.TargetId.IsNull() && !l.TargetId.IsUnknown() && !l.Path.IsUnknown() {
+			k := [2]string{l.TargetId.ValueString(), targetLocation(l.Path)}
+			byIDPath[k] = append(byIDPath[k], i)
+		}
+	}
+	pair := func(match func(p, l ReverseProxyServiceTargetModel) bool, onlyOne, byPath bool) {
 		for j, p := range planned {
 			if used[j] {
 				continue
@@ -1004,7 +1012,14 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 			if p.TargetId.IsNull() || p.TargetId.IsUnknown() {
 				continue
 			}
-			for _, i := range byID[p.TargetId.ValueString()] {
+			candidates := byID[p.TargetId.ValueString()]
+			if byPath {
+				if p.Path.IsUnknown() {
+					continue
+				}
+				candidates = byIDPath[[2]string{p.TargetId.ValueString(), targetLocation(p.Path)}]
+			}
+			for _, i := range candidates {
 				if _, taken := out[i]; !taken && match(p, live[i]) {
 					found = append(found, i)
 				}
@@ -1027,13 +1042,14 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 	// From the most specific match to the least. Targets equal in everything
 	// compared pair in list order; a looser match pairs only when it is the
 	// one candidate left.
-	for _, known := range []func(p, l ReverseProxyServiceTargetModel) bool{samePath, unknownPath} {
+	for round, known := range []func(p, l ReverseProxyServiceTargetModel) bool{samePath, unknownPath} {
+		byPath := round == 0
 		pair(func(p, l ReverseProxyServiceTargetModel) bool {
 			return known(p, l) && sameEndpoint(p, l) && sameHost(p, l)
-		}, false)
-		pair(func(p, l ReverseProxyServiceTargetModel) bool { return known(p, l) && sameEndpoint(p, l) }, false)
-		pair(func(p, l ReverseProxyServiceTargetModel) bool { return known(p, l) && sameHost(p, l) }, true)
-		pair(known, true)
+		}, false, byPath)
+		pair(func(p, l ReverseProxyServiceTargetModel) bool { return known(p, l) && sameEndpoint(p, l) }, false, byPath)
+		pair(func(p, l ReverseProxyServiceTargetModel) bool { return known(p, l) && sameHost(p, l) }, true, byPath)
+		pair(known, true, byPath)
 	}
 	return out
 }
@@ -1499,7 +1515,9 @@ func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.V
 	// Without state a left-out action reads as inherit, so only configured
 	// actions can fail here.
 	actions := targetActions(data.Targets, nil, false)
-	resp.Diagnostics.Append(actions.problems(private, mode)...)
+	privacy, other := actions.problems(private, mode)
+	resp.Diagnostics.Append(privacy...)
+	resp.Diagnostics.Append(other...)
 	if !private {
 		return
 	}
@@ -1581,16 +1599,17 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	if !create && writes {
 		resp.Diagnostics.Append(actions.keptProblems()...)
 	}
-	var targetProblems diag.Diagnostics
+	var targetPrivacy, targetProblems diag.Diagnostics
 	if writes {
 		resp.Diagnostics.Append(planOmittedPaths(ctx, config.Targets, plan.Targets, resp)...)
-		targetProblems = actions.problems(private, modeKnown)
+		targetPrivacy, targetProblems = actions.problems(private, modeKnown)
 		resp.Diagnostics.Append(targetHostProblems(config.Targets, modeKnown)...)
 	}
 	if !private {
 		resp.Diagnostics.Append(targetProblems...)
 		return
 	}
+	resp.Diagnostics.Append(targetProblems...)
 	if create && config.AccessGroups.IsNull() {
 		resp.Diagnostics.AddAttributeError(path.Root("access_groups"), "Access groups required",
 			"A new service with private = true needs at least one group in access_groups.")
@@ -1605,13 +1624,15 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 		// (#77) and is planned anew against an empty state when the service
 		// is replaced, so the values kept from this state say nothing about
 		// the new service.
-		resp.Diagnostics.Append(targetProblems...)
+		resp.Diagnostics.Append(targetPrivacy...)
 		return
 	}
 	// A configuration error stops at ValidateConfig, so this reports only
 	// problems with values kept from state.
 	problems := privateServiceProblems(mode, plan.AccessGroups, plan.Auth, checkBlank)
-	problems.Append(targetProblems...)
+	problems.Append(targetPrivacy...)
+	// The hint covers errors that come from the service being private, not
+	// the ones that public would leave in place.
 	if config.Private.IsNull() && problems.HasError() {
 		problems.AddAttributeError(path.Root("private"), "Service is private from its state",
 			"private is left out, so the service stays private and the errors above apply. Set private = false to make it "+
@@ -1842,8 +1863,10 @@ func (a targetAccessActions) keptProblems() diag.Diagnostics {
 // non-inherit action on a path that is not a canonical absolute prefix, and
 // two enabled targets on one path once any enabled target has a non-inherit
 // action. mode is "" when not known.
-func (a targetAccessActions) problems(private bool, mode string) diag.Diagnostics {
-	var diags diag.Diagnostics
+//
+// The bypass errors come back apart from the others: only they are caused by
+// the service being private.
+func (a targetAccessActions) problems(private bool, mode string) (privacy, diags diag.Diagnostics) {
 	strict := false
 	for i, t := range a.targets {
 		if t.action == "" || t.action == "inherit" {
@@ -1860,11 +1883,11 @@ func (a targetAccessActions) problems(private bool, mode string) diag.Diagnostic
 					t.action, mode))
 			continue
 		case private && t.action == "bypass" && t.kept:
-			diags.AddAttributeError(at, "Bypass not allowed on a private service",
+			privacy.AddAttributeError(at, "Bypass not allowed on a private service",
 				"The current target at this path has access_action = \"bypass\" on the server, and this target keeps it "+
 					"while access_action is left out, but a private service cannot have it. Set access_action = \"inherit\" or \"block\".")
 		case private && t.action == "bypass":
-			diags.AddAttributeError(at, "Bypass not allowed on a private service",
+			privacy.AddAttributeError(at, "Bypass not allowed on a private service",
 				"private = true cannot be combined with access_action = \"bypass\" on a target; use \"inherit\" or \"block\".")
 		}
 		if t.pathKnown {
@@ -1875,7 +1898,7 @@ func (a targetAccessActions) problems(private bool, mode string) diag.Diagnostic
 		}
 	}
 	if !strict || (mode != "" && mode != "http") {
-		return diags
+		return privacy, diags
 	}
 	seen := map[string]int{}
 	for i, t := range a.targets {
@@ -1890,7 +1913,7 @@ func (a targetAccessActions) problems(private bool, mode string) diag.Diagnostic
 		}
 		seen[t.path] = i
 	}
-	return diags
+	return privacy, diags
 }
 
 // accessActionPathProblem returns why a path cannot carry a non-inherit
