@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -926,7 +927,7 @@ func preserveTargetPlanValues(ctx context.Context, planTargets, apiTargets types
 			apiModels[i].Path = planModel.Path
 		}
 		if !planModel.Options.IsNull() && !planModel.Options.IsUnknown() {
-			options, d := withLiveDirectUpstream(planModel.Options, apiModel.Options)
+			options, d := reconcileOptions(planModel.Options, apiModel.Options)
 			ret.Append(d...)
 			apiModels[i].Options = options
 		}
@@ -1022,28 +1023,63 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 	return out
 }
 
-// withLiveDirectUpstream keeps the planned options object (the server drops
-// defaults such as false values) but takes direct_upstream from the server, so
-// a change made outside Terraform shows in the next plan. A planned false or
-// null stays as written while the server has it off.
-func withLiveDirectUpstream(planned, live types.Object) (types.Object, diag.Diagnostics) {
-	liveOn := false
+// reconcileOptions keeps the planned spelling of each target option where it
+// means what the server has (the server drops defaults and writes durations
+// its own way, "2m" as "2m0s") and takes the server's value where it does not,
+// so a change made outside Terraform, or a target paired with the wrong
+// planned one, shows in the next plan.
+func reconcileOptions(planned, live types.Object) (types.Object, diag.Diagnostics) {
+	var liveAttrs map[string]attr.Value
 	if !live.IsNull() && !live.IsUnknown() {
-		if v, ok := live.Attributes()["direct_upstream"].(types.Bool); ok {
-			liveOn = v.ValueBool()
-		}
+		liveAttrs = live.Attributes()
 	}
 	attrs := planned.Attributes()
-	current, _ := attrs["direct_upstream"].(types.Bool)
-	switch {
-	case liveOn:
-		attrs["direct_upstream"] = types.BoolValue(true)
-	case current.IsNull() || current.IsUnknown():
-		attrs["direct_upstream"] = types.BoolNull()
-	default:
-		attrs["direct_upstream"] = types.BoolValue(false)
+	for name, plannedValue := range attrs {
+		liveValue, ok := liveAttrs[name]
+		if !ok {
+			liveValue = nullOf(plannedValue)
+		}
+		if !sameOption(plannedValue, liveValue) {
+			attrs[name] = liveValue
+		}
 	}
 	return types.ObjectValue(planned.AttributeTypes(context.Background()), attrs)
+}
+
+// sameOption reports whether a planned option value means the server's one.
+func sameOption(planned, live attr.Value) bool {
+	if planned.IsUnknown() {
+		return false
+	}
+	switch p := planned.(type) {
+	case types.Bool:
+		l, _ := live.(types.Bool)
+		return p.ValueBool() == l.ValueBool() // null reads as false
+	case types.String:
+		l, _ := live.(types.String)
+		if pd, err := time.ParseDuration(p.ValueString()); err == nil {
+			ld, lerr := time.ParseDuration(l.ValueString())
+			return (lerr == nil && pd == ld) || (pd == 0 && l.IsNull())
+		}
+		return p.ValueString() == l.ValueString() // null reads as ""
+	case types.Map:
+		l, _ := live.(types.Map)
+		return (len(p.Elements()) == 0 && len(l.Elements()) == 0) || p.Equal(l)
+	}
+	return planned.Equal(live)
+}
+
+// nullOf returns a null value of the same type.
+func nullOf(v attr.Value) attr.Value {
+	switch v.(type) {
+	case types.Bool:
+		return types.BoolNull()
+	case types.String:
+		return types.StringNull()
+	case types.Map:
+		return types.MapNull(types.StringType)
+	}
+	return v
 }
 
 func reverseProxyServiceTerraformToAPI(ctx context.Context, data *ReverseProxyServiceModel) (api.ServiceRequest, diag.Diagnostics) {

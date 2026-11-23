@@ -1502,7 +1502,7 @@ func Test_preserveTargetPlanValues_pathAndDirectUpstream(t *testing.T) {
 	}{
 		"false as written while off":  {options(types.BoolValue(false)), nullOpts, types.BoolValue(false)},
 		"switched on outside":         {options(types.BoolValue(false)), options(types.BoolValue(true)), types.BoolValue(true)},
-		"switched off outside":        {options(types.BoolValue(true)), nullOpts, types.BoolValue(false)},
+		"switched off outside":        {options(types.BoolValue(true)), nullOpts, types.BoolNull()},
 		"left out, switched on":       {options(types.BoolNull()), options(types.BoolValue(true)), types.BoolValue(true)},
 		"left out, off stays omitted": {options(types.BoolNull()), nullOpts, types.BoolNull()},
 	} {
@@ -1699,7 +1699,7 @@ func Test_preserveTargetPlanValues_subnetHostAndPosition(t *testing.T) {
 	// peer; the API answers in request order.
 	got, d = preserveTargetPlanValues(ctx,
 		list(target("peer", types.StringUnknown(), "", "5s"), target("peer", root, "", "10s")),
-		list(target("peer", types.StringNull(), "100.0.0.1", ""), target("peer", root, "100.0.0.1", "")))
+		list(target("peer", types.StringNull(), "100.0.0.1", "5s"), target("peer", root, "100.0.0.1", "10s")))
 	if d.HasError() {
 		t.Fatal(d)
 	}
@@ -1727,5 +1727,46 @@ func Test_matchPlanTargets_removalKeepsRelativeOrder(t *testing.T) {
 		[]ReverseProxyServiceTargetModel{target("p", ""), target("p", "")})
 	if len(got) != 2 || got[0].TargetType.ValueString() != "B" || got[1].TargetType.ValueString() != "C" {
 		t.Errorf("expected B, C in order, found %v", got)
+	}
+}
+
+// Planned options keep their spelling where they mean the server's value and
+// take the server's value where they do not.
+func Test_reconcileOptions(t *testing.T) {
+	optsType := ReverseProxyTargetOptionsModel{}.TFType()
+	options := func(timeout, idle types.String, skip types.Bool) types.Object {
+		attrs := map[string]attr.Value{}
+		for name, typ := range optsType.AttrTypes {
+			switch typ {
+			case types.BoolType:
+				attrs[name] = types.BoolNull()
+			case types.StringType:
+				attrs[name] = types.StringNull()
+			default:
+				attrs[name] = types.MapNull(types.StringType)
+			}
+		}
+		attrs["request_timeout"], attrs["session_idle_timeout"], attrs["skip_tls_verify"] = timeout, idle, skip
+		return types.ObjectValueMust(optsType.AttrTypes, attrs)
+	}
+	s, n := types.StringValue, types.StringNull()
+	got, d := reconcileOptions(options(s("2m"), s("5s"), types.BoolValue(false)), options(s("2m0s"), s("10s"), types.BoolNull()))
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	a := got.Attributes()
+	if !a["request_timeout"].Equal(s("2m")) {
+		t.Errorf("an equal duration keeps its planned spelling, found %v", a["request_timeout"])
+	}
+	if !a["session_idle_timeout"].Equal(s("10s")) {
+		t.Errorf("a different duration takes the server value, found %v", a["session_idle_timeout"])
+	}
+	if !a["skip_tls_verify"].Equal(types.BoolValue(false)) {
+		t.Errorf("a planned false stays while the server has none, found %v", a["skip_tls_verify"])
+	}
+	got, _ = reconcileOptions(options(s("5s"), n, types.BoolValue(true)), types.ObjectNull(optsType.AttrTypes))
+	a = got.Attributes()
+	if !a["request_timeout"].IsNull() || !a["skip_tls_verify"].IsNull() {
+		t.Errorf("values the server does not have must not stay, found %v", a)
 	}
 }
