@@ -732,7 +732,7 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 	if svc.Auth.PasswordAuth != nil {
 		authModel.PasswordAuth, d = types.ObjectValueFrom(ctx, ReverseProxyPasswordAuthModel{}.TFType().AttrTypes, ReverseProxyPasswordAuthModel{
 			Enabled:  types.BoolValue(svc.Auth.PasswordAuth.Enabled),
-			Password: types.StringValue(svc.Auth.PasswordAuth.Password),
+			Password: redactedSecretAPIToTerraform(svc.Auth.PasswordAuth.Password),
 		})
 		ret.Append(d...)
 	} else {
@@ -742,7 +742,7 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 	if svc.Auth.PinAuth != nil {
 		authModel.PinAuth, d = types.ObjectValueFrom(ctx, ReverseProxyPinAuthModel{}.TFType().AttrTypes, ReverseProxyPinAuthModel{
 			Enabled: types.BoolValue(svc.Auth.PinAuth.Enabled),
-			Pin:     types.StringValue(svc.Auth.PinAuth.Pin),
+			Pin:     redactedSecretAPIToTerraform(svc.Auth.PinAuth.Pin),
 		})
 		ret.Append(d...)
 	} else {
@@ -780,7 +780,7 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 			headerAuthModels = append(headerAuthModels, ReverseProxyHeaderAuthModel{
 				Enabled: types.BoolValue(h.Enabled),
 				Header:  types.StringValue(h.Header),
-				Value:   types.StringValue(h.Value),
+				Value:   redactedSecretAPIToTerraform(h.Value),
 			})
 		}
 		authModel.HeaderAuths, d = types.ListValueFrom(ctx, ReverseProxyHeaderAuthModel{}.TFType(), headerAuthModels)
@@ -834,8 +834,19 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 	return ret
 }
 
-// preserveAuthSecrets copies sensitive auth fields (password, pin) from prior state/plan
-// into the current model since the API redacts these values on read.
+// redactedSecretAPIToTerraform maps the blank the API returns for a secret to
+// null. An empty string never matches a configuration that omits the secret,
+// so it would diff on every plan.
+func redactedSecretAPIToTerraform(secret string) types.String {
+	if secret == "" {
+		return types.StringNull()
+	}
+	return types.StringValue(secret)
+}
+
+// preserveAuthSecrets copies sensitive auth fields (password, pin, header auth
+// values) from prior state/plan into the current model, since the API never
+// returns them.
 // It also preserves the structure of optional auth blocks (like link_auth) that the API
 // may not return when disabled, ensuring state matches plan.
 func preserveAuthSecrets(priorAuth, currentAuth types.Object) (types.Object, diag.Diagnostics) {

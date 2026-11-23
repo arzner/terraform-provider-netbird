@@ -273,6 +273,22 @@ func Test_ReverseProxyService_PinAuth(t *testing.T) {
 					},
 				),
 			},
+			{
+				// The pin left out of the configuration: the server keeps it.
+				Config: testReverseProxyServicePinAuthNoPin(rName, domain, peerID),
+				Check:  resource.TestCheckNoResourceAttr(rNameFull, "auth.pin_auth.pin"),
+			},
+			{
+				// The API never returns the pin: an import with the pin left
+				// out plans no change.
+				Config:          testReverseProxyServicePinAuthNoPin(rName, domain, peerID),
+				ResourceName:    rNameFull,
+				ImportState:     true,
+				ImportStateKind: resource.ImportBlockWithID,
+				ImportPlanChecks: resource.ImportPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionNoop),
+				}},
+			},
 		},
 	})
 }
@@ -1672,4 +1688,8 @@ resource "netbird_reverse_proxy_service" %q {
 			},
 		},
 	})
+}
+
+func testReverseProxyServicePinAuthNoPin(rName, domain, peerID string) string {
+	return strings.Replace(testReverseProxyServicePinAuth(rName, domain, peerID, ""), "\n      pin     = \"\"", "", 1)
 }
