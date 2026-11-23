@@ -25,7 +25,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
-	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
@@ -1439,7 +1438,7 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 		resp.Diagnostics.AddError("Private service without usable access groups", err.Error())
 		return
 	}
-	resp.Diagnostics.Append(keptActionProblems(ctx, req.Config, serviceReq, live)...)
+	resp.Diagnostics.Append(keptActionProblems(ctx, serviceReq, live)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -1519,7 +1518,7 @@ func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.V
 	}
 	// Without state a left-out action reads as inherit, so only configured
 	// actions can fail here.
-	actions := targetActions(data.Targets, nil, false)
+	actions := targetActions(data.Targets, data.Targets, nil, false)
 	privacy, other, _ := actions.problems(private, mode)
 	resp.Diagnostics.Append(privacy...)
 	resp.Diagnostics.Append(other...)
@@ -1600,7 +1599,7 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 		}
 	}
 	// A left-out path is "/" only on a write; otherwise it may be kept.
-	actions := targetActions(config.Targets, existing, writes)
+	actions := targetActions(plan.Targets, config.Targets, existing, writes)
 	if !create && writes {
 		resp.Diagnostics.Append(inPlaceOnly(actions.keptProblems())...)
 	}
@@ -1754,12 +1753,30 @@ type targetAccessActions struct {
 // omittedPathIsRoot says whether a left-out path is "/": on a create or an
 // update it is (nothing is sent and the server uses "/"), but without a plan
 // it may stand for a path kept unchanged from state.
-func targetActions(configured types.List, existing []ReverseProxyServiceTargetModel, omittedPathIsRoot bool) targetAccessActions {
+func targetActions(planned, configured types.List, existing []ReverseProxyServiceTargetModel, omittedPathIsRoot bool) targetAccessActions {
 	var out targetAccessActions
-	if configured.IsNull() || configured.IsUnknown() {
+	if planned.IsNull() || planned.IsUnknown() {
 		return out
 	}
-	elements := configured.Elements()
+	elements := planned.Elements()
+	// The configuration tells a left-out value from one not known yet, as
+	// long as it lines up with the plan (ignore_changes can keep targets the
+	// configuration no longer lists).
+	var cfg []attr.Value
+	if !configured.IsNull() && !configured.IsUnknown() && len(configured.Elements()) == len(elements) {
+		cfg = configured.Elements()
+	}
+	leftOut := func(i int, name string) bool {
+		if cfg == nil {
+			return false
+		}
+		c, ok := cfg[i].(types.Object)
+		if !ok || c.IsNull() || c.IsUnknown() {
+			return false
+		}
+		v, ok := c.Attributes()[name].(types.String)
+		return ok && v.IsNull()
+	}
 	out.targets = make([]plannedAction, len(elements))
 	omitted := make([]bool, len(elements))
 	// With no targets the server still checks for dropped controlled paths.
@@ -1773,8 +1790,13 @@ func targetActions(configured types.List, existing []ReverseProxyServiceTargetMo
 			continue
 		}
 		attrs := obj.Attributes()
-		if p, ok := attrs["path"].(types.String); ok && !p.IsUnknown() && (omittedPathIsRoot || !p.IsNull()) {
+		p, _ := attrs["path"].(types.String)
+		switch {
+		case !p.IsNull() && !p.IsUnknown():
 			t.path, t.pathKnown = targetLocation(p), true
+		case omittedPathIsRoot && (p.IsNull() || leftOut(i, "path")):
+			// Not sent: the server uses "/".
+			t.path, t.pathKnown = "/", true
 		}
 		if en, ok := attrs["enabled"].(types.Bool); ok && !en.IsUnknown() {
 			t.enabled = 1 // left out, the schema default is true
@@ -1784,7 +1806,7 @@ func targetActions(configured types.List, existing []ReverseProxyServiceTargetMo
 		}
 		a, _ := attrs["access_action"].(types.String)
 		switch {
-		case a.IsNull():
+		case a.IsNull() || (a.IsUnknown() && leftOut(i, "access_action")):
 			omitted[i], allProvided = true, false
 		case a.IsUnknown():
 			provided = true
@@ -1892,9 +1914,16 @@ func (a targetAccessActions) problems(private bool, mode string) (privacy, diags
 		at := path.Root("targets").AtListIndex(i).AtName("access_action")
 		switch {
 		case mode != "" && mode != "http":
-			diags.AddAttributeError(at, "Access action needs HTTP",
+			d := diag.NewAttributeErrorDiagnostic(at, "Access action needs HTTP",
 				fmt.Sprintf("access_action %q is only supported for HTTP services; mode is %q. Leave it out or set \"inherit\".",
 					t.action, mode))
+			if t.kept {
+				// Kept from the current HTTP target: a new service starts
+				// at inherit.
+				updateOnly.Append(d)
+			} else {
+				diags.Append(d)
+			}
 			continue
 		case private && t.action == "bypass" && t.kept:
 			updateOnly.AddAttributeError(at, "Bypass not allowed on a private service",
@@ -1938,10 +1967,30 @@ func (a targetAccessActions) problems(private bool, mode string) (privacy, diags
 // keptActionProblems refuses, before the update is sent, what the server
 // refuses when it keeps left-out actions from the live targets; the plan
 // only warned, since it could not tell an update from a replacement.
-func keptActionProblems(ctx context.Context, cfg tfsdk.Config, req api.ServiceRequest, live *api.Service) diag.Diagnostics {
+func keptActionProblems(ctx context.Context, req api.ServiceRequest, live *api.Service) diag.Diagnostics {
 	var diags diag.Diagnostics
-	var config ReverseProxyServiceModel
-	diags.Append(cfg.Get(ctx, &config)...)
+	// The server decides from the targets the request carries.
+	targetType := ReverseProxyServiceTargetModel{}.TFType()
+	var sent []attr.Value
+	if req.Targets != nil {
+		for _, t := range *req.Targets {
+			attrs := map[string]attr.Value{}
+			for n, at := range targetType.AttrTypes {
+				attrs[n] = nullOf(at.ValueType(ctx))
+			}
+			attrs["options"] = types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes)
+			attrs["path"] = types.StringPointerValue(t.Path)
+			attrs["enabled"] = types.BoolValue(t.Enabled)
+			if t.AccessAction != nil {
+				attrs["access_action"] = types.StringValue(string(*t.AccessAction))
+			}
+			obj, d := types.ObjectValue(targetType.AttrTypes, attrs)
+			diags.Append(d...)
+			sent = append(sent, obj)
+		}
+	}
+	requested, d := types.ListValue(targetType, sent)
+	diags.Append(d...)
 	var current ReverseProxyServiceModel
 	diags.Append(reverseProxyServiceAPIToTerraform(ctx, live, &current)...)
 	if diags.HasError() {
@@ -1960,7 +2009,7 @@ func keptActionProblems(ctx context.Context, cfg tfsdk.Config, req api.ServiceRe
 	} else if live.Mode != nil {
 		mode = string(*live.Mode)
 	}
-	actions := targetActions(config.Targets, existing, true)
+	actions := targetActions(requested, requested, existing, true)
 	diags.Append(actions.keptProblems()...)
 	_, _, updateOnly := actions.problems(req.Private != nil && *req.Private, mode)
 	diags.Append(updateOnly...)

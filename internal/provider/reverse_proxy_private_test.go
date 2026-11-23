@@ -618,6 +618,18 @@ func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
 			inPlace: true, wantError: "targets[2].path",
 			noHint: true,
 		},
+		"targets ignored in the configuration, rename": {
+			state:  vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "a"), "targets": targets(target("/", "inherit"), target("/admin", "block"))},
+			config: vals{"name": tftypes.NewValue(tftypes.String, "b"), "targets": targets(target("", nil))},
+			plan:   vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "b"), "targets": targets(target("/", "inherit"), target("/admin", "block"))},
+		},
+		"replaced by a tcp service while / keeps block": {
+			state:     vals{"private": off, "mode": http, "targets": targets(target("", "block"))},
+			config:    vals{"mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target("", nil))},
+			plan:      vals{"private": off, "mode": tftypes.NewValue(tftypes.String, "tcp"), "targets": targets(target(unknownPath, unknown))},
+			inPlace:   true,
+			wantError: "targets[0].access_action",
+		},
 		"block on a relative path": {
 			config:    vals{"targets": targets(target("admin", "block"))},
 			plan:      vals{"private": off, "targets": targets(target("admin", "block"))},
@@ -687,8 +699,8 @@ func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
 				diags.Append(resp.Diagnostics...)
 			}
 			if tc.wantError == "" {
-				if diags.HasError() {
-					t.Fatalf("expected no error, found %v", diags)
+				if diags.HasError() || diags.WarningsCount() > 0 {
+					t.Fatalf("expected no error or warning, found %v", diags)
 				}
 				return
 			}
@@ -1067,7 +1079,7 @@ func Test_targetActionDiagnosticsOmitPaths(t *testing.T) {
 	list := types.ListValueMust(targetType, []attr.Value{
 		target("/cb?token=secret", "block"), target("/x-secret", "bypass"), target("/x-secret", "inherit"),
 	})
-	privacy, diags, updateOnly := targetActions(list, nil, true).problems(true, "http")
+	privacy, diags, updateOnly := targetActions(list, list, nil, true).problems(true, "http")
 	diags.Append(privacy...)
 	diags.Append(updateOnly...)
 	if diags.ErrorsCount() < 3 {
@@ -1082,42 +1094,21 @@ func Test_targetActionDiagnosticsOmitPaths(t *testing.T) {
 
 func Test_keptActionProblems(t *testing.T) {
 	ctx := context.Background()
-	r := &ReverseProxyService{}
-	var sch resource.SchemaResponse
-	r.Schema(ctx, resource.SchemaRequest{}, &sch)
-	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
-	if !ok {
-		t.Fatal("schema type is not an object")
-	}
-	listType, ok := typ.AttributeTypes["targets"].(tftypes.List)
-	if !ok {
-		t.Fatal("targets is not a list")
-	}
-	targetType, ok := listType.ElementType.(tftypes.Object)
-	if !ok {
-		t.Fatal("a target is not an object")
-	}
-	target := map[string]tftypes.Value{}
-	for n, at := range targetType.AttributeTypes {
-		target[n] = tftypes.NewValue(at, nil)
-	}
-	target["target_id"] = tftypes.NewValue(tftypes.String, "p1")
-	values := map[string]tftypes.Value{}
-	for n, at := range typ.AttributeTypes {
-		values[n] = tftypes.NewValue(at, nil)
-	}
-	values["targets"] = tftypes.NewValue(listType, []tftypes.Value{tftypes.NewValue(targetType, target)})
-	config := tfsdk.Config{Schema: sch.Schema, Raw: tftypes.NewValue(typ, values)}
 	block, inherit, admin := api.ServiceTargetAccessAction("block"), api.ServiceTargetAccessAction("inherit"), "/admin"
 	live := &api.Service{Id: "s", Targets: []api.ServiceTarget{
-		{TargetId: "p1", AccessAction: &inherit},
-		{TargetId: "p1", Path: &admin, AccessAction: &block},
+		{TargetId: "p1", Enabled: true, AccessAction: &inherit},
+		{TargetId: "p1", Enabled: true, Path: &admin, AccessAction: &block},
 	}}
-	if d := keptActionProblems(ctx, config, api.ServiceRequest{}, live); !d.HasError() {
+	only := func(targets ...api.ServiceTarget) api.ServiceRequest { return api.ServiceRequest{Targets: &targets} }
+	if d := keptActionProblems(ctx, only(api.ServiceTarget{TargetId: "p1", Enabled: true}), live); !d.HasError() {
 		t.Error("dropping /admin (block) with no action set must stop the update")
 	}
-	live.Targets = live.Targets[:1]
-	if d := keptActionProblems(ctx, config, api.ServiceRequest{}, live); d.HasError() {
-		t.Errorf("nothing controlled is dropped, found %v", d)
+	// ignore_changes = [targets]: the request carries the current targets
+	// with their actions, whatever the configuration lists.
+	if d := keptActionProblems(ctx, only(live.Targets...), live); d.HasError() {
+		t.Errorf("the request keeps /admin with its action, found %v", d)
+	}
+	if d := keptActionProblems(ctx, only(api.ServiceTarget{TargetId: "p1", Enabled: true, AccessAction: &inherit}), live); d.HasError() {
+		t.Errorf("an action in the request lets the server drop /admin, found %v", d)
 	}
 }

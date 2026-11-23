@@ -1608,6 +1608,13 @@ resource "netbird_reverse_proxy_service" %q {
 				ConfigPlanChecks: updatesInPlace(rNameFull),
 				Check:            hostOnServer("192.168.10.5"),
 			},
+			{
+				// The server keeps a subnet host as written, so an import
+				// recovers it without prior state.
+				ResourceName:      rNameFull,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
 		},
 	})
 }
