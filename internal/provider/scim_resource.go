@@ -219,11 +219,19 @@ func (r *Scim) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		return
 	}
 
+	var config ScimModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	scimReq := api.UpdateScimIntegrationRequest{
 		Enabled:           boolDefaultPointer(data.Enabled, nil),
 		GroupPrefixes:     stringListDefaultPointer(ctx, data.GroupPrefixes, nil),
 		UserGroupPrefixes: stringListDefaultPointer(ctx, data.UserGroupPrefixes, nil),
-		ConnectorId:       stringDefaultPointer(data.ConnectorId, nil),
+		// Only a configured connector is sent: the planned value of a left-out
+		// one is prior state, and sending it would revert a change made since.
+		ConnectorId: stringDefaultPointer(config.ConnectorId, nil),
 	}
 
 	scim, err := r.client.SCIM.Update(ctx, data.Id.ValueString(), scimReq)
