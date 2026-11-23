@@ -76,6 +76,8 @@ it is based on.
   `is_service_user` is optional: left out, a new user is a regular user and an existing one,
   such as an imported identity provider user, keeps what it is; only a configured change replaces
   the user (#64; upstream [#140](https://github.com/netbirdio/terraform-provider-netbird/issues/140)).
+  `is_blocked = true` on a new user is applied (the create request has no block flag, so an
+  update follows the create).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the

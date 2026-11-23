@@ -212,6 +212,7 @@ func (r *User) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		Name:          stringDefaultPointer(data.Name, nil),
 	}
 
+	planned := data
 	user, err := r.client.Users.Create(ctx, userReq)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating user", err.Error())
@@ -222,6 +223,26 @@ func (r *User) Create(ctx context.Context, req resource.CreateRequest, resp *res
 
 	if resp.Diagnostics.HasError() {
 		return
+	}
+
+	// The create request has no block flag, so a planned is_blocked = true
+	// (also on a replacement) is set by an update right after the create.
+	if planned.IsBlocked.Equal(types.BoolValue(true)) && !user.IsBlocked {
+		blocked, err := r.client.Users.Update(ctx, user.Id, api.UserRequest{
+			Role:       user.Role,
+			AutoGroups: user.AutoGroups,
+			IsBlocked:  true,
+		})
+		if err != nil {
+			// The user exists: keep it in state and report the error.
+			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+			resp.Diagnostics.AddError("Error blocking the new user", err.Error())
+			return
+		}
+		resp.Diagnostics.Append(userResourceAPIToTerraform(ctx, blocked, &data)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
 	}
 
 	// Save data into Terraform state
@@ -376,6 +397,10 @@ func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, r
 	}
 	if req.State.Raw.IsNull() {
 		newUser()
+		// Left out, a new user is a regular user: plan it as such.
+		if config.IsServiceUser.IsNull() {
+			resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("is_service_user"), types.BoolValue(false))...)
+		}
 		return
 	}
 
@@ -389,6 +414,13 @@ func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, r
 		if state.IsCurrent.ValueBool() {
 			resp.Diagnostics.AddAttributeError(path.Root("is_service_user"), "Cannot replace the current user",
 				"Changing is_service_user replaces the user, and this is the user the provider authenticates as, which NetBird refuses to delete.")
+			return
+		}
+		// The old user is deleted first, so what the new one needs must be
+		// known now.
+		if config.Email.IsUnknown() || config.Name.IsUnknown() {
+			resp.Diagnostics.AddError("Name and email not known",
+				"Changing is_service_user replaces the user and deletes the old one first; its name and email must be known at plan time.")
 			return
 		}
 		newUser()

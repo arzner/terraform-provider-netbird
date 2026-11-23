@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -110,25 +111,26 @@ func Test_user_modifyPlanNameEmail(t *testing.T) {
 		state, config tftypes.Value
 		wantError     string
 	}{
-		"service rename, kind left out":    {object("ci", "", true), object("ci2", nil, nil), "Service user kind required"},
-		"service rename, name unknown":     {object("ci", "", true), object(tftypes.UnknownValue, nil, true), "Name not known"},
-		"kind not known":                   {object("ci", "", true), object("ci", nil, tftypes.UnknownValue), "User kind not known"},
-		"email not known":                  {object("alice", "a@example.com", false), object("alice", tftypes.UnknownValue, false), "Email not known"},
-		"regular to service with an email": {object("Alice", "a@example.com", false), object("ci", "a@example.com", true), "Service users have no email"},
-		"current user changes kind":        {current(object("ci", "", true)), object("Alice", "a@example.com", false), "Cannot replace the current user"},
-		"new service user with an email":   {tftypes.NewValue(typ, nil), object("ci", "ci@example.com", true), "Service users have no email"},
-		"current user renamed":             {current(object("ci", "", true)), object("ci2", nil, true), "Cannot replace the current user"},
-		"new regular user without email":   {tftypes.NewValue(typ, nil), object("Alice", nil, nil), "Name and email required"},
-		"new service user without email":   {tftypes.NewValue(typ, nil), object("ci", nil, true), ""},
-		"new regular user with both":       {tftypes.NewValue(typ, nil), object("Alice", "a@example.com", false), ""},
-		"service to regular with an email": {object("ci", "", true), object("Alice", "a@example.com", false), ""},
-		"service to regular without email": {object("ci", "", true), object("ci", nil, false), "Name and email required"},
-		"regular user renamed":             {object("alice", "a@example.com", false), object("alicia", nil, false), "Name cannot be changed"},
-		"email changed":                    {object("ci", "a@example.com", true), object(nil, "b@example.com", true), "Email cannot be changed"},
-		"service user renamed":             {object("ci", "", true), object("ci2", nil, true), ""}, // replaced instead
-		"unchanged name":                   {object("alice", "a@example.com", false), object("alice", "a@example.com", false), ""},
-		"name and email left out":          {object("alice", "a@example.com", false), object(nil, nil, false), ""},
-		"name from an expression":          {object("alice", "a@example.com", false), object(tftypes.UnknownValue, nil, false), "Name not known"},
+		"service rename, kind left out":     {object("ci", "", true), object("ci2", nil, nil), "Service user kind required"},
+		"service rename, name unknown":      {object("ci", "", true), object(tftypes.UnknownValue, nil, true), "Name not known"},
+		"kind not known":                    {object("ci", "", true), object("ci", nil, tftypes.UnknownValue), "User kind not known"},
+		"email not known":                   {object("alice", "a@example.com", false), object("alice", tftypes.UnknownValue, false), "Email not known"},
+		"regular to service with an email":  {object("Alice", "a@example.com", false), object("ci", "a@example.com", true), "Service users have no email"},
+		"current user changes kind":         {current(object("ci", "", true)), object("Alice", "a@example.com", false), "Cannot replace the current user"},
+		"new service user with an email":    {tftypes.NewValue(typ, nil), object("ci", "ci@example.com", true), "Service users have no email"},
+		"current user renamed":              {current(object("ci", "", true)), object("ci2", nil, true), "Cannot replace the current user"},
+		"new regular user without email":    {tftypes.NewValue(typ, nil), object("Alice", nil, nil), "Name and email required"},
+		"new service user without email":    {tftypes.NewValue(typ, nil), object("ci", nil, true), ""},
+		"new regular user with both":        {tftypes.NewValue(typ, nil), object("Alice", "a@example.com", false), ""},
+		"service to regular with an email":  {object("ci", "", true), object("Alice", "a@example.com", false), ""},
+		"service to regular without email":  {object("ci", "", true), object("ci", nil, false), "Name and email required"},
+		"service to regular, email unknown": {object("ci", "", true), object("Alice", tftypes.UnknownValue, false), "Name and email not known"},
+		"regular user renamed":              {object("alice", "a@example.com", false), object("alicia", nil, false), "Name cannot be changed"},
+		"email changed":                     {object("ci", "a@example.com", true), object(nil, "b@example.com", true), "Email cannot be changed"},
+		"service user renamed":              {object("ci", "", true), object("ci2", nil, true), ""}, // replaced instead
+		"unchanged name":                    {object("alice", "a@example.com", false), object("alice", "a@example.com", false), ""},
+		"name and email left out":           {object("alice", "a@example.com", false), object(nil, nil, false), ""},
+		"name from an expression":           {object("alice", "a@example.com", false), object(tftypes.UnknownValue, nil, false), "Name not known"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			req := resource.ModifyPlanRequest{
@@ -180,5 +182,44 @@ func Test_userResourceAPIToTerraform_absentFlag(t *testing.T) {
 	}
 	if !data.IsServiceUser.Equal(types.BoolValue(false)) {
 		t.Errorf("expected false for an absent flag, found %v", data.IsServiceUser)
+	}
+}
+
+// A new user with is_service_user left out is planned as a regular user.
+func Test_user_planRegularByDefault(t *testing.T) {
+	ctx := context.Background()
+	r := &User{}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	values := map[string]tftypes.Value{}
+	for n, at := range typ.AttributeTypes {
+		values[n] = tftypes.NewValue(at, nil)
+	}
+	values["name"] = tftypes.NewValue(tftypes.String, "Alice")
+	values["email"] = tftypes.NewValue(tftypes.String, "a@example.com")
+	config := tftypes.NewValue(typ, values)
+	planned := map[string]tftypes.Value{}
+	for k, v := range values {
+		planned[k] = v
+	}
+	planned["is_service_user"] = tftypes.NewValue(tftypes.Bool, tftypes.UnknownValue)
+	plan := tftypes.NewValue(typ, planned)
+	req := resource.ModifyPlanRequest{
+		Config: tfsdk.Config{Schema: sch.Schema, Raw: config},
+		Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
+		State:  tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(typ, nil)},
+	}
+	resp := resource.ModifyPlanResponse{Plan: req.Plan}
+	r.ModifyPlan(ctx, req, &resp)
+	var got types.Bool
+	if d := resp.Plan.GetAttribute(ctx, path.Root("is_service_user"), &got); d.HasError() || resp.Diagnostics.HasError() {
+		t.Fatal(d, resp.Diagnostics)
+	}
+	if !got.Equal(types.BoolValue(false)) {
+		t.Errorf("expected is_service_user planned false, found %v", got)
 	}
 }

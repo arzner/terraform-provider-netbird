@@ -123,23 +123,32 @@ func Test_User_ServiceUserNameAndKind(t *testing.T) {
 				PlanOnly: true,
 			},
 			{
+				PlanOnly:    true,
 				Config:      config(rName, `email = "someone@example.com"`),
 				ExpectError: regexp.MustCompile(`Email cannot be changed`),
 			},
 			{
 				// A rename replaces the user, and the new one is created as
 				// the configuration says, so the kind must be stated.
+				PlanOnly:    true,
 				Config:      config(rName+"-renamed", ""),
 				ExpectError: regexp.MustCompile(`Service user kind required`),
 			},
 			{
-				Config: config(rName+"-renamed", "is_service_user = true"),
+				// Blocked, then renamed: the replacement is created blocked
+				// too (an update follows the create).
+				Config: config(rName, "is_service_user = true\n  is_blocked = true"),
+				Check:  resource.TestCheckResourceAttr(rNameFull, "is_blocked", "true"),
+			},
+			{
+				Config: config(rName+"-renamed", "is_service_user = true\n  is_blocked = true"),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionDestroyBeforeCreate),
 				}},
 				Check: resource.ComposeAggregateTestCheckFunc(
 					testRecordID(rNameFull, &createdID),
 					resource.TestCheckResourceAttr(rNameFull, "name", rName+"-renamed"),
+					resource.TestCheckResourceAttr(rNameFull, "is_blocked", "true"),
 					func(*terraform.State) error {
 						if createdID == firstID {
 							return fmt.Errorf("the service user kept its ID %s; expected a replacement", createdID)
