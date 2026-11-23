@@ -13,6 +13,11 @@ it is based on.
 - `netbird_account_settings` can be imported with the ID `current`: the account of the token,
   when the token sees exactly one account (#19).
 
+### Changed
+
+- NetBird 0.82 is supported too: the acceptance suite also runs against the newest release of the
+  previous NetBird minor line (v0.82.1 today), and passes with the 0.1.0 provider code (#32).
+
 ## [0.1.0] - 2026-11-23
 
 First release of the fork. Based on upstream `4aa1f36` (v0.0.11 plus [#263](https://github.com/netbirdio/terraform-provider-netbird/pull/263)),
