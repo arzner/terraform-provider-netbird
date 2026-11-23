@@ -229,9 +229,10 @@ func (r *Scim) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		Enabled:           boolDefaultPointer(data.Enabled, nil),
 		GroupPrefixes:     stringListDefaultPointer(ctx, data.GroupPrefixes, nil),
 		UserGroupPrefixes: stringListDefaultPointer(ctx, data.UserGroupPrefixes, nil),
-		// Only a configured connector is sent: the planned value of a left-out
-		// one is prior state, and sending it would revert a change made since.
-		ConnectorId: stringDefaultPointer(config.ConnectorId, nil),
+		// Only a configured connector is sent, with its planned value (which
+		// honours ignore_changes); a left-out one is prior state, and sending it
+		// would revert a change made since.
+		ConnectorId: stringDefaultPointer(configuredOnly(data.ConnectorId, config.ConnectorId), nil),
 	}
 
 	scim, err := r.client.SCIM.Update(ctx, data.Id.ValueString(), scimReq)
@@ -274,4 +275,14 @@ func (r *Scim) Delete(ctx context.Context, req resource.DeleteRequest, resp *res
 
 func (r *Scim) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// configuredOnly returns the planned value when the configuration sets the
+// attribute and null otherwise: whether to send comes from the configuration,
+// what to send from the plan (which honours ignore_changes).
+func configuredOnly(planned, configured types.String) types.String {
+	if configured.IsNull() {
+		return types.StringNull()
+	}
+	return planned
 }
