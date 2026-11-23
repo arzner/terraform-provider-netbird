@@ -403,7 +403,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 									Optional:            true,
 								},
 								"direct_upstream": schema.BoolAttribute{
-									MarkdownDescription: "Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services). The server refuses a loopback, multicast or link-local IP address as the host, and a proxy started with `NB_PROXY_DIRECT_UPSTREAM_BLOCK_PRIVATE` refuses, when it connects, addresses in a fixed list of special-use ranges (private, CGNAT, loopback, link-local, unique local, documentation, multicast and similar); any other address is dialled, publicly reachable or not. Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Applies to HTTP services only: for TCP, UDP and TLS services NetBird stores the flag but does not pass it to the proxy, and the plan warns. Defaults to false.",
+									MarkdownDescription: "Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services). The server refuses a loopback, multicast or link-local IP address as the host (except for a subnet target of a TCP, UDP or TLS service, where it only requires a host), and a proxy started with `NB_PROXY_DIRECT_UPSTREAM_BLOCK_PRIVATE` refuses, when it connects, addresses in a fixed list of special-use ranges (private, CGNAT, loopback, link-local, unique local, documentation, multicast and similar); any other address is dialled, publicly reachable or not. Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Applies to HTTP services only: for TCP, UDP and TLS services NetBird stores the flag but does not pass it to the proxy, and the plan warns. Defaults to false.",
 									Optional:            true,
 								},
 							},
@@ -986,6 +986,13 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 	}
 	out := map[int]ReverseProxyServiceTargetModel{}
 	used := make([]bool, len(planned))
+	// Only targets of one ID are compared, in the API's order.
+	byID := map[string][]int{}
+	for i, l := range live {
+		if !l.TargetId.IsNull() && !l.TargetId.IsUnknown() {
+			byID[l.TargetId.ValueString()] = append(byID[l.TargetId.ValueString()], i)
+		}
+	}
 	// pair matches unpaired targets of the same ID; with onlyOne it pairs a
 	// planned target only when exactly one API target qualifies.
 	pair := func(match func(p, l ReverseProxyServiceTargetModel) bool, onlyOne bool) {
@@ -994,8 +1001,11 @@ func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]Re
 				continue
 			}
 			var found []int
-			for i, l := range live {
-				if _, taken := out[i]; !taken && l.TargetId.Equal(p.TargetId) && match(p, l) {
+			if p.TargetId.IsNull() || p.TargetId.IsUnknown() {
+				continue
+			}
+			for _, i := range byID[p.TargetId.ValueString()] {
+				if _, taken := out[i]; !taken && match(p, live[i]) {
 					found = append(found, i)
 				}
 			}
@@ -1650,7 +1660,10 @@ func planOmittedPaths(ctx context.Context, configured, planned types.List, resp 
 	if len(cfg) != len(plan) {
 		return diags
 	}
+	elements := make([]attr.Value, len(plan))
+	changed := false
 	for i, e := range cfg {
+		elements[i] = plan[i]
 		c, ok := e.(types.Object)
 		p, pok := plan[i].(types.Object)
 		if !ok || !pok || c.IsNull() || c.IsUnknown() || p.IsNull() || p.IsUnknown() {
@@ -1659,9 +1672,23 @@ func planOmittedPaths(ctx context.Context, configured, planned types.List, resp 
 		if cp, ok := c.Attributes()["path"].(types.String); !ok || !cp.IsNull() {
 			continue
 		}
-		if pp, ok := p.Attributes()["path"].(types.String); ok && pp.IsUnknown() {
-			diags.Append(resp.Plan.SetAttribute(ctx, path.Root("targets").AtListIndex(i).AtName("path"), types.StringNull())...)
+		attrs := p.Attributes()
+		if pp, ok := attrs["path"].(types.String); !ok || !pp.IsUnknown() {
+			continue
 		}
+		attrs["path"] = types.StringNull()
+		obj, d := types.ObjectValue(p.AttributeTypes(ctx), attrs)
+		diags.Append(d...)
+		elements[i], changed = obj, true
+	}
+	if !changed || diags.HasError() {
+		return diags
+	}
+	// One write for the whole list: each SetAttribute rebuilds the plan.
+	list, d := types.ListValue(planned.ElementType(ctx), elements)
+	diags.Append(d...)
+	if !diags.HasError() {
+		diags.Append(resp.Plan.SetAttribute(ctx, path.Root("targets"), list)...)
 	}
 	return diags
 }
@@ -1908,7 +1935,7 @@ func targetHostProblems(configured types.List, mode string) diag.Diagnostics {
 		attrs := obj.Attributes()
 		targetType, _ := attrs["target_type"].(types.String)
 		host, _ := attrs["host"].(types.String)
-		if targetType.IsUnknown() || targetType.IsNull() || host.IsUnknown() {
+		if targetType.IsNull() || host.IsUnknown() {
 			continue
 		}
 		direct := 0
@@ -1921,7 +1948,16 @@ func targetHostProblems(configured types.List, mode string) diag.Diagnostics {
 				direct = 1
 			}
 		}
-		if problem := hostProblem(mode, targetType.ValueString(), host.ValueString(), direct); problem != "" {
+		problem := ""
+		switch {
+		case !targetType.IsUnknown():
+			problem = hostProblem(mode, targetType.ValueString(), host.ValueString(), direct)
+		case mode == "http" && direct == 1:
+			// Every target type of an HTTP service checks a direct
+			// upstream host the same way, apart from an empty one.
+			problem = directHostProblem(strings.TrimSpace(host.ValueString()), direct)
+		}
+		if problem != "" {
 			diags.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("host"), "Host not usable",
 				fmt.Sprintf("The server refuses this target's host: %s.", problem))
 		}

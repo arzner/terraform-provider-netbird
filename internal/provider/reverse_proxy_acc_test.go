@@ -1447,6 +1447,31 @@ data "netbird_reverse_proxy_service" "test" {
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 			{
+				// direct_upstream cleared outside Terraform: the refresh shows
+				// it, and the apply sets it again.
+				PreConfig: func() {
+					change := serviceChangedOutside{id: &createdID, change: func(req *api.ServiceRequest) {
+						for i := range *req.Targets {
+							if t := &(*req.Targets)[i]; normalizedPath(t.Path) == "/" && t.Options != nil {
+								off := false
+								t.Options.DirectUpstream = &off
+							}
+						}
+					}}
+					var resp plancheck.CheckPlanResponse
+					change.CheckPlan(context.Background(), plancheck.CheckPlanRequest{}, &resp)
+					if resp.Error != nil {
+						t.Fatalf("clear direct_upstream: %v", resp.Error)
+					}
+				},
+				Config:           config(private),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "targets.0.options.direct_upstream", "true"),
+					onServer("block", true, crowdsec),
+				),
+			},
+			{
 				// Outside HTTP mode only inherit is accepted.
 				Config:      config(private) + l4,
 				ExpectError: regexp.MustCompile(`Access action needs HTTP`),

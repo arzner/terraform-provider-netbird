@@ -802,6 +802,26 @@ func Test_hostProblem(t *testing.T) {
 	if !targetHostProblems(list, "http").HasError() {
 		t.Error("a URL as host must be refused")
 	}
+	// A target type not known yet: an HTTP direct upstream host is checked
+	// the same way for every type, an empty one is left to the type.
+	unknownType := func(host string) types.List {
+		obj, ok := directTarget(host, types.BoolValue(true)).(types.Object)
+		if !ok {
+			t.Fatal("target is not an object")
+		}
+		attrs := obj.Attributes()
+		attrs["target_type"] = types.StringUnknown()
+		return types.ListValueMust(ReverseProxyServiceTargetModel{}.TFType(), []attr.Value{types.ObjectValueMust(obj.AttributeTypes(context.Background()), attrs)})
+	}
+	if !targetHostProblems(unknownType("127.0.0.1"), "http").HasError() {
+		t.Error("loopback with direct_upstream fails for every target type of an HTTP service")
+	}
+	if targetHostProblems(unknownType(""), "http").HasError() {
+		t.Error("an empty host depends on the target type")
+	}
+	if targetHostProblems(unknownType("127.0.0.1"), "tcp").HasError() {
+		t.Error("an L4 subnet target accepts any host, so an unknown type waits")
+	}
 }
 
 func Test_reverseProxyService_directUpstreamWarningWithoutChanges(t *testing.T) {
