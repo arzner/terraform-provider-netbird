@@ -5,6 +5,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"slices"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -142,4 +144,73 @@ func testNameserverGroupResource(rName, ip, port, groups string) string {
 	]
 	groups = %s
 }`, rName, rName, ip, port, groups)
+}
+
+// Test_NameserverGroup_SingleLabelDomain: match domains without a dot, such
+// as "lan", are accepted by the server and now by the plan; a wildcard is
+// refused at plan time, as the server would.
+func Test_NameserverGroup_SingleLabelDomain(t *testing.T) {
+	testE2E(t)
+	rName := "g" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_nameserver_group." + rName
+	var createdID string
+	config := func(domains string) string {
+		return fmt.Sprintf(`resource "netbird_nameserver_group" "%s" {
+  name                   = "%s"
+  nameservers            = [{ ip = "1.1.1.1", ns_type = "udp", port = 53 }]
+  groups                 = [%q]
+  primary                = false
+  domains                = %s
+  search_domains_enabled = true
+}`, rName, rName, e2eGroupAllID(), domains)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().DNS.GetNameserverGroup, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: config(`["lan"]`),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "domains.#", "1"),
+					domainsOnServer(&createdID, "lan"),
+				),
+			},
+			{
+				// A wildcard is refused at plan time. Not the last step, so the
+				// teardown runs with a valid configuration.
+				Config:      config(`["*.lan"]`),
+				ExpectError: regexp.MustCompile(`(?s)Invalid domain name.*Wildcards are not allowed`),
+			},
+			{
+				// Updated in place, with a 255-character name too; listed in
+				// the order an import reads them.
+				Config:           config(fmt.Sprintf(`[%q, "consul.", "lan"]`, longDomain())),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPtr(rNameFull, "id", &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "domains.#", "3"),
+					domainsOnServer(&createdID, longDomain(), "consul.", "lan"),
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+		},
+	})
+}
+
+// domainsOnServer checks the group's match domains on the server.
+func domainsOnServer(id *string, want ...string) resource.TestCheckFunc {
+	return func(*terraform.State) error {
+		ns, err := testClient().DNS.GetNameserverGroup(context.Background(), *id)
+		if err != nil {
+			return err
+		}
+		got := slices.Clone(ns.Domains)
+		slices.Sort(got)
+		if !slices.Equal(got, want) {
+			return fmt.Errorf("domains on the server: expected %v, found %v", want, got)
+		}
+		return nil
+	}
 }

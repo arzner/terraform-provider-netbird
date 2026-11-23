@@ -3,7 +3,7 @@ package provider
 import (
 	"context"
 	"reflect"
-	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -173,44 +173,38 @@ func Test_nameserverGroupTerraformToAPI(t *testing.T) {
 	}
 }
 
-func Test_fqdnRegex(t *testing.T) {
-	cases := []struct {
-		fqdn     string
-		expected bool
-	}{
-		{
-			fqdn:     "example.com",
-			expected: true,
-		},
-		{
-			fqdn:     "test-example.com",
-			expected: true,
-		},
-		{
-			fqdn:     "test-example.com.",
-			expected: true,
-		},
-		{
-			fqdn:     "test",
-			expected: false,
-		},
-		{
-			fqdn:     "company.internal",
-			expected: true,
-		},
-		{
-			fqdn:     "company.internal-dns",
-			expected: true,
-		},
-		{
-			fqdn:     "company,name.internal-dns",
-			expected: false,
-		},
-	}
-
-	for _, c := range cases {
-		if regexp.MustCompile(fqdnRegex).MatchString(c.fqdn) != c.expected {
-			t.Fatalf("Expected %t for fqdn %s", c.expected, c.fqdn)
+func Test_nameserverDomainProblem(t *testing.T) {
+	for d, ok := range map[string]bool{
+		"example.com":          true,
+		"test-example.com":     true,
+		"test-example.com.":    true,
+		"company.internal":     true,
+		"company.internal-dns": true,
+		"lan":                  true, // single-label match domains
+		"consul":               true,
+		"svc.cluster.local":    true,
+		"_tcp.example.com":     true,
+		"bücher.example":       true, // the server converts it to punycode to check it
+		"ABCD1234EFGH5678.gr7.eu-central-1.eks.amazonaws.com": true,
+		"company,name.internal-dns":                           false,
+		"*.example.com":                                       false,
+		"":                                                    false,
+		"-bad.example":                                        false,
+		"a..b":                                                false,
+		// Labels are limited to 63 characters, the whole name only by the
+		// API's 255.
+		strings.Repeat("a", 64) + ".example": false,
+		strings.Repeat("a", 63) + ".example": true,
+		longDomain():                         true,
+	} {
+		if got := nameserverDomainProblem(d) == ""; got != ok {
+			t.Errorf("%q: expected valid %v, found %v (%s)", d, ok, got, nameserverDomainProblem(d))
 		}
 	}
+}
+
+// longDomain is a valid 255-character match domain of 63-character labels.
+func longDomain() string {
+	label := strings.Repeat("a", 63)
+	return label + "." + label + "." + label + "." + strings.Repeat("b", 61) + ".c"
 }
