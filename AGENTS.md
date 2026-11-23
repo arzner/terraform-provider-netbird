@@ -203,9 +203,10 @@ through the shared harness in `e2e_harness_test.go`.
   when the provider spreads an array's item members over the parent block,
   list it in `specNestedFlattened`; when it models an object as one value (an
   ID, a version string), name the member that value holds in `specProjected`.
-  Nested keys are `Component.property`; a key for the request path
-  (`Schema.property.member`) overrides it for that one use of a shared
-  component. Never add an entry without a reason; stale entries fail the test
+  Nested keys are `Component.property`, so every use of a shared component
+  maps the same way; members of a projected value are keyed under the
+  projection (`Schema.property.member`). Two properties may not map to one
+  attribute, and a rename counts only when its attribute exists. Never add an entry without a reason; stale entries fail the test
   too. A new resource gets an entry in `specResources`.
 - **Geolocation stays enabled** in the harness so posture-check location rules
   are actually evaluated. The escape hatch is `NB_E2E_DISABLE_GEOLOCATION=1`; do
