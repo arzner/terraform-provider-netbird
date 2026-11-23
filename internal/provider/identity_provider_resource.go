@@ -183,6 +183,12 @@ func keepKnownType(prior types.String, data *IdentityProviderModel) diag.Diagnos
 	if prior.IsNull() || prior.IsUnknown() || prior.Equal(data.Type) {
 		return diags
 	}
+	// Only OIDC-based types are inferred; google and microsoft are read as
+	// stored, so a change to or from them is real (a connector re-created
+	// outside Terraform) and is kept.
+	if !inferredType[prior.ValueString()] || !inferredType[data.Type.ValueString()] {
+		return diags
+	}
 	diags.AddAttributeWarning(path.Root("type"), "Identity provider type misreported",
 		fmt.Sprintf("The server reports type %q for this provider, which has type %q. NetBird infers the type from the provider's ID and can misread it (#86); the type is kept.", data.Type.ValueString(), prior.ValueString()))
 	data.Type = prior
@@ -239,6 +245,13 @@ func (r *IdentityProvider) ImportState(ctx context.Context, req resource.ImportS
 // v0.82: IdentityProviderType.IsValid). Test_identityProviderTypes checks
 // them against the server source at the pinned version.
 var identityProviderTypes = []string{"adfs", "authentik", "entra", "google", "keycloak", "microsoft", "oidc", "okta", "pocketid", "zitadel"}
+
+// inferredType lists the types the server infers from the connector ID
+// (v0.83, v0.82: inferOIDCProviderType) rather than reading them as stored.
+var inferredType = map[string]bool{
+	"oidc": true, "pocketid": true, "zitadel": true, "entra": true, "okta": true,
+	"authentik": true, "keycloak": true, "adfs": true,
+}
 
 // builtInIssuer lists the types whose issuer the server knows (v0.83, v0.82:
 // IdentityProviderType.HasBuiltInIssuer); every other type needs one.

@@ -334,6 +334,9 @@ func Test_keepKnownType(t *testing.T) {
 		"misread from the ID":    {types.StringValue("keycloak"), types.StringValue("okta"), types.StringValue("keycloak"), true},
 		"import takes the read":  {types.StringNull(), types.StringValue("okta"), types.StringValue("okta"), false},
 		"unknown takes the read": {types.StringUnknown(), types.StringValue("adfs"), types.StringValue("adfs"), false},
+		"oidc misread as adfs":   {types.StringValue("oidc"), types.StringValue("adfs"), types.StringValue("oidc"), true},
+		"google to microsoft":    {types.StringValue("google"), types.StringValue("microsoft"), types.StringValue("microsoft"), false},
+		"oidc to google":         {types.StringValue("oidc"), types.StringValue("google"), types.StringValue("google"), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			data := IdentityProviderModel{Type: tc.read}
