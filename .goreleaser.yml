@@ -27,9 +27,12 @@ builds:
   ignore:
     - goos: darwin
       goarch: '386'
+    # Go 1.26 no longer supports 32-bit ARM on Windows.
+    - goos: windows
+      goarch: arm
   binary: '{{ .ProjectName }}_v{{ .Version }}'
 archives:
-- format: zip
+- formats: [zip]
   name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
 checksum:
   extra_files:
@@ -55,5 +58,9 @@ release:
       name_template: '{{ .ProjectName }}_{{ .Version }}_manifest.json'
   # If you want to manually examine the release before its live, uncomment this line:
   # draft: true
+# The release notes are the tag's CHANGELOG.md section, passed with
+# --release-notes. Disabling the changelog would drop that file too (v0.1.0
+# was published with empty notes that way), so it stays enabled and is never
+# generated from commits.
 changelog:
-  disable: true
+  use: git
