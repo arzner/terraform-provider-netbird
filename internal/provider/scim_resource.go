@@ -42,6 +42,7 @@ type ScimModel struct {
 	Enabled           types.Bool   `tfsdk:"enabled"`
 	GroupPrefixes     types.List   `tfsdk:"group_prefixes"`
 	UserGroupPrefixes types.List   `tfsdk:"user_group_prefixes"`
+	ConnectorId       types.String `tfsdk:"connector_id"`
 	AuthToken         types.String `tfsdk:"auth_token"`
 	LastSyncedAt      types.String `tfsdk:"last_synced_at"`
 }
@@ -74,6 +75,12 @@ func (r *Scim) Schema(ctx context.Context, req resource.SchemaRequest, resp *res
 					stringplanmodifier.UseStateForUnknown(),
 					stringplanmodifier.RequiresReplace(),
 				},
+			},
+			"connector_id": schema.StringAttribute{
+				MarkdownDescription: "Dex connector ID, for setups with the embedded identity provider. Left out, the server's value is kept.",
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"enabled": schema.BoolAttribute{
 				MarkdownDescription: "Indicates whether the integration is enabled",
@@ -133,6 +140,7 @@ func scimAPIToTerraform(ctx context.Context, scim *api.ScimIntegration, data *Sc
 	ret.Append(d...)
 	data.UserGroupPrefixes, d = sortedStringList(ctx, data.UserGroupPrefixes, scim.UserGroupPrefixes)
 	ret.Append(d...)
+	data.ConnectorId = types.StringPointerValue(scim.ConnectorId)
 	// auth_token and prefix are preserved from existing state
 	return ret
 }
@@ -150,6 +158,7 @@ func (r *Scim) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		Prefix:            data.Prefix.ValueString(),
 		GroupPrefixes:     stringListDefaultPointer(ctx, data.GroupPrefixes, nil),
 		UserGroupPrefixes: stringListDefaultPointer(ctx, data.UserGroupPrefixes, nil),
+		ConnectorId:       stringDefaultPointer(data.ConnectorId, nil),
 	}
 
 	scim, err := r.client.SCIM.Create(ctx, scimReq)
@@ -210,10 +219,20 @@ func (r *Scim) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		return
 	}
 
+	var config ScimModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	scimReq := api.UpdateScimIntegrationRequest{
 		Enabled:           boolDefaultPointer(data.Enabled, nil),
 		GroupPrefixes:     stringListDefaultPointer(ctx, data.GroupPrefixes, nil),
 		UserGroupPrefixes: stringListDefaultPointer(ctx, data.UserGroupPrefixes, nil),
+		// Only a configured connector is sent, with its planned value (which
+		// honours ignore_changes); a left-out one is prior state, and sending it
+		// would revert a change made since.
+		ConnectorId: stringDefaultPointer(configuredOnly(data.ConnectorId, config.ConnectorId), nil),
 	}
 
 	scim, err := r.client.SCIM.Update(ctx, data.Id.ValueString(), scimReq)

@@ -20,6 +20,8 @@ it is based on.
   one of the given PEM CA certificates (iOS and Android always fail it). Entries are checked at
   plan time with the server's own parser, and a block needs at least one. Also in the data
   source (#26).
+- `netbird_scim`: `connector_id`, the Dex connector for setups with the embedded identity
+  provider; also in the data source (#27).
 
 ### Changed
 
