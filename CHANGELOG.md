@@ -14,6 +14,12 @@ it is based on.
   is kept, set, the peer moves to it (canonical form only). Also in the `netbird_peer` data
   source (#24).
 
+### Changed
+
+- `netbird_peer` updates start from the live peer and change only the attributes the
+  configuration sets, so a setting changed outside Terraform after the plan (for example SSH)
+  is not reverted; a new IPv6 address is sent in a second request after the others succeed.
+
 ## [0.1.0] - 2026-11-23
 
 First release of the fork. Based on upstream `4aa1f36` (v0.0.11 plus [#263](https://github.com/netbirdio/terraform-provider-netbird/pull/263)),

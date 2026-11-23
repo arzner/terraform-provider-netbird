@@ -275,50 +275,16 @@ func (r *Peer) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		return
 	}
 
-	updateRequest := api.PeerRequest{
-		ApprovalRequired:            &peer.ApprovalRequired,
-		InactivityExpirationEnabled: peer.InactivityExpirationEnabled,
-		LoginExpirationEnabled:      peer.LoginExpirationEnabled,
-		Name:                        peer.Name,
-		SshEnabled:                  peer.SshEnabled,
-	}
-	updateRequired := false
-	if !data.ApprovalRequired.IsUnknown() && data.ApprovalRequired.ValueBool() != peer.ApprovalRequired {
-		updateRequest.ApprovalRequired = data.ApprovalRequired.ValueBoolPointer()
-		updateRequired = true
-	}
-	if !data.InactivityExpirationEnabled.IsUnknown() && data.InactivityExpirationEnabled.ValueBool() != peer.InactivityExpirationEnabled {
-		updateRequest.InactivityExpirationEnabled = data.InactivityExpirationEnabled.ValueBool()
-		updateRequired = true
-	}
-	if !data.LoginExpirationEnabled.IsUnknown() && data.LoginExpirationEnabled.ValueBool() != peer.LoginExpirationEnabled {
-		updateRequest.LoginExpirationEnabled = data.LoginExpirationEnabled.ValueBool()
-		updateRequired = true
-	}
-	if !data.Name.IsUnknown() && data.Name.ValueString() != peer.Name {
-		updateRequest.Name = data.Name.ValueString()
-		updateRequired = true
-	}
-	if !data.SshEnabled.IsUnknown() && data.SshEnabled.ValueBool() != peer.SshEnabled {
-		updateRequest.SshEnabled = data.SshEnabled.ValueBool()
-		updateRequired = true
-	}
 	var config PeerModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if ipv6 := peerIPv6Request(configuredOnly(data.Ipv6, config.Ipv6), peer.Ipv6); ipv6 != nil {
-		updateRequest.Ipv6 = ipv6
-		updateRequired = true
-	}
 
-	if updateRequired {
-		peer, err = r.client.Peers.Update(ctx, peer.Id, updateRequest)
-		if err != nil {
-			resp.Diagnostics.AddError("Error updating Peer", err.Error())
-			return
-		}
+	peer, err = r.applyPeer(ctx, peer, data, config)
+	if err != nil {
+		resp.Diagnostics.AddError("Error updating Peer", err.Error())
+		return
 	}
 
 	resp.Diagnostics.Append(peerAPIToTerraform(ctx, peer, &data)...)
@@ -383,23 +349,12 @@ func (r *Peer) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	// The address is compared with the target peer as it is now, and sent only
-	// when the configuration sets it: an omitted address stays the server's.
-	current, err := r.client.Peers.Get(ctx, data.Id.ValueString())
+	live, err := r.client.Peers.Get(ctx, data.Id.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Error getting Peer", err.Error())
 		return
 	}
-
-	peer, err := r.client.Peers.Update(ctx, data.Id.ValueString(), api.PeerRequest{
-		ApprovalRequired:            data.ApprovalRequired.ValueBoolPointer(),
-		InactivityExpirationEnabled: data.InactivityExpirationEnabled.ValueBool(),
-		LoginExpirationEnabled:      data.LoginExpirationEnabled.ValueBool(),
-		Name:                        data.Name.ValueString(),
-		SshEnabled:                  data.SshEnabled.ValueBool(),
-		Ipv6:                        peerIPv6Request(configuredOnly(data.Ipv6, config.Ipv6), current.Ipv6),
-	})
-
+	peer, err := r.applyPeer(ctx, live, data, config)
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating Peer", err.Error())
 		return
@@ -453,4 +408,60 @@ func peerIPv6Request(planned types.String, current *string) *string {
 		return nil
 	}
 	return planned.ValueStringPointer()
+}
+
+// peerRequest builds a full peer update from the live peer, with the planned
+// value of every attribute the configuration sets: an attribute left out keeps
+// the server's current value even if it changed after the plan. It reports
+// whether the request differs from the live peer.
+func peerRequest(live *api.Peer, plan, config PeerModel) (api.PeerRequest, bool) {
+	approval := live.ApprovalRequired
+	req := api.PeerRequest{
+		ApprovalRequired:            &approval,
+		InactivityExpirationEnabled: live.InactivityExpirationEnabled,
+		LoginExpirationEnabled:      live.LoginExpirationEnabled,
+		Name:                        live.Name,
+		SshEnabled:                  live.SshEnabled,
+	}
+	changed := false
+	setBool := func(cfg, planned types.Bool, target *bool) {
+		if !cfg.IsNull() && !planned.IsUnknown() && planned.ValueBool() != *target {
+			*target = planned.ValueBool()
+			changed = true
+		}
+	}
+	setBool(config.ApprovalRequired, plan.ApprovalRequired, req.ApprovalRequired)
+	setBool(config.InactivityExpirationEnabled, plan.InactivityExpirationEnabled, &req.InactivityExpirationEnabled)
+	setBool(config.LoginExpirationEnabled, plan.LoginExpirationEnabled, &req.LoginExpirationEnabled)
+	setBool(config.SshEnabled, plan.SshEnabled, &req.SshEnabled)
+	if !config.Name.IsNull() && !plan.Name.IsUnknown() && plan.Name.ValueString() != live.Name {
+		req.Name = plan.Name.ValueString()
+		changed = true
+	}
+	return req, changed
+}
+
+// applyPeer applies the plan to a live peer. The IPv6 address goes in a second
+// request after the others succeed: the server moves the address before it
+// validates the rest of an update, so a refused combined update would still
+// move it.
+func (r *Peer) applyPeer(ctx context.Context, live *api.Peer, plan, config PeerModel) (*api.Peer, error) {
+	peer := live
+	if req, changed := peerRequest(peer, plan, config); changed {
+		updated, err := r.client.Peers.Update(ctx, peer.Id, req)
+		if err != nil {
+			return nil, err
+		}
+		peer = updated
+	}
+	if ipv6 := peerIPv6Request(configuredOnly(plan.Ipv6, config.Ipv6), peer.Ipv6); ipv6 != nil {
+		req, _ := peerRequest(peer, plan, config)
+		req.Ipv6 = ipv6
+		updated, err := r.client.Peers.Update(ctx, peer.Id, req)
+		if err != nil {
+			return nil, err
+		}
+		peer = updated
+	}
+	return peer, nil
 }
