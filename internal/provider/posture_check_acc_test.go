@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -202,4 +203,81 @@ func testPostureCheckResource(rName, desc, nbVersion, andVersion, iosVersion, ma
 		mac_path     = "%s"
   }
 }`, rName, rName, desc, nbVersion, andVersion, iosVersion, macVersion, linuxVersion, winVersion, country, city, geoAction, netRange, netRangeAction, processLinux, processWindows, processMac)
+}
+
+// Test_PostureCheck_CertificateCheck creates a posture check that requires a
+// peer certificate chaining to one of two test CAs, checks the server keeps
+// both strings byte for byte, reads the data source, imports it,
+// and replaces the certificate check with a version check in place.
+func Test_PostureCheck_CertificateCheck(t *testing.T) {
+	testE2E(t)
+	rName := "pc" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_posture_check." + rName
+	var createdID string
+	// A fresh read (import) sorts the list, so the configuration uses that order.
+	cas := []string{testCA, testCA2}
+	slices.Sort(cas)
+	withCert := fmt.Sprintf(`resource "netbird_posture_check" %q {
+  name        = %q
+  description = "certificate check"
+  certificate_check {
+    ca_certificates = [%q, %q]
+  }
+}
+data "netbird_posture_check" "test" {
+  id = netbird_posture_check.%s.id
+}`, rName, rName, cas[0], cas[1], rName)
+	withVersion := fmt.Sprintf(`resource "netbird_posture_check" %q {
+  name        = %q
+  description = "certificate check"
+  netbird_version_check {
+    min_version = "0.40.0"
+  }
+}`, rName, rName)
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().PostureChecks.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: withCert,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "certificate_check.ca_certificates.#", "2"),
+					resource.TestCheckResourceAttr(rNameFull, "certificate_check.ca_certificates.0", cas[0]),
+					resource.TestCheckResourceAttr(rNameFull, "certificate_check.ca_certificates.1", cas[1]),
+					resource.TestCheckResourceAttr("data.netbird_posture_check.test", "certificate_check.ca_certificates.#", "2"),
+					func(s *terraform.State) error {
+						pc, err := testClient().PostureChecks.Get(context.Background(), createdID)
+						if err != nil {
+							return err
+						}
+						got := []string(nil)
+						if pc.Checks.CertificateCheck != nil {
+							got = pc.Checks.CertificateCheck.CaCertificates
+						}
+						if !slices.Equal(got, cas) {
+							return fmt.Errorf("certificate check on the server: expected both CAs byte for byte, found %d entries", len(got))
+						}
+						return nil
+					},
+				),
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				Config:           withVersion,
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: func(s *terraform.State) error {
+					pc, err := testClient().PostureChecks.Get(context.Background(), createdID)
+					if err != nil {
+						return err
+					}
+					if pc.Checks.CertificateCheck != nil {
+						return fmt.Errorf("certificate check still on the server")
+					}
+					return nil
+				},
+			},
+		},
+	})
 }

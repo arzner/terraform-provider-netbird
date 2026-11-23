@@ -111,6 +111,16 @@ func (d *PostureCheckDataSource) Schema(ctx context.Context, req datasource.Sche
 				},
 				Computed: true,
 			},
+			"certificate_check": schema.SingleNestedAttribute{
+				MarkdownDescription: "Peer certificate check: the CA certificates the peer's certificate must chain to",
+				Attributes: map[string]schema.Attribute{
+					"ca_certificates": schema.ListAttribute{
+						ElementType: types.StringType,
+						Computed:    true,
+					},
+				},
+				Computed: true,
+			},
 			"process_check": schema.ListNestedAttribute{
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{

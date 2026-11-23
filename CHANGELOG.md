@@ -16,6 +16,10 @@ it is based on.
   `peer_hostname_collision_rejected`, `agent_network_only` and `dashboard_features`, also in
   the data source (#23). `agent_network_only = true` together with
   `dashboard_features.agent_network = false` is rejected at plan time.
+- `netbird_posture_check`: `certificate_check` block, requiring a peer certificate that chains to
+  one of the given PEM CA certificates (iOS and Android always fail it). Entries are checked at
+  plan time with the server's own parser, and a block needs at least one. Also in the data
+  source (#26).
 
 ### Changed
 
