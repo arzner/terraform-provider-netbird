@@ -259,7 +259,7 @@ Optional:
 Optional:
 
 - `custom_headers` (Map of String, Sensitive) Extra headers sent to the backend (HTTP only). Marked sensitive since values commonly carry credentials, e.g. an `Authorization` header.
-- `direct_upstream` (Boolean) Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services, localhost sidecars). Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Defaults to false.
+- `direct_upstream` (Boolean) Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services, localhost sidecars). Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Applies to HTTP services; for TCP/UDP services NetBird v0.83 stores the flag but does not pass it to the proxy. Defaults to false.
 - `path_rewrite` (String) Controls how the request path is rewritten before forwarding. Default strips the matched prefix. "preserve" keeps the full original path. (HTTP only)
 - `proxy_protocol` (Boolean) Send PROXY Protocol v2 header to this backend (TCP/TLS only)
 - `request_timeout` (String) Per-target response timeout as a Go duration string (e.g. "30s", "2m")

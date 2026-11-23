@@ -394,7 +394,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 									Optional:            true,
 								},
 								"direct_upstream": schema.BoolAttribute{
-									MarkdownDescription: "Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services, localhost sidecars). Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Defaults to false.",
+									MarkdownDescription: "Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services, localhost sidecars). Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Applies to HTTP services; for TCP/UDP services NetBird v0.83 stores the flag but does not pass it to the proxy. Defaults to false.",
 									Optional:            true,
 								},
 							},
@@ -910,15 +910,9 @@ func preserveTargetPlanValues(ctx context.Context, planTargets, apiTargets types
 		return apiTargets, ret
 	}
 
-	// One backend can serve several paths, so a target is matched by ID and,
-	// when the ID is not unique, by path too.
-	planByID := make(map[string][]ReverseProxyServiceTargetModel, len(planModels))
-	for _, p := range planModels {
-		planByID[p.TargetId.ValueString()] = append(planByID[p.TargetId.ValueString()], p)
-	}
-
+	matches := matchPlanTargets(planModels, apiModels)
 	for i, apiModel := range apiModels {
-		planModel, ok := matchPlanTarget(planByID[apiModel.TargetId.ValueString()], apiModel)
+		planModel, ok := matches[i]
 		if !ok {
 			continue
 		}
@@ -940,25 +934,45 @@ func preserveTargetPlanValues(ctx context.Context, planTargets, apiTargets types
 	return result, ret
 }
 
-// matchPlanTarget picks the planned target an API target corresponds to: the
-// only one with its ID, or the one with its ID and path (a planned path left
-// out is the server's default "/").
-func matchPlanTarget(candidates []ReverseProxyServiceTargetModel, api ReverseProxyServiceTargetModel) (ReverseProxyServiceTargetModel, bool) {
-	if len(candidates) == 1 {
-		return candidates[0], true
-	}
+// matchPlanTargets pairs each API target with at most one planned target, and
+// each planned target with at most one API target. One backend can serve
+// several paths, so a pair needs the same ID and the same effective path (a
+// left-out path is the server's "/"). A planned target whose path is not
+// known yet pairs with the one remaining API target of its ID. An API target
+// left unpaired keeps its server values, so a change made outside Terraform
+// (a moved path, for example) shows in the next plan.
+func matchPlanTargets(planned, live []ReverseProxyServiceTargetModel) map[int]ReverseProxyServiceTargetModel {
 	path := func(v types.String) string {
-		if v.IsNull() || v.IsUnknown() || v.ValueString() == "" {
+		if v.IsNull() || v.ValueString() == "" {
 			return "/"
 		}
 		return v.ValueString()
 	}
-	for _, c := range candidates {
-		if path(c.Path) == path(api.Path) {
-			return c, true
+	out := map[int]ReverseProxyServiceTargetModel{}
+	used := make([]bool, len(planned))
+	for i, l := range live {
+		for j, p := range planned {
+			if !used[j] && !p.Path.IsUnknown() && p.TargetId.Equal(l.TargetId) && path(p.Path) == path(l.Path) {
+				out[i], used[j] = p, true
+				break
+			}
 		}
 	}
-	return ReverseProxyServiceTargetModel{}, false
+	for j, p := range planned {
+		if used[j] || !p.Path.IsUnknown() {
+			continue
+		}
+		var only []int
+		for i, l := range live {
+			if _, taken := out[i]; !taken && l.TargetId.Equal(p.TargetId) {
+				only = append(only, i)
+			}
+		}
+		if len(only) == 1 {
+			out[only[0]], used[j] = p, true
+		}
+	}
+	return out
 }
 
 // withLiveDirectUpstream keeps the planned options object (the server drops

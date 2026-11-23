@@ -965,7 +965,7 @@ func Test_preserveTargetPlanValues(t *testing.T) {
 			Protocol:   types.StringValue("http"),
 			Enabled:    types.BoolValue(true),
 			Host:       types.StringValue("100.0.219.86"),
-			Path:       types.StringValue("/"),
+			Path:       types.StringValue("/custom"),
 			Options:    types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes),
 		},
 	}
@@ -1526,5 +1526,54 @@ func Test_preserveTargetPlanValues_pathAndDirectUpstream(t *testing.T) {
 				t.Errorf("direct_upstream: expected %v, found %v", tc.want, v)
 			}
 		})
+	}
+}
+
+// A target whose path the server reports differently (moved outside
+// Terraform) is not paired: its server values stay, so the plan shows it.
+func Test_preserveTargetPlanValues_movedPathStaysVisible(t *testing.T) {
+	ctx := context.Background()
+	target := func(path, host string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("peer1"), TargetType: types.StringValue("peer"), Port: types.Int64Value(80),
+			Protocol: types.StringValue("http"), Enabled: types.BoolValue(true), Host: types.StringValue(host),
+			Path: types.StringValue(path), AccessAction: types.StringValue("block"),
+			Options: types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes),
+		}
+	}
+	planned, _ := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), []ReverseProxyServiceTargetModel{target("/admin", "10.0.0.1")})
+	live, _ := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), []ReverseProxyServiceTargetModel{target("/old-admin", "100.0.0.9")})
+	got, d := preserveTargetPlanValues(ctx, planned, live)
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	var out []ReverseProxyServiceTargetModel
+	got.ElementsAs(ctx, &out, false)
+	if out[0].Path.ValueString() != "/old-admin" || out[0].Host.ValueString() != "100.0.0.9" {
+		t.Errorf("a moved target must keep its server values, found %+v", out[0])
+	}
+}
+
+// Two targets of one backend on the same path pair one to one.
+func Test_preserveTargetPlanValues_samePathPairsOnce(t *testing.T) {
+	ctx := context.Background()
+	target := func(port int64, host string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue("peer1"), TargetType: types.StringValue("peer"), Port: types.Int64Value(port),
+			Protocol: types.StringValue("http"), Enabled: types.BoolValue(true), Host: types.StringValue(host),
+			Path: types.StringValue("/"), AccessAction: types.StringValue("inherit"),
+			Options: types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes),
+		}
+	}
+	planned, _ := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), []ReverseProxyServiceTargetModel{target(80, "a.example"), target(81, "b.example")})
+	live, _ := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), []ReverseProxyServiceTargetModel{target(80, "100.0.0.1"), target(81, "100.0.0.2")})
+	got, d := preserveTargetPlanValues(ctx, planned, live)
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	var out []ReverseProxyServiceTargetModel
+	got.ElementsAs(ctx, &out, false)
+	if out[0].Host.ValueString() != "a.example" || out[1].Host.ValueString() != "b.example" {
+		t.Errorf("each planned target pairs once: found %s, %s", out[0].Host.ValueString(), out[1].Host.ValueString())
 	}
 }
