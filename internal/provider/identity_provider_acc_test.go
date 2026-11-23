@@ -135,6 +135,25 @@ func Test_IdentityProvider_TypesAddedInNetBird(t *testing.T) {
 							idpTypeOnServer(&createdID, idpType),
 						),
 					},
+					{
+						// A rename updates in place: same ID, same type.
+						Config:           testIdentityProviderResource(rName, idpType+"-renamed", idpType, "client-id", "client-secret", "https://oauth.id.jumpcloud.com/"),
+						ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{testExpectUpdateInPlace(rNameFull)}},
+						Check: resource.ComposeAggregateTestCheckFunc(
+							resource.TestCheckResourceAttrPtr(rNameFull, "id", &createdID),
+							idpTypeOnServer(&createdID, idpType),
+							func(*terraform.State) error {
+								idp, err := testClient().IdentityProviders.Get(context.Background(), createdID)
+								if err != nil {
+									return err
+								}
+								if idp.Name != idpType+"-renamed" {
+									return fmt.Errorf("name on the server: expected %s-renamed, found %s", idpType, idp.Name)
+								}
+								return nil
+							},
+						),
+					},
 					{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"client_secret"}},
 				},
 			})
