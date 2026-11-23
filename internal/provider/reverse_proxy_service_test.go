@@ -1502,7 +1502,7 @@ func Test_preserveTargetPlanValues_pathAndDirectUpstream(t *testing.T) {
 	}{
 		"false as written while off":  {options(types.BoolValue(false)), nullOpts, types.BoolValue(false)},
 		"switched on outside":         {options(types.BoolValue(false)), options(types.BoolValue(true)), types.BoolValue(true)},
-		"switched off outside":        {options(types.BoolValue(true)), nullOpts, types.BoolNull()},
+		"switched off outside":        {options(types.BoolValue(true)), nullOpts, types.BoolNull()}, // options null
 		"left out, switched on":       {options(types.BoolNull()), options(types.BoolValue(true)), types.BoolValue(true)},
 		"left out, off stays omitted": {options(types.BoolNull()), nullOpts, types.BoolNull()},
 	} {
@@ -1521,6 +1521,15 @@ func Test_preserveTargetPlanValues_pathAndDirectUpstream(t *testing.T) {
 			}
 			if !out[1].Options.IsNull() {
 				t.Errorf("/public must keep no options, found %v", out[1].Options)
+			}
+			// With no options left on the server the parent is null unless the
+			// planned object sets only defaults.
+			wantNull := tc.liveDirect.IsNull() && tc.plannedDirect.Attributes()["direct_upstream"].Equal(types.BoolValue(true))
+			if out[0].Options.IsNull() != wantNull {
+				t.Fatalf("options: expected null %v, found %v", wantNull, out[0].Options)
+			}
+			if wantNull {
+				return
 			}
 			if v := out[0].Options.Attributes()["direct_upstream"]; !v.Equal(tc.want) {
 				t.Errorf("direct_upstream: expected %v, found %v", tc.want, v)
@@ -1765,8 +1774,11 @@ func Test_reconcileOptions(t *testing.T) {
 		t.Errorf("a planned false stays while the server has none, found %v", a["skip_tls_verify"])
 	}
 	got, _ = reconcileOptions(options(s("5s"), n, types.BoolValue(true)), types.ObjectNull(optsType.AttrTypes))
-	a = got.Attributes()
-	if !a["request_timeout"].IsNull() || !a["skip_tls_verify"].IsNull() {
-		t.Errorf("values the server does not have must not stay, found %v", a)
+	if !got.IsNull() {
+		t.Errorf("with no options on the server, options that set more than defaults must read as null, found %v", got)
+	}
+	got, _ = reconcileOptions(options(n, n, types.BoolValue(false)), types.ObjectNull(optsType.AttrTypes))
+	if got.IsNull() || !got.Attributes()["skip_tls_verify"].Equal(types.BoolValue(false)) {
+		t.Errorf("options that set only defaults stay as planned, found %v", got)
 	}
 }

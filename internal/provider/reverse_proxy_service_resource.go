@@ -794,25 +794,25 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 			arModel.AllowedCidrs, d = sortedStringList(ctx, objectListAttr(data.AccessRestrictions, "allowed_cidrs"), *svc.AccessRestrictions.AllowedCidrs)
 			ret.Append(d...)
 		} else {
-			arModel.AllowedCidrs = types.ListNull(types.StringType)
+			arModel.AllowedCidrs = emptyOrNull(objectListAttr(data.AccessRestrictions, "allowed_cidrs"))
 		}
 		if svc.AccessRestrictions.BlockedCidrs != nil {
 			arModel.BlockedCidrs, d = sortedStringList(ctx, objectListAttr(data.AccessRestrictions, "blocked_cidrs"), *svc.AccessRestrictions.BlockedCidrs)
 			ret.Append(d...)
 		} else {
-			arModel.BlockedCidrs = types.ListNull(types.StringType)
+			arModel.BlockedCidrs = emptyOrNull(objectListAttr(data.AccessRestrictions, "blocked_cidrs"))
 		}
 		if svc.AccessRestrictions.AllowedCountries != nil {
 			arModel.AllowedCountries, d = sortedStringList(ctx, objectListAttr(data.AccessRestrictions, "allowed_countries"), *svc.AccessRestrictions.AllowedCountries)
 			ret.Append(d...)
 		} else {
-			arModel.AllowedCountries = types.ListNull(types.StringType)
+			arModel.AllowedCountries = emptyOrNull(objectListAttr(data.AccessRestrictions, "allowed_countries"))
 		}
 		if svc.AccessRestrictions.BlockedCountries != nil {
 			arModel.BlockedCountries, d = sortedStringList(ctx, objectListAttr(data.AccessRestrictions, "blocked_countries"), *svc.AccessRestrictions.BlockedCountries)
 			ret.Append(d...)
 		} else {
-			arModel.BlockedCountries = types.ListNull(types.StringType)
+			arModel.BlockedCountries = emptyOrNull(objectListAttr(data.AccessRestrictions, "blocked_countries"))
 		}
 		if svc.AccessRestrictions.CrowdsecMode != nil {
 			arModel.CrowdsecMode = types.StringValue(string(*svc.AccessRestrictions.CrowdsecMode))
@@ -1038,6 +1038,16 @@ func reconcileOptions(planned, live types.Object) (types.Object, diag.Diagnostic
 		liveAttrs = live.Attributes()
 	}
 	attrs := planned.Attributes()
+	if liveAttrs == nil {
+		// The server reports no options: keep the planned object only if it
+		// sets nothing but defaults, otherwise the change shows as null.
+		for name, plannedValue := range attrs {
+			if !sameOption(name, plannedValue, nullOf(plannedValue)) {
+				return types.ObjectNull(planned.AttributeTypes(context.Background())), nil
+			}
+		}
+		return planned, nil
+	}
 	for name, plannedValue := range attrs {
 		liveValue, ok := liveAttrs[name]
 		if !ok {
@@ -1477,9 +1487,8 @@ func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.V
 	}
 	// Without state a left-out action reads as inherit, so only configured
 	// actions can fail here.
-	actions := targetActions(data.Targets, nil)
+	actions := targetActions(data.Targets, nil, false)
 	resp.Diagnostics.Append(actions.problems(private, mode)...)
-	resp.Diagnostics.Append(directUpstreamHostProblems(data.Targets)...)
 	if !private {
 		return
 	}
@@ -1550,11 +1559,12 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 			return
 		}
 	}
-	actions := targetActions(config.Targets, existing)
+	actions := targetActions(config.Targets, existing, true)
 	if !create {
 		resp.Diagnostics.Append(actions.keptProblems()...)
 	}
 	targetProblems := actions.problems(private, modeKnown)
+	resp.Diagnostics.Append(targetHostProblems(config.Targets, modeKnown)...)
 	if !private {
 		resp.Diagnostics.Append(targetProblems...)
 		return
@@ -1586,6 +1596,15 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 				"public; that is also needed for -replace, which plans against the existing service first.")
 	}
 	resp.Diagnostics.Append(problems...)
+}
+
+// emptyOrNull keeps a prior empty list where the server omits the list: an
+// empty list and an absent one mean the same to it.
+func emptyOrNull(prior types.List) types.List {
+	if !prior.IsNull() && !prior.IsUnknown() && len(prior.Elements()) == 0 {
+		return prior
+	}
+	return types.ListNull(types.StringType)
 }
 
 // holdsNothing reports whether a known object sets no attribute: each is
@@ -1633,7 +1652,11 @@ type targetAccessActions struct {
 // path is taken at most once, in target order. The targets are followed in
 // order up to the first one whose path is not known at plan time, since that
 // one could take any current path; actions after it stay unknown.
-func targetActions(configured types.List, existing []ReverseProxyServiceTargetModel) targetAccessActions {
+//
+// omittedPathIsRoot says whether a left-out path is "/": on a create or an
+// update it is (nothing is sent and the server uses "/"), but without a plan
+// it may stand for a path kept unchanged from state.
+func targetActions(configured types.List, existing []ReverseProxyServiceTargetModel, omittedPathIsRoot bool) targetAccessActions {
 	var out targetAccessActions
 	if configured.IsNull() || configured.IsUnknown() {
 		return out
@@ -1652,7 +1675,7 @@ func targetActions(configured types.List, existing []ReverseProxyServiceTargetMo
 			continue
 		}
 		attrs := obj.Attributes()
-		if p, ok := attrs["path"].(types.String); ok && !p.IsUnknown() {
+		if p, ok := attrs["path"].(types.String); ok && !p.IsUnknown() && (omittedPathIsRoot || !p.IsNull()) {
 			t.path, t.pathKnown = targetLocation(p), true
 		}
 		if en, ok := attrs["enabled"].(types.Bool); ok && !en.IsUnknown() {
@@ -1819,13 +1842,17 @@ func accessActionPathProblem(p string) string {
 	return ""
 }
 
-// directUpstreamHostProblems refuses a configured host the server rejects on
-// a target with direct_upstream (v0.83, v0.82: validateDirectUpstreamHost):
-// whitespace or a slash, a port, an IPv6 zone, or a loopback, multicast or
-// link-local address.
-func directUpstreamHostProblems(configured types.List) diag.Diagnostics {
+// targetHostProblems refuses a configured host the server rejects, or one it
+// accepts but the proxy cannot dial, for the service's mode (v0.83, v0.82:
+// validateDirectUpstreamHost, validateSubnetTarget, validateL4Target). The
+// server checks a trimmed copy but dials the host as written, so whitespace
+// anywhere is refused where the host is dialled: with direct_upstream, and
+// always for subnet targets. Peer, host and domain targets without
+// direct_upstream get the looked-up address, so their host is not checked.
+// mode is "" when not known, and then nothing is checked.
+func targetHostProblems(configured types.List, mode string) diag.Diagnostics {
 	var diags diag.Diagnostics
-	if configured.IsNull() || configured.IsUnknown() {
+	if mode == "" || configured.IsNull() || configured.IsUnknown() {
 		return diags
 	}
 	for i, e := range configured.Elements() {
@@ -1834,33 +1861,63 @@ func directUpstreamHostProblems(configured types.List) diag.Diagnostics {
 			continue
 		}
 		attrs := obj.Attributes()
-		opts, ok := attrs["options"].(types.Object)
-		if !ok || opts.IsNull() || opts.IsUnknown() {
+		targetType, _ := attrs["target_type"].(types.String)
+		host, _ := attrs["host"].(types.String)
+		if targetType.IsUnknown() || targetType.IsNull() || host.IsUnknown() || host.IsNull() {
 			continue
 		}
-		direct, ok := opts.Attributes()["direct_upstream"].(types.Bool)
-		host, hostOK := attrs["host"].(types.String)
-		if !ok || direct.IsUnknown() || !direct.ValueBool() || !hostOK || host.IsNull() || host.IsUnknown() {
-			continue
+		direct := false
+		if opts, ok := attrs["options"].(types.Object); ok && !opts.IsNull() && !opts.IsUnknown() {
+			v, ok := opts.Attributes()["direct_upstream"].(types.Bool)
+			if ok && v.IsUnknown() {
+				continue
+			}
+			direct = ok && v.ValueBool()
 		}
-		h := strings.TrimSpace(host.ValueString())
-		problem := ""
-		if h == "" {
-			continue
-		} else if strings.ContainsAny(h, " \t/") {
-			problem = "it contains whitespace or a slash"
-		} else if _, _, err := net.SplitHostPort(h); err == nil {
-			problem = "it includes a port (set port instead)"
-		} else if ip, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")); err == nil &&
-			(ip.Zone() != "" || ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast()) {
-			problem = "loopback, multicast, link-local and zoned addresses are refused"
-		}
-		if problem != "" {
-			diags.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("host"), "Host not usable with direct_upstream",
-				fmt.Sprintf("With direct_upstream = true the server refuses host %q: %s.", host.ValueString(), problem))
+		if problem := hostProblem(mode, targetType.ValueString(), host.ValueString(), direct); problem != "" {
+			diags.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("host"), "Host not usable",
+				fmt.Sprintf("The server refuses or cannot dial host %q for this target: %s.", host.ValueString(), problem))
 		}
 	}
 	return diags
+}
+
+// hostProblem returns why host does not work for a target, or "".
+func hostProblem(mode, targetType, host string, direct bool) string {
+	subnet := targetType == "subnet"
+	if !subnet && !direct {
+		return ""
+	}
+	trimmed := strings.TrimSpace(host)
+	if subnet && trimmed == "" {
+		return "a subnet target needs a host"
+	}
+	if trimmed == "" {
+		return "" // the server fills in the looked-up address
+	}
+	if strings.IndexFunc(host, unicode.IsSpace) >= 0 {
+		return "it contains whitespace"
+	}
+	if subnet && mode != "http" {
+		return "" // L4 subnet targets need only a host
+	}
+	if strings.Contains(host, "/") {
+		return "it contains a slash"
+	}
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return "it includes a port (set port instead)"
+	}
+	ip, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"))
+	if err != nil {
+		return ""
+	}
+	if ip.Zone() != "" {
+		return "IPv6 zones are refused"
+	}
+	if direct && (ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast()) {
+		return "with direct_upstream, loopback, multicast and link-local addresses are refused"
+	}
+	return ""
 }
 
 // directUpstreamWarnings flags direct_upstream on an L4 service: NetBird

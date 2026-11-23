@@ -592,6 +592,17 @@ func Test_reverseProxyService_targetAccessActionPlan(t *testing.T) {
 			plan:      vals{"private": off, "mode": http, "targets": targets(target("", unknown), target("/admin", unknown), target("/admin", "inherit"))},
 			wantError: "targets[2].path",
 		},
+		"no-op with a path left out next to a controlled one": {
+			state:  vals{"private": off, "mode": http, "targets": targets(target("/", "inherit"), target("/admin", "block"))},
+			config: vals{"targets": targets(target("", "inherit"), target("", "block"))},
+			plan:   vals{"private": off, "mode": http, "targets": targets(target("/", "inherit"), target("/admin", "block"))},
+		},
+		"update with a path left out next to a controlled one": {
+			state:     vals{"private": off, "mode": http, "targets": targets(target("/", "inherit"), target("/admin", "block"))},
+			config:    vals{"name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target("", "inherit"), target("", "block"))},
+			plan:      vals{"private": off, "mode": http, "name": tftypes.NewValue(tftypes.String, "new"), "targets": targets(target(unknownPath, "inherit"), target(unknownPath, "block"))},
+			wantError: "targets[1].path",
+		},
 		"block on a relative path": {
 			config:    vals{"targets": targets(target("admin", "block"))},
 			plan:      vals{"private": off, "targets": targets(target("admin", "block"))},
@@ -729,21 +740,38 @@ func directTarget(host string, direct attr.Value) attr.Value {
 	return types.ObjectValueMust(targetType.AttrTypes, attrs)
 }
 
-func Test_directUpstreamHostProblems(t *testing.T) {
-	on := types.BoolValue(true)
-	for host, want := range map[string]bool{
-		"127.0.0.1": true, "[::1]": true, "224.0.0.1": true, "169.254.1.1": true, "fe80::1%eth0": true,
-		"10.0.0.5:80": true, "a b": true, "a/b": true,
-		"10.0.0.5": false, "backend.lan": false, "2001:db8::1": false, "": false,
+func Test_hostProblem(t *testing.T) {
+	for _, tc := range []struct {
+		mode, targetType, host string
+		direct, want           bool
+	}{
+		{"http", "peer", "127.0.0.1", true, true},
+		{"http", "peer", "[::1]", true, true},
+		{"http", "host", "224.0.0.1", true, true},
+		{"http", "domain", "169.254.1.1", true, true},
+		{"http", "peer", "fe80::1%eth0", true, true},
+		{"http", "peer", "10.0.0.5:80", true, true},
+		{"http", "peer", "a b", true, true},
+		{"http", "peer", "backend.lan ", true, true},
+		{"http", "peer", "a/b", true, true},
+		{"http", "peer", "10.0.0.5", true, false},
+		{"http", "peer", "backend.lan", true, false},
+		{"http", "peer", "2001:db8::1", true, false},
+		{"http", "peer", "", true, false},
+		{"http", "peer", "127.0.0.1", false, false}, // replaced by the looked-up address
+		{"http", "subnet", "", false, true},
+		{"http", "subnet", "backend.lan ", false, true},
+		{"http", "subnet", "fe80::1%eth0", false, true},
+		{"http", "subnet", "169.254.1.1", false, false},
+		{"http", "subnet", "169.254.1.1", true, true},
+		{"tcp", "subnet", "169.254.1.1", true, false}, // L4 subnet targets need only a host
+		{"tcp", "subnet", "", true, true},
+		{"tcp", "subnet", "backend.lan ", false, true},
+		{"tcp", "peer", "127.0.0.1", true, true},
 	} {
-		list := types.ListValueMust(ReverseProxyServiceTargetModel{}.TFType(), []attr.Value{directTarget(host, on)})
-		if got := directUpstreamHostProblems(list).HasError(); got != want {
-			t.Errorf("host %q: expected error %v, found %v", host, want, got)
+		if got := hostProblem(tc.mode, tc.targetType, tc.host, tc.direct) != ""; got != tc.want {
+			t.Errorf("%s %s %q direct=%t: expected a problem %v, found %v", tc.mode, tc.targetType, tc.host, tc.direct, tc.want, got)
 		}
-	}
-	off := types.ListValueMust(ReverseProxyServiceTargetModel{}.TFType(), []attr.Value{directTarget("127.0.0.1", types.BoolValue(false))})
-	if directUpstreamHostProblems(off).HasError() {
-		t.Error("without direct_upstream the server ignores the host")
 	}
 }
 
@@ -817,5 +845,30 @@ func Test_reverseProxyService_emptyRestrictionsKept(t *testing.T) {
 				t.Fatalf("expected null %v, found %v", tc.wantNull, data.AccessRestrictions)
 			}
 		})
+	}
+}
+
+func Test_reverseProxyService_emptyListBesideCrowdsec(t *testing.T) {
+	ctx := context.Background()
+	arType := ReverseProxyAccessRestrictionsModel{}.TFType()
+	prior, d := types.ObjectValueFrom(ctx, arType.AttrTypes, ReverseProxyAccessRestrictionsModel{
+		AllowedCidrs: types.ListValueMust(types.StringType, []attr.Value{}), BlockedCidrs: types.ListNull(types.StringType),
+		AllowedCountries: types.ListNull(types.StringType), BlockedCountries: types.ListNull(types.StringType),
+		CrowdsecMode: types.StringValue("enforce"),
+	})
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	mode := api.AccessRestrictionsCrowdsecMode("enforce")
+	data := ReverseProxyServiceModel{AccessRestrictions: prior}
+	if d := reverseProxyServiceAPIToTerraform(ctx, &api.Service{Id: "s", AccessRestrictions: &api.AccessRestrictions{CrowdsecMode: &mode}}, &data); d.HasError() {
+		t.Fatal(d)
+	}
+	attrs := data.AccessRestrictions.Attributes()
+	if l, ok := attrs["allowed_cidrs"].(types.List); !ok || l.IsNull() || len(l.Elements()) != 0 {
+		t.Errorf("a planned empty list stays empty where the server omits it, found %v", attrs["allowed_cidrs"])
+	}
+	if !attrs["blocked_cidrs"].IsNull() {
+		t.Errorf("a list left out stays null, found %v", attrs["blocked_cidrs"])
 	}
 }

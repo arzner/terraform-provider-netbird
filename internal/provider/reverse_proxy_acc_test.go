@@ -1205,6 +1205,8 @@ func Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream(t *testing.T) {
 		firstAction string // the first target's access_action line
 		direct      bool   // direct_upstream on the first target of a private service
 		crowdsec    string // "" leaves access_restrictions out, "null" sets crowdsec_mode = null
+		emptyCidrs  bool   // allowed_cidrs = [] beside the mode
+		adminNoPath bool   // the /admin target leaves path out (kept from state)
 		extra       string // more configuration
 	}
 	config := func(c svc) string {
@@ -1220,22 +1222,31 @@ func Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream(t *testing.T) {
 			if c.crowdsec == "null" {
 				mode = "null"
 			}
+			cidrs := ""
+			if c.emptyCidrs {
+				cidrs = `
+    allowed_cidrs = []`
+			}
 			restrictions = fmt.Sprintf(`
   access_restrictions = {
-    crowdsec_mode = %s
+    crowdsec_mode = %s%s
   }
-`, mode)
+`, mode, cidrs)
 		}
 		admin := ""
 		if c.adminPort != 0 {
+			adminPath := `
+    path        = "/admin"`
+			if c.adminNoPath {
+				adminPath = ""
+			}
 			admin = fmt.Sprintf(`, {
     target_id   = %q
     target_type = "peer"
     port        = %d
-    protocol    = "http"
-    path        = "/admin"
+    protocol    = "http"%s
     %s
-  }`, peerID1, c.adminPort, c.adminAction)
+  }`, peerID1, c.adminPort, adminPath, c.adminAction)
 		}
 		return fmt.Sprintf(`
 resource "netbird_reverse_proxy_service" %q {
@@ -1331,9 +1342,15 @@ resource "netbird_reverse_proxy_service" "l4" {
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 			{
+				// A path left out is kept from state when nothing changes, so it
+				// is not a second target at "/".
+				Config:   config(svc{adminAction: `access_action = "block"`, adminPort: 8081, crowdsec: crowdsec, adminNoPath: true}),
+				PlanOnly: true,
+			},
+			{
 				// The action and, on a capable cluster, the CrowdSec mode change
-				// in place.
-				Config:           config(svc{adminAction: `access_action = "bypass"`, adminPort: 8081, crowdsec: crowdsecNext}),
+				// in place; an empty list beside the mode stays empty.
+				Config:           config(svc{adminAction: `access_action = "bypass"`, adminPort: 8081, crowdsec: crowdsecNext, emptyCidrs: true}),
 				ConfigPlanChecks: updatesInPlace(rNameFull),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "bypass"),
@@ -1343,7 +1360,7 @@ resource "netbird_reverse_proxy_service" "l4" {
 			},
 			{
 				// Left out, the action stays as it is: no change planned.
-				Config:   config(svc{adminPort: 8081, crowdsec: crowdsecNext}),
+				Config:   config(svc{adminPort: 8081, crowdsec: crowdsecNext, emptyCidrs: true}),
 				PlanOnly: true,
 			},
 			{

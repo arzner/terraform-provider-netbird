@@ -41,7 +41,9 @@ it is based on.
   is not a canonical prefix; two enabled targets on one path once a target has `bypass` or
   `block`; while a target has `bypass` or `block`, an update that sets no action and drops that
   path, or that leaves an action out with several targets on one path; and a loopback,
-  multicast, link-local or malformed host with `direct_upstream`. `direct_upstream` on a TCP, UDP
+  multicast, link-local or malformed host with `direct_upstream` (the rules of the service's
+  mode and target type). Options cleared on the server read as no options, not as an object
+  of nulls that plans an update. `direct_upstream` on a TCP, UDP
   or TLS service, which NetBird stores but does not apply, gets a plan warning.
 
 ### Changed
@@ -62,7 +64,9 @@ it is based on.
 ### Fixed
 
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
-  `crowdsec_mode = null`) no longer fails the apply with an inconsistent result.
+  `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
+  the apply with an inconsistent result. A subnet target's host with whitespace, which the server
+  accepts but the proxy cannot dial, is refused at plan time.
 
 ## [0.1.0] - 2026-11-23
 
