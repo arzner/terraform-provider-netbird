@@ -25,6 +25,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
@@ -366,7 +367,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 							Default:             booldefault.StaticBool(true),
 						},
 						"access_action": schema.StringAttribute{
-							MarkdownDescription: "Access action once this target's path prefix is selected (HTTP services only): `inherit` applies the service's authentication, `bypass` skips it (not allowed for private services), `block` denies access. Left out, the server keeps the current action of the target at this path (`inherit` for a new one). While a current target has `bypass` or `block`, an update that sets no action on any target must keep that target's path, and if two current targets share a path, every target of the update must set its action; the plan reports both. `bypass` and `block` are refused for TCP, UDP and TLS services, need a canonical path prefix, and need each enabled target on its own path. Once any enabled target has `bypass` or `block`, the proxy checks request paths strictly for the whole service, also for targets that inherit: a request whose path has `//`, `\\`, `;`, dot segments, control characters or an escaped `/`, `\\`, `.` or `%` gets HTTP 400.",
+							MarkdownDescription: "Access action once this target's path prefix is selected (HTTP services only): `inherit` applies the service's authentication, `bypass` skips it (not allowed for private services), `block` denies access. Left out, the server keeps the current action of the target at this path (`inherit` for a new one). While a current target has `bypass` or `block`, an update that sets no action on any target must keep that target's path, and if two current targets share a path, every target of the update must set its action. The plan warns about both, since it cannot tell an update from a replacement, and an in-place update stops before writing anything. `bypass` and `block` are refused for TCP, UDP and TLS services, need a canonical path prefix, and need each enabled target on its own path. Once any enabled target has `bypass` or `block`, the proxy checks request paths strictly for the whole service, also for targets that inherit: a request whose path has `//`, `\\`, `;`, dot segments, control characters or an escaped `/`, `\\`, `.` or `%` gets HTTP 400.",
 							Optional:            true,
 							Computed:            true,
 							Validators:          []validator.String{stringvalidator.OneOf("inherit", "bypass", "block")},
@@ -1438,6 +1439,10 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 		resp.Diagnostics.AddError("Private service without usable access groups", err.Error())
 		return
 	}
+	resp.Diagnostics.Append(keptActionProblems(ctx, req.Config, serviceReq, live)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 
 	svc, err := r.client.ReverseProxyServices.Update(ctx, data.Id.ValueString(), serviceReq)
 	if err != nil {
@@ -1515,7 +1520,7 @@ func (r *ReverseProxyService) ValidateConfig(ctx context.Context, req resource.V
 	// Without state a left-out action reads as inherit, so only configured
 	// actions can fail here.
 	actions := targetActions(data.Targets, nil, false)
-	privacy, other := actions.problems(private, mode)
+	privacy, other, _ := actions.problems(private, mode)
 	resp.Diagnostics.Append(privacy...)
 	resp.Diagnostics.Append(other...)
 	if !private {
@@ -1597,12 +1602,14 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	// A left-out path is "/" only on a write; otherwise it may be kept.
 	actions := targetActions(config.Targets, existing, writes)
 	if !create && writes {
-		resp.Diagnostics.Append(actions.keptProblems()...)
+		resp.Diagnostics.Append(inPlaceOnly(actions.keptProblems())...)
 	}
 	var targetPrivacy, targetProblems diag.Diagnostics
 	if writes {
 		resp.Diagnostics.Append(planOmittedPaths(ctx, config.Targets, plan.Targets, resp)...)
-		targetPrivacy, targetProblems = actions.problems(private, modeKnown)
+		var updateOnly diag.Diagnostics
+		targetPrivacy, targetProblems, updateOnly = actions.problems(private, modeKnown)
+		resp.Diagnostics.Append(inPlaceOnly(updateOnly)...)
 		resp.Diagnostics.Append(targetHostProblems(config.Targets, modeKnown)...)
 	}
 	if !private {
@@ -1864,16 +1871,23 @@ func (a targetAccessActions) keptProblems() diag.Diagnostics {
 // two enabled targets on one path once any enabled target has a non-inherit
 // action. mode is "" when not known.
 //
-// The bypass errors come back apart from the others: only they are caused by
-// the service being private.
-func (a targetAccessActions) problems(private bool, mode string) (privacy, diags diag.Diagnostics) {
-	strict := false
+// A configured bypass on a private service comes back as privacy, the only
+// error the service being private causes; errors that rest on an action the
+// server keeps from a current target come back as updateOnly.
+func (a targetAccessActions) problems(private bool, mode string) (privacy, diags, updateOnly diag.Diagnostics) {
+	// strict is set by an action the request carries or defaults to;
+	// keptStrict by one the server only keeps on an update.
+	strict, keptStrict := false, false
 	for i, t := range a.targets {
 		if t.action == "" || t.action == "inherit" {
 			continue
 		}
 		if t.enabled == 1 {
-			strict = true
+			if t.kept {
+				keptStrict = true
+			} else {
+				strict = true
+			}
 		}
 		at := path.Root("targets").AtListIndex(i).AtName("access_action")
 		switch {
@@ -1883,7 +1897,7 @@ func (a targetAccessActions) problems(private bool, mode string) (privacy, diags
 					t.action, mode))
 			continue
 		case private && t.action == "bypass" && t.kept:
-			privacy.AddAttributeError(at, "Bypass not allowed on a private service",
+			updateOnly.AddAttributeError(at, "Bypass not allowed on a private service",
 				"The current target at this path has access_action = \"bypass\" on the server, and this target keeps it "+
 					"while access_action is left out, but a private service cannot have it. Set access_action = \"inherit\" or \"block\".")
 		case private && t.action == "bypass":
@@ -1897,8 +1911,8 @@ func (a targetAccessActions) problems(private bool, mode string) (privacy, diags
 			}
 		}
 	}
-	if !strict || (mode != "" && mode != "http") {
-		return privacy, diags
+	if (!strict && !keptStrict) || (mode != "" && mode != "http") {
+		return privacy, diags, updateOnly
 	}
 	seen := map[string]int{}
 	for i, t := range a.targets {
@@ -1906,14 +1920,68 @@ func (a targetAccessActions) problems(private bool, mode string) (privacy, diags
 			continue
 		}
 		if first, dup := seen[t.path]; dup {
-			diags.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("path"), "Duplicate target path",
+			d := diag.NewAttributeErrorDiagnostic(path.Root("targets").AtListIndex(i).AtName("path"), "Duplicate target path",
 				fmt.Sprintf("Targets %d and %d are both enabled at one path, which the server refuses once a target has an "+
 					"access_action other than \"inherit\". Give each enabled target its own path.", first, i))
+			if strict {
+				diags.Append(d)
+			} else {
+				updateOnly.Append(d)
+			}
 			continue
 		}
 		seen[t.path] = i
 	}
-	return privacy, diags
+	return privacy, diags, updateOnly
+}
+
+// keptActionProblems refuses, before the update is sent, what the server
+// refuses when it keeps left-out actions from the live targets; the plan
+// only warned, since it could not tell an update from a replacement.
+func keptActionProblems(ctx context.Context, cfg tfsdk.Config, req api.ServiceRequest, live *api.Service) diag.Diagnostics {
+	var diags diag.Diagnostics
+	var config ReverseProxyServiceModel
+	diags.Append(cfg.Get(ctx, &config)...)
+	var current ReverseProxyServiceModel
+	diags.Append(reverseProxyServiceAPIToTerraform(ctx, live, &current)...)
+	if diags.HasError() {
+		return diags
+	}
+	var existing []ReverseProxyServiceTargetModel
+	if !current.Targets.IsNull() && !current.Targets.IsUnknown() {
+		diags.Append(current.Targets.ElementsAs(ctx, &existing, false)...)
+	}
+	if diags.HasError() {
+		return diags
+	}
+	mode := "http"
+	if req.Mode != nil {
+		mode = string(*req.Mode)
+	} else if live.Mode != nil {
+		mode = string(*live.Mode)
+	}
+	actions := targetActions(config.Targets, existing, true)
+	diags.Append(actions.keptProblems()...)
+	_, _, updateOnly := actions.problems(req.Private != nil && *req.Private, mode)
+	diags.Append(updateOnly...)
+	return diags
+}
+
+// inPlaceOnly turns errors that only an in-place update meets into
+// warnings: the plan cannot tell an update from a replacement (-replace
+// plans against the current service first), and a new service keeps
+// nothing. Update refuses the same cases before writing.
+func inPlaceOnly(errs diag.Diagnostics) diag.Diagnostics {
+	var out diag.Diagnostics
+	for _, d := range errs {
+		detail := d.Detail() + " An in-place update stops before changing anything; a replacement is not affected."
+		if wp, ok := d.(diag.DiagnosticWithPath); ok {
+			out.AddAttributeWarning(wp.Path(), d.Summary(), detail)
+		} else {
+			out.AddWarning(d.Summary(), detail)
+		}
+	}
+	return out
 }
 
 // accessActionPathProblem returns why a path cannot carry a non-inherit

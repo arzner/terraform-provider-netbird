@@ -36,15 +36,18 @@ it is based on.
   `targets[].access_action` (`inherit`, `bypass` or `block` for a target's path; left out, the
   server keeps the current action) and `targets[].options.direct_upstream` (dial through the
   proxy host's network). Also in the data source (#45). The plan refuses what the server would
-  reject: a `bypass` target on a private service, also one that keeps `bypass` from the server
-  because it leaves `access_action` out; `bypass` or `block` outside HTTP mode or on a path that
-  is not a canonical prefix; two enabled targets on one path once a target has `bypass` or
-  `block`; while a target has `bypass` or `block`, an update that sets no action and drops that
-  path, or that leaves an action out with several targets on one path; and a loopback,
+  reject: a `bypass` target on a private service; `bypass` or `block` outside HTTP mode or on a
+  path that is not a canonical prefix; two enabled targets on one path once a target has `bypass`
+  or `block`; and a loopback,
   multicast, link-local or malformed host with `direct_upstream` (the server's rules for the
   service's mode and target type). Options cleared on the server read as no options, not as an object
   of nulls that plans an update. `direct_upstream` on a TCP, UDP
-  or TLS service, which NetBird stores but does not apply, gets a plan warning.
+  or TLS service, which NetBird stores but does not apply, gets a plan warning. What only an
+  in-place update meets, because the server keeps a left-out action from the current target at
+  that path (a kept `bypass` on a private service, a dropped `bypass` or `block` path while no
+  target sets an action, a left-out action while two current targets share a path), is a plan
+  warning, since the plan cannot tell an update from a replacement, and the update stops before
+  writing.
 
 ### Changed
 

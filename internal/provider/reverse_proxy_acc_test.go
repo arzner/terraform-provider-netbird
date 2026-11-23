@@ -1532,3 +1532,82 @@ func (c serviceChangedOutside) CheckPlan(ctx context.Context, _ plancheck.CheckP
 	c.change(&req)
 	_, resp.Error = testClient().ReverseProxyServices.Update(ctx, *c.id, req)
 }
+
+// Test_ReverseProxyService_SubnetHost covers the host of a subnet target,
+// which the server keeps as configured: a missing one is refused at plan
+// time, and a change made on the server shows in the next plan.
+func Test_ReverseProxyService_SubnetHost(t *testing.T) {
+	cluster := testRequireProxyCluster(t)
+	rName := "s" + acctest.RandStringFromCharSet(8, acctest.CharSetAlpha)
+	rNameFull := "netbird_reverse_proxy_service." + rName
+	var createdID string
+	config := func(host string) string {
+		hostLine := ""
+		if host != "" {
+			hostLine = fmt.Sprintf("\n    host        = %q", host)
+		}
+		return fmt.Sprintf(`
+resource "netbird_reverse_proxy_service" %q {
+  name   = %q
+  domain = "%s.%s"
+  mode   = "http"
+  auth   = {}
+
+  targets = [{
+    target_id   = %q
+    target_type = "subnet"%s
+    port        = 8080
+    protocol    = "http"
+  }]
+}`, rName, rName, rName, cluster.Address, e2eResourceSubnetID(), hostLine)
+	}
+	hostOnServer := func(want string) resource.TestCheckFunc {
+		return func(s *terraform.State) error {
+			svc, err := testClient().ReverseProxyServices.Get(context.Background(), s.RootModule().Resources[rNameFull].Primary.ID)
+			if err != nil {
+				return fmt.Errorf("get service: %w", err)
+			}
+			if len(svc.Targets) != 1 || svc.Targets[0].Host == nil || *svc.Targets[0].Host != want {
+				return fmt.Errorf("expected one target with host %q, found %+v", want, svc.Targets)
+			}
+			return nil
+		}
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().ReverseProxyServices.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config:      config(""),
+				ExpectError: regexp.MustCompile(`(?s)Host not usable.*a subnet target needs a host`),
+			},
+			{
+				Config: config("192.168.10.5"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "targets.0.host", "192.168.10.5"),
+					hostOnServer("192.168.10.5"),
+				),
+			},
+			{
+				// Changed on the server: the refresh shows it and the apply
+				// sets the configured host again.
+				PreConfig: func() {
+					change := serviceChangedOutside{id: &createdID, change: func(req *api.ServiceRequest) {
+						other := "192.168.10.6"
+						(*req.Targets)[0].Host = &other
+					}}
+					var resp plancheck.CheckPlanResponse
+					change.CheckPlan(context.Background(), plancheck.CheckPlanRequest{}, &resp)
+					if resp.Error != nil {
+						t.Fatalf("change the host: %v", resp.Error)
+					}
+				},
+				Config:           config("192.168.10.5"),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check:            hostOnServer("192.168.10.5"),
+			},
+		},
+	})
+}
