@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -438,7 +439,7 @@ func (p specProperty) members() *schemaDoc {
 // reference to a component or an inline object.
 func objectParts(parts []schemaDoc) bool {
 	for _, part := range parts {
-		if part.Ref != "" || len(part.Properties) > 0 {
+		if part.Ref != "" || len(part.Properties) > 0 || objectParts(part.AllOf) {
 			return true
 		}
 	}
@@ -490,7 +491,7 @@ func (s openAPISpec) propertiesOf(doc schemaDoc) (map[string]specProperty, bool)
 				}
 				// Both parts may define members (inline or by reference): keep
 				// the union of the two.
-				if a, b := prev.members(), prop.members(); a != nil && b != nil {
+				if a, b := prev.members(), prop.members(); a != nil && b != nil && !reflect.DeepEqual(a, b) {
 					prop.inline = &schemaDoc{AllOf: []schemaDoc{*a, *b}}
 				} else if prop.inline == nil {
 					prop.inline = prev.inline
@@ -624,6 +625,11 @@ schemas:
             $ref: '#/components/schemas/Child'
             allOf:
               - $ref: '#/components/schemas/Other'
+          refAndNestedAllOf:
+            $ref: '#/components/schemas/Child'
+            allOf:
+              - allOf:
+                  - $ref: '#/components/schemas/Other'
   Other:
     type: object
     properties:
@@ -675,6 +681,8 @@ schemas:
 		"twoRefs": {[]string{"a", "o"}, false},
 		// A direct reference beside a single allOf part.
 		"refAndAllOf": {[]string{"a", "o"}, false},
+		// The same, one composition deeper.
+		"refAndNestedAllOf": {[]string{"a", "o"}, false},
 	}
 	for name, w := range inline {
 		got := props[name]
