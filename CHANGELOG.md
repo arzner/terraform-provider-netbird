@@ -65,8 +65,12 @@ it is based on.
 
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
-  the apply with an inconsistent result. A subnet target's host with whitespace, which the server
-  accepts but the proxy cannot dial, is refused at plan time.
+  the apply with an inconsistent result. A subnet target's host with whitespace or characters
+  other than a host name's, which the server accepts but the proxy cannot dial, is refused at plan
+  time, as is a subnet target without a host.
+- `netbird_reverse_proxy_service`: a target that leaves `path` out plans `path = null` (the
+  server's `/`) on a create or an update instead of "known after apply", so a target kept at
+  another path, for example after an import, shows that it moves to `/`.
 
 ## [0.1.0] - 2026-11-23
 

@@ -1348,6 +1348,12 @@ resource "netbird_reverse_proxy_service" "l4" {
 				PlanOnly: true,
 			},
 			{
+				// On an update it is not sent and the server would move the
+				// target to "/", next to the first one: the plan says so.
+				Config:      config(svc{adminAction: `access_action = "block"`, adminPort: 8082, crowdsec: crowdsec, adminNoPath: true}),
+				ExpectError: regexp.MustCompile(`Duplicate target path`),
+			},
+			{
 				// The action and, on a capable cluster, the CrowdSec mode change
 				// in place; an empty list beside the mode stays empty.
 				Config:           config(svc{adminAction: `access_action = "bypass"`, adminPort: 8081, crowdsec: crowdsecNext, emptyCidrs: true}),

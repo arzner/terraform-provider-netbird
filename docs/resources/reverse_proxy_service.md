@@ -251,7 +251,7 @@ Optional:
 - `enabled` (Boolean) Whether this target is enabled
 - `host` (String) Backend IP or domain for this target. If omitted, the API resolves it from the target peer.
 - `options` (Attributes) Per-target options (see [below for nested schema](#nestedatt--targets--options))
-- `path` (String) URL path prefix for this target. Defaults to "/" if omitted.
+- `path` (String) URL path prefix for this target. Left out, no path is sent and the server uses "/"; the plan shows null, also for a target that has another path now.
 
 <a id="nestedatt--targets--options"></a>
 ### Nested Schema for `targets.options`

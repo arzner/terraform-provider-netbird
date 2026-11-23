@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
@@ -768,6 +769,10 @@ func Test_hostProblem(t *testing.T) {
 		{"tcp", "subnet", "", true, true},
 		{"tcp", "subnet", "backend.lan ", false, true},
 		{"tcp", "peer", "127.0.0.1", true, true},
+		{"http", "subnet", "backend.lan#fragment", false, true},
+		{"http", "subnet", "user@backend.lan", false, true},
+		{"http", "subnet", "back_end-1.lan", false, false},
+		{"http", "peer", "backend.lan?x", true, true},
 	} {
 		if got := hostProblem(tc.mode, tc.targetType, tc.host, tc.direct) != ""; got != tc.want {
 			t.Errorf("%s %s %q direct=%t: expected a problem %v, found %v", tc.mode, tc.targetType, tc.host, tc.direct, tc.want, got)
@@ -871,4 +876,80 @@ func Test_reverseProxyService_emptyListBesideCrowdsec(t *testing.T) {
 	if !attrs["blocked_cidrs"].IsNull() {
 		t.Errorf("a list left out stays null, found %v", attrs["blocked_cidrs"])
 	}
+}
+
+func Test_reverseProxyService_planOmittedTargetValues(t *testing.T) {
+	ctx := context.Background()
+	r := &ReverseProxyService{}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	listType, ok := typ.AttributeTypes["targets"].(tftypes.List)
+	if !ok {
+		t.Fatal("targets is not a list")
+	}
+	targetType, ok := listType.ElementType.(tftypes.Object)
+	if !ok {
+		t.Fatal("a target is not an object")
+	}
+	str := func(v any) tftypes.Value { return tftypes.NewValue(tftypes.String, v) }
+	target := func(kind string, host, path, action any) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range targetType.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["target_id"], values["target_type"] = str("r1"), str(kind)
+		values["host"], values["path"], values["access_action"] = str(host), str(path), str(action)
+		return tftypes.NewValue(targetType, values)
+	}
+	object := func(name string, targets ...tftypes.Value) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["name"], values["mode"] = str(name), str("http")
+		values["private"] = tftypes.NewValue(tftypes.Bool, false)
+		values["targets"] = tftypes.NewValue(listType, targets)
+		return tftypes.NewValue(typ, values)
+	}
+	unknown := tftypes.UnknownValue
+	t.Run("a left-out path is planned as the server's none", func(t *testing.T) {
+		state := object("a", target("peer", "10.0.0.1", "/public", "bypass"))
+		config := object("b", target("peer", nil, nil, "bypass"))
+		plan := object("b", target("peer", unknown, unknown, "bypass"))
+		req := resource.ModifyPlanRequest{
+			Config: tfsdk.Config{Schema: sch.Schema, Raw: config},
+			Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
+			State:  tfsdk.State{Schema: sch.Schema, Raw: state},
+		}
+		resp := resource.ModifyPlanResponse{Plan: req.Plan}
+		r.ModifyPlan(ctx, req, &resp)
+		if resp.Diagnostics.HasError() {
+			t.Fatal(resp.Diagnostics)
+		}
+		var p types.String
+		if d := resp.Plan.GetAttribute(ctx, path.Root("targets").AtListIndex(0).AtName("path"), &p); d.HasError() {
+			t.Fatal(d)
+		}
+		if !p.IsNull() {
+			t.Errorf("expected path null (the server's \"/\") in the plan, found %v", p)
+		}
+	})
+	t.Run("a subnet target without a host", func(t *testing.T) {
+		config := object("a", target("subnet", nil, "/", nil))
+		plan := object("a", target("subnet", unknown, "/", unknown))
+		req := resource.ModifyPlanRequest{
+			Config: tfsdk.Config{Schema: sch.Schema, Raw: config},
+			Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
+			State:  tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(typ, nil)},
+		}
+		resp := resource.ModifyPlanResponse{Plan: req.Plan}
+		r.ModifyPlan(ctx, req, &resp)
+		if !resp.Diagnostics.HasError() {
+			t.Error("a subnet target needs a host")
+		}
+	})
 }

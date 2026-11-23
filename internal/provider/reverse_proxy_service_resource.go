@@ -354,7 +354,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 							Validators:          []validator.String{stringvalidator.OneOf("http", "https", "tcp", "udp")},
 						},
 						"path": schema.StringAttribute{
-							MarkdownDescription: "URL path prefix for this target. Defaults to \"/\" if omitted.",
+							MarkdownDescription: "URL path prefix for this target. Left out, no path is sent and the server uses \"/\"; the plan shows null, also for a target that has another path now.",
 							Optional:            true,
 							Computed:            true,
 						},
@@ -1563,6 +1563,7 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	if !create {
 		resp.Diagnostics.Append(actions.keptProblems()...)
 	}
+	resp.Diagnostics.Append(planOmittedPaths(ctx, config.Targets, plan.Targets, resp)...)
 	targetProblems := actions.problems(private, modeKnown)
 	resp.Diagnostics.Append(targetHostProblems(config.Targets, modeKnown)...)
 	if !private {
@@ -1622,6 +1623,36 @@ func holdsNothing(obj types.Object) bool {
 		}
 	}
 	return true
+}
+
+// planOmittedPaths plans path = null for a target whose path the
+// configuration leaves out. On a create or an update the path is not sent
+// and the server stores none, which it reads as "/"; "known after apply"
+// would hide that a target kept at another path (after an import) moves to
+// "/", together with its access action.
+func planOmittedPaths(ctx context.Context, configured, planned types.List, resp *resource.ModifyPlanResponse) diag.Diagnostics {
+	var diags diag.Diagnostics
+	if configured.IsNull() || configured.IsUnknown() || planned.IsNull() || planned.IsUnknown() {
+		return diags
+	}
+	cfg, plan := configured.Elements(), planned.Elements()
+	if len(cfg) != len(plan) {
+		return diags
+	}
+	for i, e := range cfg {
+		c, ok := e.(types.Object)
+		p, pok := plan[i].(types.Object)
+		if !ok || !pok || c.IsNull() || c.IsUnknown() || p.IsNull() || p.IsUnknown() {
+			continue
+		}
+		if cp, ok := c.Attributes()["path"].(types.String); !ok || !cp.IsNull() {
+			continue
+		}
+		if pp, ok := p.Attributes()["path"].(types.String); ok && pp.IsUnknown() {
+			diags.Append(resp.Plan.SetAttribute(ctx, path.Root("targets").AtListIndex(i).AtName("path"), types.StringNull())...)
+		}
+	}
+	return diags
 }
 
 // plannedAction is what the server will hold for a configured target.
@@ -1863,9 +1894,11 @@ func targetHostProblems(configured types.List, mode string) diag.Diagnostics {
 		attrs := obj.Attributes()
 		targetType, _ := attrs["target_type"].(types.String)
 		host, _ := attrs["host"].(types.String)
-		if targetType.IsUnknown() || targetType.IsNull() || host.IsUnknown() || host.IsNull() {
+		if targetType.IsUnknown() || targetType.IsNull() || host.IsUnknown() {
 			continue
 		}
+		// A left-out host is not sent: peer, host and domain targets get the
+		// looked-up address, a subnet target gets none.
 		direct := false
 		if opts, ok := attrs["options"].(types.Object); ok && !opts.IsNull() && !opts.IsUnknown() {
 			v, ok := opts.Attributes()["direct_upstream"].(types.Bool)
@@ -1875,11 +1908,24 @@ func targetHostProblems(configured types.List, mode string) diag.Diagnostics {
 			direct = ok && v.ValueBool()
 		}
 		if problem := hostProblem(mode, targetType.ValueString(), host.ValueString(), direct); problem != "" {
-			diags.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("host"), "Host not usable",
-				fmt.Sprintf("The server refuses or cannot dial host %q for this target: %s.", host.ValueString(), problem))
+			detail := fmt.Sprintf("The server refuses or cannot dial host %q for this target: %s.", host.ValueString(), problem)
+			if host.IsNull() {
+				detail = fmt.Sprintf("host is left out: %s.", problem)
+			}
+			diags.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("host"), "Host not usable", detail)
 		}
 	}
 	return diags
+}
+
+// notHostNameRune reports a rune outside a host name's letters, digits,
+// '-', '.' and '_'.
+func notHostNameRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.', r == '_':
+		return false
+	}
+	return true
 }
 
 // hostProblem returns why host does not work for a target, or "".
@@ -1909,6 +1955,12 @@ func hostProblem(mode, targetType, host string, direct bool) string {
 	}
 	ip, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"))
 	if err != nil {
+		// The server writes the host into the target URL as is; anything
+		// but a host name's letters, digits, '-', '.' and '_' is escaped
+		// there and the proxy refuses the mapping.
+		if strings.IndexFunc(host, notHostNameRune) >= 0 {
+			return "it is not a host name or IP address"
+		}
 		return ""
 	}
 	if ip.Zone() != "" {
