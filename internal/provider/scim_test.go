@@ -2,6 +2,14 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
+	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 	"time"
@@ -81,5 +89,100 @@ func Test_scimAPIToTerraform(t *testing.T) {
 				t.Fatalf("Expected:\n%#v\nFound:\n%#v", c.expected, out)
 			}
 		})
+	}
+}
+
+func Test_scim_connectorID(t *testing.T) {
+	ctx := context.Background()
+	id := "dex-okta"
+	var data ScimModel
+	if d := scimAPIToTerraform(ctx, &api.ScimIntegration{Id: 3, ConnectorId: &id}, &data); d.HasError() {
+		t.Fatal(d)
+	}
+	if data.ConnectorId.ValueString() != id {
+		t.Errorf("read: expected %s, found %v", id, data.ConnectorId)
+	}
+	var none ScimModel
+	if d := scimAPIToTerraform(ctx, &api.ScimIntegration{Id: 4}, &none); d.HasError() {
+		t.Fatal(d)
+	}
+	if !none.ConnectorId.IsNull() {
+		t.Errorf("read: expected null without a connector, found %v", none.ConnectorId)
+	}
+}
+
+// Test_scim_connectorIDRequests drives Create and Update against a stub server
+// and checks the request bodies: a configured connector is sent, a left-out one
+// is not, even when the plan carries a value from state.
+func Test_scim_connectorIDRequests(t *testing.T) {
+	ctx := context.Background()
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":7,"provider":"okta","prefix":"p","enabled":true,"group_prefixes":[],"user_group_prefixes":[],"auth_token":"t","last_synced_at":"2026-01-01T00:00:00Z","connector_id":"dex-okta"}`)
+	}))
+	defer srv.Close()
+	r := &Scim{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	value := func(connector tftypes.Value, id any) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["provider_name"] = tftypes.NewValue(tftypes.String, "okta")
+		values["prefix"] = tftypes.NewValue(tftypes.String, "p")
+		values["connector_id"] = connector
+		if id != nil {
+			values["id"] = tftypes.NewValue(tftypes.String, id)
+		}
+		return tftypes.NewValue(typ, values)
+	}
+	set := tftypes.NewValue(tftypes.String, "dex-okta")
+	unset := tftypes.NewValue(tftypes.String, nil)
+
+	create := resource.CreateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(typ, nil)}}
+	r.Create(ctx, resource.CreateRequest{Plan: tfsdk.Plan{Schema: sch.Schema, Raw: value(set, nil)}, Config: tfsdk.Config{Schema: sch.Schema, Raw: value(set, nil)}}, &create)
+	if create.Diagnostics.HasError() {
+		t.Fatal(create.Diagnostics)
+	}
+
+	// Update with the connector left out of the configuration while the plan
+	// carries "dex-okta" from state.
+	state := tfsdk.State{Schema: sch.Schema, Raw: value(set, "7")}
+	update := resource.UpdateResponse{State: state}
+	r.Update(ctx, resource.UpdateRequest{Plan: tfsdk.Plan{Schema: sch.Schema, Raw: value(set, "7")}, Config: tfsdk.Config{Schema: sch.Schema, Raw: value(unset, "7")}, State: state}, &update)
+	if update.Diagnostics.HasError() {
+		t.Fatal(update.Diagnostics)
+	}
+
+	// Update with a configured connector: the planned value is sent, not the
+	// raw configuration (they differ here to tell them apart).
+	planned := tftypes.NewValue(tftypes.String, "dex-planned")
+	configured := tftypes.NewValue(tftypes.String, "dex-config")
+	update2 := resource.UpdateResponse{State: state}
+	r.Update(ctx, resource.UpdateRequest{Plan: tfsdk.Plan{Schema: sch.Schema, Raw: value(planned, "7")}, Config: tfsdk.Config{Schema: sch.Schema, Raw: value(configured, "7")}, State: state}, &update2)
+	if update2.Diagnostics.HasError() {
+		t.Fatal(update2.Diagnostics)
+	}
+
+	if len(bodies) != 3 {
+		t.Fatalf("expected three requests, found %d", len(bodies))
+	}
+	if bodies[2]["connector_id"] != "dex-planned" {
+		t.Errorf("update: expected the planned connector dex-planned, found %v", bodies[2]["connector_id"])
+	}
+	if bodies[0]["connector_id"] != "dex-okta" {
+		t.Errorf("create: expected connector_id dex-okta, found %v", bodies[0]["connector_id"])
+	}
+	if _, sent := bodies[1]["connector_id"]; sent {
+		t.Errorf("update: a left-out connector must not be sent, found %v", bodies[1]["connector_id"])
 	}
 }

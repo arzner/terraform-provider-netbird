@@ -123,13 +123,14 @@ Check usage in [docs](./docs/index.md).
 Provider versions follow their own semantic versioning. Each release is built
 against one NetBird client library version and passes the acceptance suite
 against a NetBird server built from that same version: its *tested* version.
-The tested NetBird minor line is supported; the one before it is meant to be
-supported too once the acceptance suite also runs against it (not yet).
-Older servers may work but are not promised.
+The tested NetBird minor line is supported, and so is the one before it: every
+pull request and main build also runs the acceptance suite against the newest
+release of the previous minor line, with the provider unchanged. Older servers
+may work but are not promised.
 
 | Provider | Tested with NetBird | Supported NetBird |
 | --- | --- | --- |
-| 0.1.x | v0.83.2 | 0.83 |
+| 0.1.x | v0.83.2, v0.82.1 | 0.83, 0.82 |
 
 A new NetBird release is adopted by bumping the dependency, which runs the
 acceptance suite against the new server and the API spec check, and is
@@ -138,6 +139,20 @@ against the newest NetBird release before the bump and opens an issue
 labelled `netbird-latest` when it fails. A NetBird change that breaks
 existing configurations is released as a new minor version (0.x) or, from
 1.0, a major version, and spelled out in the changelog.
+
+### Changes made outside Terraform
+
+Manage an object either with Terraform or by hand, not both. When a setting
+that the plan shows unchanged changed after the plan was made, an in-place
+update stops before it writes anything and asks for a new plan, instead of
+reverting the change without having shown it (`netbird_peer` so far; the other
+resources follow in #74). A setting the plan changes gets the planned value,
+as the plan shows. This protects in-place updates only: a saved plan that
+destroys or adopts an object acts on it as it is then. The NetBird API has no
+conditional updates, so a change made while an apply is writing is not
+detected either, and an update the server refuses halfway (it moves a peer's
+address before it checks a new name, for example) is recorded as the server
+left it.
 
 ### Verifying a release
 

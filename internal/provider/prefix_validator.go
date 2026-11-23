@@ -51,3 +51,43 @@ func (v canonicalPrefix) ValidateString(_ context.Context, req validator.StringR
 			fmt.Sprintf("%q is not in canonical form; write %q, as the management server returns it", value, canonical))
 	}
 }
+
+// canonicalAddress accepts an IP address of one family written the way the
+// management server returns it (netip.Addr.String: lower case, shortest
+// form), so the address read back equals the planned one.
+type canonicalAddress struct{ ipv6 bool }
+
+func (v canonicalAddress) family() string {
+	if v.ipv6 {
+		return "IPv6"
+	}
+	return "IPv4"
+}
+
+func (v canonicalAddress) Description(context.Context) string {
+	return fmt.Sprintf("must be an %s address in canonical form", v.family())
+}
+
+func (v canonicalAddress) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (v canonicalAddress) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	value := req.ConfigValue.ValueString()
+	addr, err := netip.ParseAddr(value)
+	if err != nil || addr.Zone() != "" {
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid address", fmt.Sprintf("%q is not an IP address", value))
+		return
+	}
+	if addr.Is6() != v.ipv6 || addr.Is4In6() {
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid address", fmt.Sprintf("%q is not an %s address", value, v.family()))
+		return
+	}
+	if canonical := addr.String(); canonical != value {
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid address",
+			fmt.Sprintf("%q is not in canonical form; write %q, as the management server returns it", value, canonical))
+	}
+}
