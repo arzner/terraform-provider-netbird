@@ -303,6 +303,7 @@ func Test_identityProviderValidateConfig(t *testing.T) {
 		"http issuer":                        {idpType: "keycloak", issuer: "http://sso.example.test/realms/main", wantError: true},
 		"http issuer, type not known yet":    {idpType: tftypes.UnknownValue, issuer: "http://sso.example.test", wantError: true},
 		"issuer without a host":              {idpType: "oidc", issuer: "https:///realms/main", wantError: true},
+		"issuer with a port but no host":     {idpType: "oidc", issuer: "https://:8443/realms/main", wantError: true},
 		"issuer with user info":              {idpType: "oidc", issuer: "https://u:p@sso.example.test/", wantError: true},
 		"issuer with a query":                {idpType: "oidc", issuer: "https://sso.example.test/?a=b", wantError: true},
 		"issuer with a fragment":             {idpType: "oidc", issuer: "https://sso.example.test/#x", wantError: true},

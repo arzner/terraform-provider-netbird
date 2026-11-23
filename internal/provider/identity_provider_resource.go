@@ -290,7 +290,7 @@ func issuerProblem(issuer string) string {
 	}
 	u, err := url.Parse(issuer)
 	switch {
-	case err != nil || u.Host == "":
+	case err != nil || u.Host == "" || u.Hostname() == "":
 		return "The issuer must be an absolute URL with a host."
 	case u.Scheme != "https":
 		return "The issuer must use https."
