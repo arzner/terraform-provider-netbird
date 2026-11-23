@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -164,9 +165,28 @@ func (r *IdentityProvider) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 
+	prior := data.Type
 	identityProviderAPIToTerraform(idp, &data)
+	resp.Diagnostics.Append(keepKnownType(prior, &data)...)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+}
+
+// keepKnownType keeps a provider's known type when the server reports
+// another one for the same ID. The type of a provider cannot change under its
+// ID, but the server infers it from any substring of the ID (v0.83, v0.82:
+// inferOIDCProviderType, #86), so "keycloak-...okta..." reads as okta, and
+// with type requiring replacement that misread would replace a working
+// provider.
+func keepKnownType(prior types.String, data *IdentityProviderModel) diag.Diagnostics {
+	var diags diag.Diagnostics
+	if prior.IsNull() || prior.IsUnknown() || prior.Equal(data.Type) {
+		return diags
+	}
+	diags.AddAttributeWarning(path.Root("type"), "Identity provider type misreported",
+		fmt.Sprintf("The server reports type %q for this provider, which has type %q. NetBird infers the type from the provider's ID and can misread it (#86); the type is kept.", data.Type.ValueString(), prior.ValueString()))
+	data.Type = prior
+	return diags
 }
 
 func (r *IdentityProvider) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -190,7 +210,9 @@ func (r *IdentityProvider) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 
+	planned := data.Type
 	identityProviderAPIToTerraform(idp, &data)
+	resp.Diagnostics.Append(keepKnownType(planned, &data)...)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }

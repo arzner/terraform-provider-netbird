@@ -324,3 +324,26 @@ func Test_identityProviderValidateConfig(t *testing.T) {
 		})
 	}
 }
+
+func Test_keepKnownType(t *testing.T) {
+	for name, tc := range map[string]struct {
+		prior, read, want types.String
+		warn              bool
+	}{
+		"same type":              {types.StringValue("keycloak"), types.StringValue("keycloak"), types.StringValue("keycloak"), false},
+		"misread from the ID":    {types.StringValue("keycloak"), types.StringValue("okta"), types.StringValue("keycloak"), true},
+		"import takes the read":  {types.StringNull(), types.StringValue("okta"), types.StringValue("okta"), false},
+		"unknown takes the read": {types.StringUnknown(), types.StringValue("adfs"), types.StringValue("adfs"), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			data := IdentityProviderModel{Type: tc.read}
+			d := keepKnownType(tc.prior, &data)
+			if !data.Type.Equal(tc.want) {
+				t.Errorf("expected type %v, found %v", tc.want, data.Type)
+			}
+			if (d.WarningsCount() > 0) != tc.warn || d.HasError() {
+				t.Errorf("expected a warning %v, found %v", tc.warn, d)
+			}
+		})
+	}
+}
