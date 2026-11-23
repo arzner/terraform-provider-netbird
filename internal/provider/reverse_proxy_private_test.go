@@ -783,6 +783,10 @@ func Test_hostProblem(t *testing.T) {
 		{"tcp", "subnet", "169.254.1.1", on, false}, // L4 subnet targets need only a host
 		{"tcp", "subnet", "", on, true},
 		{"udp", "subnet", " ", off, false},
+		{"", "subnet", "", off, true}, // mode not known: empty fails in every mode
+		{"", "subnet", "169.254.1.1", on, false},
+		{"", "subnet", "a b", off, false}, // refused in HTTP only
+		{"", "peer", "127.0.0.1", on, true},
 	} {
 		if got := hostProblem(tc.mode, tc.targetType, tc.host, tc.direct) != ""; got != tc.want {
 			t.Errorf("%s %s %q direct=%d: expected a problem %v, found %v", tc.mode, tc.targetType, tc.host, tc.direct, tc.want, got)
@@ -1006,4 +1010,29 @@ func withName(t *testing.T, obj tftypes.Value, v any) tftypes.Value {
 	}
 	m["name"] = tftypes.NewValue(tftypes.String, v)
 	return tftypes.NewValue(obj.Type(), m)
+}
+
+func Test_targetActionDiagnosticsOmitPaths(t *testing.T) {
+	targetType := ReverseProxyServiceTargetModel{}.TFType()
+	target := func(p, action string) attr.Value {
+		attrs := map[string]attr.Value{}
+		for n, at := range targetType.AttrTypes {
+			attrs[n] = nullOf(at.ValueType(context.Background()))
+		}
+		attrs["options"] = types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes)
+		attrs["path"], attrs["access_action"] = types.StringValue(p), types.StringValue(action)
+		return types.ObjectValueMust(targetType.AttrTypes, attrs)
+	}
+	list := types.ListValueMust(targetType, []attr.Value{
+		target("/cb?token=secret", "block"), target("/x-secret", "bypass"), target("/x-secret", "inherit"),
+	})
+	diags := targetActions(list, nil, true).problems(true, "http")
+	if diags.ErrorsCount() < 3 {
+		t.Fatalf("expected the query path, the bypass and the duplicate to be refused, found %v", diags)
+	}
+	for _, d := range diags {
+		if strings.Contains(d.Detail(), "secret") || strings.Contains(d.Summary(), "secret") {
+			t.Errorf("a path must not be repeated in a diagnostic: %s", d.Detail())
+		}
+	}
 }

@@ -403,7 +403,7 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 									Optional:            true,
 								},
 								"direct_upstream": schema.BoolAttribute{
-									MarkdownDescription: "Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services). The server refuses a loopback, multicast or link-local IP address as the host, and a proxy started with `NB_PROXY_DIRECT_UPSTREAM_BLOCK_PRIVATE` refuses, when it connects, every address that is not globally reachable. Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Applies to HTTP services only: for TCP, UDP and TLS services NetBird stores the flag but does not pass it to the proxy, and the plan warns. Defaults to false.",
+									MarkdownDescription: "Dial this target through the proxy host's own network stack instead of its embedded NetBird client, for upstreams reachable without WireGuard (public APIs, LAN services). The server refuses a loopback, multicast or link-local IP address as the host, and a proxy started with `NB_PROXY_DIRECT_UPSTREAM_BLOCK_PRIVATE` refuses, when it connects, addresses in a fixed list of special-use ranges (private, CGNAT, loopback, link-local, unique local, documentation, multicast and similar); any other address is dialled, publicly reachable or not. Needs a proxy cluster whose every active proxy runs in private mode (`private` on the service does not satisfy it). Applies to HTTP services only: for TCP, UDP and TLS services NetBird stores the flag but does not pass it to the proxy, and the plan warns. Defaults to false.",
 									Optional:            true,
 								},
 							},
@@ -1683,8 +1683,9 @@ type targetAccessActions struct {
 	// drops while no target sets an action; duplicate is a path that has
 	// several current targets while some planned target leaves its action
 	// out. The server refuses both.
-	removed   []plannedAction
-	duplicate string
+	removed      []int  // current target indexes
+	duplicate    [2]int // current target indexes sharing a path, valid when hasDuplicate
+	hasDuplicate bool
 }
 
 // targetActions follows the server (v0.83, v0.82:
@@ -1751,15 +1752,15 @@ func targetActions(configured types.List, existing []ReverseProxyServiceTargetMo
 		}
 		return out
 	}
-	byPath := map[string]string{}
-	for _, t := range existing {
+	byPath := map[string]int{}
+	for j, t := range existing {
 		loc := targetLocation(t.Path)
-		if _, dup := byPath[loc]; dup && out.duplicate == "" {
-			out.duplicate = loc
+		if first, dup := byPath[loc]; dup && !out.hasDuplicate {
+			out.duplicate, out.hasDuplicate = [2]int{first, j}, true
 		}
-		byPath[loc] = t.AccessAction.ValueString()
+		byPath[loc] = j
 	}
-	if out.duplicate != "" {
+	if out.hasDuplicate {
 		// The server stops before taking any action.
 		return out
 	}
@@ -1770,19 +1771,19 @@ func targetActions(configured types.List, existing []ReverseProxyServiceTargetMo
 		}
 		if omitted[i] {
 			t.action = "inherit"
-			if prev, ok := byPath[t.path]; ok && prev != "" {
-				t.action, t.kept = prev, true
+			if j, ok := byPath[t.path]; ok && existing[j].AccessAction.ValueString() != "" {
+				t.action, t.kept = existing[j].AccessAction.ValueString(), true
 			}
 		}
 		delete(byPath, t.path)
 	}
 	if !provided {
-		for loc, action := range byPath {
-			if action != "" && action != "inherit" {
-				out.removed = append(out.removed, plannedAction{path: loc, action: action})
+		for _, j := range byPath {
+			if action := existing[j].AccessAction.ValueString(); action != "" && action != "inherit" {
+				out.removed = append(out.removed, j)
 			}
 		}
-		slices.SortFunc(out.removed, func(x, y plannedAction) int { return strings.Compare(x.path, y.path) })
+		slices.Sort(out.removed)
 	}
 	return out
 }
@@ -1791,17 +1792,19 @@ func targetActions(configured types.List, existing []ReverseProxyServiceTargetMo
 // left-out actions.
 func (a targetAccessActions) keptProblems() diag.Diagnostics {
 	var diags diag.Diagnostics
-	if a.duplicate != "" {
+	// Paths are not repeated in diagnostics: a mistaken value may carry
+	// something secret, and Terraform cannot redact diagnostic text.
+	if a.hasDuplicate {
 		diags.AddAttributeError(path.Root("targets"), "Access action needed on every target",
-			fmt.Sprintf("The service has several targets at path %q and a target with an access_action other than "+
+			fmt.Sprintf("Current targets %d and %d share a path and a target has an access_action other than "+
 				"\"inherit\", so the server keeps left-out actions only when every target sets access_action. Set "+
-				"access_action on every target.", a.duplicate))
+				"access_action on every target.", a.duplicate[0], a.duplicate[1]))
 	}
-	for _, r := range a.removed {
+	for _, j := range a.removed {
 		diags.AddAttributeError(path.Root("targets"), "Access action needed when a controlled path goes",
-			fmt.Sprintf("The target at path %q has access_action = %q on the server, and this update removes or moves it "+
-				"while no target sets access_action, which the server refuses. Set access_action on at least one target "+
-				"(\"inherit\" keeps the default).", r.path, r.action))
+			fmt.Sprintf("Current target %d has an access_action other than \"inherit\" on the server, and this update "+
+				"removes or moves its path while no target sets access_action, which the server refuses. Set "+
+				"access_action on at least one target (\"inherit\" keeps the default).", j))
 	}
 	return diags
 }
@@ -1831,8 +1834,8 @@ func (a targetAccessActions) problems(private bool, mode string) diag.Diagnostic
 			continue
 		case private && t.action == "bypass" && t.kept:
 			diags.AddAttributeError(at, "Bypass not allowed on a private service",
-				fmt.Sprintf("The target at path %q has access_action = \"bypass\" on the server and keeps it while access_action "+
-					"is left out, but a private service cannot have it. Set access_action = \"inherit\" or \"block\".", t.path))
+				"The current target at this path has access_action = \"bypass\" on the server, and this target keeps it "+
+					"while access_action is left out, but a private service cannot have it. Set access_action = \"inherit\" or \"block\".")
 		case private && t.action == "bypass":
 			diags.AddAttributeError(at, "Bypass not allowed on a private service",
 				"private = true cannot be combined with access_action = \"bypass\" on a target; use \"inherit\" or \"block\".")
@@ -1840,7 +1843,7 @@ func (a targetAccessActions) problems(private bool, mode string) diag.Diagnostic
 		if t.pathKnown {
 			if problem := accessActionPathProblem(t.path); problem != "" {
 				diags.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("path"), "Path not usable with an access action",
-					fmt.Sprintf("access_action %q needs a canonical path prefix: %s, got %q.", t.action, problem, t.path))
+					fmt.Sprintf("access_action %q needs a canonical path prefix: %s.", t.action, problem))
 			}
 		}
 	}
@@ -1854,8 +1857,8 @@ func (a targetAccessActions) problems(private bool, mode string) diag.Diagnostic
 		}
 		if first, dup := seen[t.path]; dup {
 			diags.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("path"), "Duplicate target path",
-				fmt.Sprintf("targets %d and %d are both enabled at path %q, which the server refuses once a target has an "+
-					"access_action other than \"inherit\". Give each enabled target its own path.", first, i, t.path))
+				fmt.Sprintf("Targets %d and %d are both enabled at one path, which the server refuses once a target has an "+
+					"access_action other than \"inherit\". Give each enabled target its own path.", first, i))
 			continue
 		}
 		seen[t.path] = i
@@ -1888,12 +1891,13 @@ func accessActionPathProblem(p string) string {
 // service's mode and the target's type (v0.83, v0.82:
 // validateDirectUpstreamHost, validateSubnetTarget, validateL4Target). A
 // left-out host is not sent, so it counts as empty. Checks that depend on a
-// value not known at plan time wait for it; mode "" means not known. The
+// value not known at plan time wait for it; mode "" means not known, and
+// then only the rules both modes share are checked. The
 // host itself is not repeated in the diagnostic, since a mistaken value may
 // carry credentials.
 func targetHostProblems(configured types.List, mode string) diag.Diagnostics {
 	var diags diag.Diagnostics
-	if mode == "" || configured.IsNull() || configured.IsUnknown() {
+	if configured.IsNull() || configured.IsUnknown() {
 		return diags
 	}
 	for i, e := range configured.Elements() {
@@ -1930,9 +1934,10 @@ func targetHostProblems(configured types.List, mode string) diag.Diagnostics {
 func hostProblem(mode, targetType, host string, direct int) string {
 	trimmed := strings.TrimSpace(host)
 	if targetType != "subnet" {
-		return directHostProblem(trimmed, direct)
+		return directHostProblem(trimmed, direct) // the same in every mode
 	}
 	if mode != "http" {
+		// L4 (or not known yet: an empty host fails in every mode).
 		if host == "" {
 			return "a subnet target needs a host"
 		}

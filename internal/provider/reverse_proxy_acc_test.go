@@ -1207,6 +1207,7 @@ func Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream(t *testing.T) {
 		crowdsec    string // "" leaves access_restrictions out, "null" sets crowdsec_mode = null
 		emptyCidrs  bool   // allowed_cidrs = [] beside the mode
 		adminNoPath bool   // the /admin target leaves path out (kept from state)
+		nameFrom    string // name from terraform_data.name with this input, not known until it is applied
 		extra       string // more configuration
 	}
 	config := func(c svc) string {
@@ -1248,9 +1249,17 @@ func Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream(t *testing.T) {
     %s
   }`, peerID1, c.adminPort, adminPath, c.adminAction)
 		}
+		name := fmt.Sprintf("%q", rName)
+		if c.nameFrom != "" {
+			name = "terraform_data.name.output"
+			c.extra += fmt.Sprintf(`
+resource "terraform_data" "name" {
+  input = %q
+}`, c.nameFrom)
+		}
 		return fmt.Sprintf(`
 resource "netbird_reverse_proxy_service" %q {
-  name          = %q
+  name          = %s
   domain        = %q
   mode          = "http"
   private       = %s
@@ -1264,7 +1273,7 @@ resource "netbird_reverse_proxy_service" %q {
     protocol    = "http"
     %s%s
   }%s]
-}`, rName, rName, domain, private, groupID, restrictions, peerID1, c.firstAction, options, admin) + c.extra
+}`, rName, name, domain, private, groupID, restrictions, peerID1, c.firstAction, options, admin) + c.extra
 	}
 	// onServer checks the service as the server has it: action is the /admin
 	// target's ("" for no /admin target), crowdsec the stored mode ("" none).
@@ -1348,6 +1357,28 @@ resource "netbird_reverse_proxy_service" "l4" {
 				PlanOnly: true,
 			},
 			{
+				// A name not known until apply makes the first plan an update
+				// that may not happen. It resolves to the current name: nothing
+				// is written and /admin stays.
+				Config: config(svc{adminAction: `access_action = "block"`, adminPort: 8081, crowdsec: crowdsec, adminNoPath: true, nameFrom: rName}),
+				Check:  onServer("block", false, crowdsec),
+			},
+			{
+				// It resolves to another name: the final plan sends no path for
+				// /admin, which would join "/", and refuses before writing.
+				Config:      config(svc{adminAction: `access_action = "block"`, adminPort: 8081, crowdsec: crowdsec, adminNoPath: true, nameFrom: rName + "x"}),
+				ExpectError: regexp.MustCompile(`Duplicate target path`),
+			},
+			{
+				// The service is unchanged: with its own name and /admin it
+				// plans nothing (terraform_data keeps the input it was given).
+				Config: config(svc{adminAction: `access_action = "block"`, adminPort: 8081, crowdsec: crowdsec}) + fmt.Sprintf(`
+resource "terraform_data" "name" {
+  input = %q
+}`, rName+"x"),
+				PlanOnly: true,
+			},
+			{
 				// On an update it is not sent and the server would move the
 				// target to "/", next to the first one: the plan says so.
 				Config:      config(svc{adminAction: `access_action = "block"`, adminPort: 8082, crowdsec: crowdsec, adminNoPath: true}),
@@ -1391,7 +1422,7 @@ resource "netbird_reverse_proxy_service" "l4" {
 				// Turning the service private while /admin keeps bypass from
 				// the server is refused at plan time, left out or configured.
 				Config:      config(svc{adminPort: 8082, direct: true, crowdsec: crowdsec}),
-				ExpectError: regexp.MustCompile(`(?s)Bypass not allowed on a private service.*path "/admin"`),
+				ExpectError: regexp.MustCompile(`(?s)Bypass not allowed on a private service.*current target at this path`),
 			},
 			{
 				Config:      config(svc{adminAction: `access_action = "bypass"`, adminPort: 8082, direct: true, crowdsec: crowdsec}),
@@ -1424,7 +1455,7 @@ data "netbird_reverse_proxy_service" "test" {
 				// Dropping /admin (block) with no action set anywhere is refused
 				// by the server, so the plan refuses it.
 				Config:      config(svc{direct: true, crowdsec: crowdsec}),
-				ExpectError: regexp.MustCompile(`(?s)Access action needed when a controlled path goes.*path "/admin"`),
+				ExpectError: regexp.MustCompile(`(?s)Access action needed when a controlled path goes.*Current target \d+ `),
 			},
 			{
 				// Also drops access_restrictions: the server then has none.
