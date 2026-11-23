@@ -1785,8 +1785,8 @@ func Test_reconcileOptions(t *testing.T) {
 	}
 }
 
-// The API never returns auth secrets: a blank reads as null, so it matches a
-// configuration that leaves the secret out, and a null maps back to a blank
+// The API never returns auth secrets: a blank password or pin reads as null,
+// so it matches a configuration that leaves the secret out, and a null maps back to a blank
 // inside an enabled block, which the server reads as "keep the current one".
 func Test_reverseProxyServiceRoundtrip_redactedSecrets(t *testing.T) {
 	ctx := context.Background()
@@ -1823,8 +1823,12 @@ func Test_reverseProxyServiceRoundtrip_redactedSecrets(t *testing.T) {
 			t.Fatal(d)
 		}
 	}
-	if !pw.Password.IsNull() || !pin.Pin.IsNull() || len(headers) != 1 || !headers[0].Value.IsNull() {
-		t.Fatalf("expected null secrets, found %v %v %v", pw.Password, pin.Pin, headers)
+	if !pw.Password.IsNull() || !pin.Pin.IsNull() {
+		t.Fatalf("expected null password and pin, found %v %v", pw.Password, pin.Pin)
+	}
+	// A header value is required: a blank stays a blank, as before.
+	if len(headers) != 1 || !headers[0].Value.Equal(types.StringValue("")) {
+		t.Fatalf("expected a blank header value, found %v", headers)
 	}
 	req, d := reverseProxyServiceTerraformToAPI(ctx, &model)
 	if d.HasError() {

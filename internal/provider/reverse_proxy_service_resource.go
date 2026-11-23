@@ -780,7 +780,7 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 			headerAuthModels = append(headerAuthModels, ReverseProxyHeaderAuthModel{
 				Enabled: types.BoolValue(h.Enabled),
 				Header:  types.StringValue(h.Header),
-				Value:   redactedSecretAPIToTerraform(h.Value),
+				Value:   types.StringValue(h.Value),
 			})
 		}
 		authModel.HeaderAuths, d = types.ListValueFrom(ctx, ReverseProxyHeaderAuthModel{}.TFType(), headerAuthModels)
@@ -846,7 +846,8 @@ func redactedSecretAPIToTerraform(secret string) types.String {
 
 // preserveAuthSecrets copies sensitive auth fields (password, pin, header auth
 // values) from prior state/plan into the current model, since the API never
-// returns them.
+// returns them. A header value is required in the configuration and stays a
+// blank string when there is no prior value.
 // It also preserves the structure of optional auth blocks (like link_auth) that the API
 // may not return when disabled, ensuring state matches plan.
 func preserveAuthSecrets(priorAuth, currentAuth types.Object) (types.Object, diag.Diagnostics) {
