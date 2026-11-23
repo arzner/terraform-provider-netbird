@@ -170,27 +170,44 @@ func Test_NameserverGroup_SingleLabelDomain(t *testing.T) {
 		CheckDestroy:             testCheckGone(testClient().DNS.GetNameserverGroup, &createdID),
 		Steps: []resource.TestStep{
 			{
-				Config:      config(`["*.lan"]`),
-				ExpectError: regexp.MustCompile(`(?s)Invalid domain name.*Wildcards are not allowed`),
-			},
-			{
-				Config: config(`["lan", "consul."]`),
+				Config: config(`["lan"]`),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					testRecordID(rNameFull, &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "domains.#", "1"),
+					domainsOnServer(&createdID, "lan"),
+				),
+			},
+			{
+				// Updated in place; listed in the order an import reads them.
+				Config:           config(`["consul.", "lan"]`),
+				ConfigPlanChecks: updatesInPlace(rNameFull),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPtr(rNameFull, "id", &createdID),
 					resource.TestCheckResourceAttr(rNameFull, "domains.#", "2"),
-					func(*terraform.State) error {
-						ns, err := testClient().DNS.GetNameserverGroup(context.Background(), createdID)
-						if err != nil {
-							return err
-						}
-						if !slices.Contains(ns.Domains, "lan") || !slices.Contains(ns.Domains, "consul.") {
-							return fmt.Errorf("domains on the server: expected lan and consul., found %v", ns.Domains)
-						}
-						return nil
-					},
+					domainsOnServer(&createdID, "consul.", "lan"),
 				),
 			},
 			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				Config:      config(`["*.lan"]`),
+				ExpectError: regexp.MustCompile(`(?s)Invalid domain name.*Wildcards are not allowed`),
+			},
 		},
 	})
+}
+
+// domainsOnServer checks the group's match domains on the server.
+func domainsOnServer(id *string, want ...string) resource.TestCheckFunc {
+	return func(*terraform.State) error {
+		ns, err := testClient().DNS.GetNameserverGroup(context.Background(), *id)
+		if err != nil {
+			return err
+		}
+		got := slices.Clone(ns.Domains)
+		slices.Sort(got)
+		if !slices.Equal(got, want) {
+			return fmt.Errorf("domains on the server: expected %v, found %v", want, got)
+		}
+		return nil
+	}
 }
