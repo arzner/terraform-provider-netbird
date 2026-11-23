@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
@@ -93,10 +94,11 @@ func (r *NetworkResource) Schema(ctx context.Context, req resource.SchemaRequest
 				Default:             booldefault.StaticBool(true),
 			},
 			"groups": schema.SetAttribute{
-				MarkdownDescription: "Group IDs containing the resource",
-				Required:            true,
+				MarkdownDescription: "Group IDs containing the resource. Left out, the resource's groups are not managed here: a new resource starts without groups, and an update keeps the groups the resource has, including ones a `netbird_group`'s `resources` adds. `[]` removes it from every group. A resource without groups is reached through policies that name it as `destination_resource`. The server refuses to delete a group that still holds resources, so to destroy a group that adds this resource through `resources`, apply `resources = []` on the group first.",
+				Optional:            true,
+				Computed:            true,
 				ElementType:         types.StringType,
-				Validators:          []validator.Set{setvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1)), setvalidator.SizeAtLeast(1)},
+				Validators:          []validator.Set{setvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1))},
 			},
 		},
 	}
@@ -130,11 +132,7 @@ func networkResourceAPIToTerraform(ctx context.Context, networkResource *api.Net
 	data.Description = types.StringPointerValue(networkResource.Description)
 	data.Address = types.StringValue(networkResource.Address)
 	data.Enabled = types.BoolValue(networkResource.Enabled)
-	groups := make([]string, len(networkResource.Groups))
-	for i, k := range networkResource.Groups {
-		groups[i] = k.Id
-	}
-	data.Groups, d = types.SetValueFrom(ctx, types.StringType, groups)
+	data.Groups, d = types.SetValueFrom(ctx, types.StringType, resourceGroupIDs(networkResource.Groups))
 	ret.Append(d...)
 	return ret
 }
@@ -219,12 +217,44 @@ func (r *NetworkResource) Update(ctx context.Context, req resource.UpdateRequest
 		return
 	}
 
+	// The server sets the resource's groups to exactly the ones sent.
+	// Left out of the configuration and not known in the plan, they are not
+	// managed here, so the update sends the groups the resource has now
+	// (netbird_group may add some). A known planned set that the plan does
+	// not change (a configuration that matches, or one ignore_changes keeps)
+	// must still be what the resource has: sending it would silently detach
+	// a group added since the plan.
+	var configured types.Set
+	var prior NetworkResourceModel
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("groups"), &configured)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	groups := stringSetDefault(ctx, data.Groups, []string{})
+	unmanaged := configured.IsNull() && data.Groups.IsUnknown()
+	unchanged := !data.Groups.IsUnknown() && data.Groups.Equal(prior.Groups)
+	if unmanaged || unchanged {
+		live, err := r.client.Networks.Resources(data.NetworkId.ValueString()).Get(ctx, data.Id.ValueString())
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading NetworkResource", err.Error())
+			return
+		}
+		current := resourceGroupIDs(live.Groups)
+		if unchanged && !sameStrings(groups, current) {
+			resp.Diagnostics.AddError("Network resource groups changed after the plan",
+				fmt.Sprintf("The resource's groups were %v when planned and are %v now, changed outside this resource. Nothing was changed. Run plan again.", sortedCopy(groups), sortedCopy(current)))
+			return
+		}
+		groups = current
+	}
+
 	networkResourceReq := api.NetworkResourceRequest{
 		Name:        data.Name.ValueString(),
 		Description: data.Description.ValueStringPointer(),
 		Address:     data.Address.ValueString(),
 		Enabled:     data.Enabled.ValueBool(),
-		Groups:      stringSetDefault(ctx, data.Groups, []string{}),
+		Groups:      groups,
 	}
 
 	networkResource, err := r.client.Networks.Resources(data.NetworkId.ValueString()).Update(ctx, data.Id.ValueString(), networkResourceReq)
@@ -266,4 +296,16 @@ func (r *NetworkResource) ImportState(ctx context.Context, req resource.ImportSt
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("network_id"), splitID[0])...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), splitID[1])...)
+}
+
+// resourceGroupIDs returns the IDs of a resource's groups, each once: a group
+// that lists the resource twice is returned twice by the server.
+func resourceGroupIDs(groups []api.GroupMinimum) []string {
+	ids := make([]string, 0, len(groups))
+	for _, g := range groups {
+		if !slices.Contains(ids, g.Id) {
+			ids = append(ids, g.Id)
+		}
+	}
+	return ids
 }

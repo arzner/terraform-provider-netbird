@@ -109,3 +109,20 @@ func Test_networkResourceAPIToTerraform(t *testing.T) {
 		}
 	}
 }
+
+// A group that lists the resource twice is returned twice by the server; the
+// set holds it once.
+func Test_networkResourceAPIToTerraform_duplicateGroups(t *testing.T) {
+	var data NetworkResourceModel
+	d := networkResourceAPIToTerraform(context.Background(), &api.NetworkResource{
+		Address: "10.0.0.0/24", Id: "r1", Name: "n", Type: api.NetworkResourceTypeSubnet,
+		Groups: []api.GroupMinimum{{Id: "a"}, {Id: "a"}, {Id: "b"}},
+	}, &data)
+	if d.HasError() {
+		t.Fatal(d)
+	}
+	want := types.SetValueMust(types.StringType, []attr.Value{types.StringValue("a"), types.StringValue("b")})
+	if !data.Groups.Equal(want) {
+		t.Errorf("expected %v, found %v", want, data.Groups)
+	}
+}

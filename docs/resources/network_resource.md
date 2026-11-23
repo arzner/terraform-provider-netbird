@@ -38,7 +38,6 @@ resource "netbird_network_resource" "example" {
 ### Required
 
 - `address` (String) Network resource address (either a direct host like 1.1.1.1 or 1.1.1.1/32, or a subnet like 192.168.178.0/24, or domains like example.com and *.example.com)
-- `groups` (Set of String) Group IDs containing the resource
 - `name` (String) NetworkResource Name
 - `network_id` (String) The unique identifier of a network
 
@@ -46,6 +45,7 @@ resource "netbird_network_resource" "example" {
 
 - `description` (String) NetworkResource Description
 - `enabled` (Boolean) NetworkResource status
+- `groups` (Set of String) Group IDs containing the resource. Left out, the resource's groups are not managed here: a new resource starts without groups, and an update keeps the groups the resource has, including ones a `netbird_group`'s `resources` adds. `[]` removes it from every group. A resource without groups is reached through policies that name it as `destination_resource`. The server refuses to delete a group that still holds resources, so to destroy a group that adds this resource through `resources`, apply `resources = []` on the group first.
 
 ### Read-Only
 
