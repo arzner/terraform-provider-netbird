@@ -127,6 +127,16 @@ func sortedStringList(ctx context.Context, prior types.List, values []string) (t
 	return sortedList(ctx, prior, l)
 }
 
+// emptyListAsPrior maps a list the server reports as null or empty: the
+// server does not tell an empty list from none, so a planned or stored empty
+// list stays empty, otherwise the value is null.
+func emptyListAsPrior(prior types.List, elem attr.Type) types.List {
+	if !prior.IsNull() && !prior.IsUnknown() && len(prior.Elements()) == 0 {
+		return types.ListValueMust(elem, []attr.Value{})
+	}
+	return types.ListNull(elem)
+}
+
 // sortedStringListPointer is sortedStringList for optional API slices; a nil pointer maps
 // the same way types.ListValueFrom maps it.
 func sortedStringListPointer(ctx context.Context, prior types.List, values *[]string) (types.List, diag.Diagnostics) {

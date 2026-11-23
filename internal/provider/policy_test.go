@@ -374,3 +374,22 @@ func Test_portRegex(t *testing.T) {
 		}
 	}
 }
+
+// An empty sources or destinations list keeps its spelling when the server
+// reports null; without a prior value the read is null.
+func Test_policyRule_emptyGroupLists(t *testing.T) {
+	empty := types.ListValueMust(types.StringType, []attr.Value{})
+	for name, tc := range map[string]struct {
+		prior types.List
+		want  types.List
+	}{
+		"planned empty":  {empty, empty},
+		"none planned":   {types.ListNull(types.StringType), types.ListNull(types.StringType)},
+		"unknown":        {types.ListUnknown(types.StringType), types.ListNull(types.StringType)},
+		"groups planned": {types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g")}), types.ListNull(types.StringType)},
+	} {
+		if got := emptyListAsPrior(tc.prior, types.StringType); !got.Equal(tc.want) {
+			t.Errorf("%s: expected %v, found %v", name, tc.want, got)
+		}
+	}
+}
