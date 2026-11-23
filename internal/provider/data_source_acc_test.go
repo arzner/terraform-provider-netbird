@@ -184,6 +184,7 @@ data "netbird_peer" "p" {
 		resource.TestCheckResourceAttr("data.netbird_peer.p", "name", "peer1"),
 		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "os"),
 		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "ip"),
+		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "ipv6"),
 	))
 }
 

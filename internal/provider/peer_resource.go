@@ -303,7 +303,12 @@ func (r *Peer) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		updateRequest.SshEnabled = data.SshEnabled.ValueBool()
 		updateRequired = true
 	}
-	if ipv6 := peerIPv6Request(data.Ipv6, peer.Ipv6); ipv6 != nil {
+	var config PeerModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if ipv6 := peerIPv6Request(config.Ipv6, peer.Ipv6); ipv6 != nil {
 		updateRequest.Ipv6 = ipv6
 		updateRequired = true
 	}
@@ -373,9 +378,16 @@ func (r *Peer) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		return
 	}
 
-	var state PeerModel
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	var config PeerModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+	// The address is compared with the target peer as it is now, and sent only
+	// when the configuration sets it: an omitted address stays the server's.
+	current, err := r.client.Peers.Get(ctx, data.Id.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Error getting Peer", err.Error())
 		return
 	}
 
@@ -385,7 +397,7 @@ func (r *Peer) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		LoginExpirationEnabled:      data.LoginExpirationEnabled.ValueBool(),
 		Name:                        data.Name.ValueString(),
 		SshEnabled:                  data.SshEnabled.ValueBool(),
-		Ipv6:                        peerIPv6Request(data.Ipv6, state.Ipv6.ValueStringPointer()),
+		Ipv6:                        peerIPv6Request(config.Ipv6, current.Ipv6),
 	})
 
 	if err != nil {

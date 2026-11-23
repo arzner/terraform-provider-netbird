@@ -5,7 +5,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"github.com/netbirdio/netbird/shared/management/http/api"
 	"net/netip"
 	"regexp"
 	"strings"
@@ -165,15 +164,16 @@ func testPeerResource(rName, id, name string) string {
 }`, rName, id, name)
 }
 
-// Test_Peer_IPv6 reads the peer's IPv6 overlay address, moves the peer to
-// another address in the account's range, imports it, and moves it back. The
-// account gives every peer an IPv6 address (ipv6_enabled_groups defaults to
-// All), so a missing address fails the test rather than skipping it.
+// Test_Peer_IPv6 reads the peer's IPv6 overlay address, moves the peer to an
+// unused address in the same /64, imports it, and moves it back. The account
+// gives every peer an IPv6 address (ipv6_enabled_groups defaults to All), so a
+// missing address fails the test rather than skipping it. It consumes peer7:
+// the destroy at the end deregisters the device.
 func Test_Peer_IPv6(t *testing.T) {
 	testE2E(t)
 	rName := "p" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
 	rNameFull := "netbird_peer." + rName
-	peerID := testPeerID(t, "peer2")
+	peerID := testPeerID(t, "peer7")
 	peer, err := testClient().Peers.Get(context.Background(), peerID)
 	if err != nil {
 		t.Fatalf("read the peer: %v", err)
@@ -182,26 +182,7 @@ func Test_Peer_IPv6(t *testing.T) {
 		t.Fatal("the fixture peer has no IPv6 address; IPv6 should be enabled for All")
 	}
 	original := *peer.Ipv6
-	current, err := netip.ParseAddr(original)
-	if err != nil {
-		t.Fatalf("parse %s: %v", original, err)
-	}
-	// Same /64, an interface ID the allocator is unlikely to have handed out.
-	b := current.As16()
-	b[12], b[13], b[14], b[15] = 0xfe, 0xed, 0x00, 0x42
-	moved := netip.AddrFrom16(b).String()
-	if moved == original {
-		b[15] = 0x43
-		moved = netip.AddrFrom16(b).String()
-	}
-	t.Cleanup(func() {
-		if _, err := testClient().Peers.Update(context.Background(), peerID, api.PeerRequest{
-			Name: peer.Name, SshEnabled: peer.SshEnabled, LoginExpirationEnabled: peer.LoginExpirationEnabled,
-			InactivityExpirationEnabled: peer.InactivityExpirationEnabled, Ipv6: &original,
-		}); err != nil {
-			t.Errorf("restore the peer's IPv6 address: %v", err)
-		}
-	})
+	moved := testUnusedPeerIPv6(t, original)
 	config := func(ipv6 string) string {
 		if ipv6 == "" {
 			return fmt.Sprintf(`resource "netbird_peer" %q {
@@ -227,9 +208,11 @@ func Test_Peer_IPv6(t *testing.T) {
 			return nil
 		}
 	}
+	gone := peerID
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testEnsureManagementRunning(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().Peers.Get, &gone),
 		Steps: []resource.TestStep{
 			{Config: config(""), Check: resource.ComposeAggregateTestCheckFunc(
 				resource.TestCheckResourceAttr(rNameFull, "ipv6", original), onServer(original))},
@@ -241,4 +224,33 @@ func Test_Peer_IPv6(t *testing.T) {
 				resource.TestCheckResourceAttr(rNameFull, "ipv6", original), onServer(original))},
 		},
 	})
+}
+
+// testUnusedPeerIPv6 returns an address in the /64 of addr that no peer of
+// the account uses.
+func testUnusedPeerIPv6(t *testing.T, addr string) string {
+	t.Helper()
+	peers, err := testClient().Peers.List(context.Background())
+	if err != nil {
+		t.Fatalf("list peers: %v", err)
+	}
+	used := map[string]bool{}
+	for _, p := range peers {
+		if p.Ipv6 != nil {
+			used[*p.Ipv6] = true
+		}
+	}
+	base, err := netip.ParseAddr(addr)
+	if err != nil {
+		t.Fatalf("parse %s: %v", addr, err)
+	}
+	b := base.As16()
+	for i := 0x42; i < 0x142; i++ {
+		b[12], b[13], b[14], b[15] = 0xfe, 0xed, byte(i>>8), byte(i)
+		if candidate := netip.AddrFrom16(b).String(); !used[candidate] {
+			return candidate
+		}
+	}
+	t.Fatal("no unused IPv6 address found")
+	return ""
 }
