@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -390,6 +391,54 @@ func Test_policyRule_emptyGroupLists(t *testing.T) {
 	} {
 		if got := emptyListAsPrior(tc.prior, types.StringType); !got.Equal(tc.want) {
 			t.Errorf("%s: expected %v, found %v", name, tc.want, got)
+		}
+	}
+}
+
+// policyAPIToTerraform keeps a prior empty group list only while the rule
+// uses groups on that side: without prior state (import) the read is null,
+// and a resource selected outside Terraform replaces the empty list.
+func Test_policyAPIToTerraform_emptyGroupLists(t *testing.T) {
+	ctx := context.Background()
+	empty := types.ListValueMust(types.StringType, []attr.Value{})
+	priorRule := func() types.List {
+		attrs := map[string]attr.Value{}
+		for n, at := range (PolicyRuleModel{}).TFType().AttrTypes {
+			v, err := at.ValueFromTerraform(ctx, tftypes.NewValue(at.TerraformType(ctx), nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			attrs[n] = v
+		}
+		attrs["sources"], attrs["destinations"] = empty, empty
+		return types.ListValueMust(PolicyRuleModel{}.TFType(), []attr.Value{types.ObjectValueMust(PolicyRuleModel{}.TFType().AttrTypes, attrs)})
+	}
+	policy := func(resource bool) *api.Policy {
+		rule := api.PolicyRule{Id: valPtr("r1"), Name: "r", Action: api.PolicyRuleActionAccept, Protocol: api.PolicyRuleProtocolAll, Enabled: true}
+		if resource {
+			rule.DestinationResource = &api.Resource{Id: "res1", Type: api.ResourceTypeHost}
+		}
+		return &api.Policy{Id: valPtr("p1"), Name: "p", Enabled: true, Rules: []api.PolicyRule{rule}}
+	}
+	for name, tc := range map[string]struct {
+		prior                 types.List
+		resource              bool
+		sources, destinations types.List
+	}{
+		"import":                         {types.ListNull(PolicyRuleModel{}.TFType()), false, types.ListNull(types.StringType), types.ListNull(types.StringType)},
+		"empty lists kept":               {priorRule(), false, empty, empty},
+		"destination resource elsewhere": {priorRule(), true, empty, types.ListNull(types.StringType)},
+	} {
+		data := PolicyModel{Rules: tc.prior, SourcePostureChecks: types.ListNull(types.StringType)}
+		if d := policyAPIToTerraform(ctx, policy(tc.resource), &data); d.HasError() {
+			t.Fatalf("%s: %v", name, d)
+		}
+		var rules []PolicyRuleModel
+		if d := data.Rules.ElementsAs(ctx, &rules, false); d.HasError() || len(rules) != 1 {
+			t.Fatalf("%s: %v %v", name, d, rules)
+		}
+		if !rules[0].Sources.Equal(tc.sources) || !rules[0].Destinations.Equal(tc.destinations) {
+			t.Errorf("%s: expected sources %v and destinations %v, found %v and %v", name, tc.sources, tc.destinations, rules[0].Sources, rules[0].Destinations)
 		}
 	}
 }

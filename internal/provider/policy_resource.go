@@ -344,8 +344,11 @@ func policyAPIToTerraform(ctx context.Context, policy *api.Policy, data *PolicyM
 			ret.Append(diag...)
 		} else {
 			// The server reports no groups as null: an empty list keeps the
-			// prior spelling.
-			ruleModel.Sources = emptyListAsPrior(objectListAttr(prior, "sources"), types.StringType)
+			// prior spelling, unless a resource is the source now.
+			ruleModel.Sources = types.ListNull(types.StringType)
+			if r.SourceResource == nil {
+				ruleModel.Sources = emptyListAsPrior(objectListAttr(prior, "sources"), types.StringType)
+			}
 		}
 		if r.Destinations != nil && len(*r.Destinations) > 0 {
 			var destinations []string
@@ -355,7 +358,10 @@ func policyAPIToTerraform(ctx context.Context, policy *api.Policy, data *PolicyM
 			ruleModel.Destinations, diag = sortedStringList(ctx, objectListAttr(prior, "destinations"), destinations)
 			ret.Append(diag...)
 		} else {
-			ruleModel.Destinations = emptyListAsPrior(objectListAttr(prior, "destinations"), types.StringType)
+			ruleModel.Destinations = types.ListNull(types.StringType)
+			if r.DestinationResource == nil {
+				ruleModel.Destinations = emptyListAsPrior(objectListAttr(prior, "destinations"), types.StringType)
+			}
 		}
 		if r.Ports != nil {
 			ruleModel.Ports, diag = sortedStringList(ctx, objectListAttr(prior, "ports"), *r.Ports)

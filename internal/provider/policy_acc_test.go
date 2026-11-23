@@ -5,12 +5,16 @@ package provider
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
+	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
 
 func Test_Policy_Create_Groups(t *testing.T) {
@@ -297,59 +301,84 @@ func testPolicyResourceResources(rName, name, description, rAction, rProt, rSour
 }`, rName, name, description, rAction, rProt, name, rSourceID, rSourceType, rDestID, rDestType, pStart, pEnd)
 }
 
-// Test_Policy_EmptySources: a rule with sources = [] (for example from an
-// empty variable) applies and plans no change; the server reports no groups
-// as null.
-func Test_Policy_EmptySources(t *testing.T) {
+// Test_Policy_EmptyGroupLists: a rule with sources = [] or destinations = []
+// (for example from an empty variable) applies and plans no change; the
+// server reports no groups as null.
+func Test_Policy_EmptyGroupLists(t *testing.T) {
 	testE2E(t)
-	rName := "po" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
-	rNameFull := "netbird_policy." + rName
-	var createdID string
-	config := func(sources string) string {
-		return strings.Replace(testPolicyResourceGroups(rName, rName, "desc", "accept", "tcp", "SOURCES", e2eGroupNotAllID(), "443"), `["SOURCES"]`, sources, 1)
+	for _, side := range []string{"sources", "destinations"} {
+		t.Run(side, func(t *testing.T) {
+			rName := "po" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+			rNameFull := "netbird_policy." + rName
+			var createdID string
+			// The other side keeps a group.
+			config := func(groups string) string {
+				c := testPolicyResourceGroups(rName, rName, "desc", "accept", "tcp", "SOURCES", "DESTINATIONS", "443")
+				if side == "sources" {
+					c = strings.Replace(c, `["DESTINATIONS"]`, fmt.Sprintf("[%q]", e2eGroupNotAllID()), 1)
+					return strings.Replace(c, `["SOURCES"]`, groups, 1)
+				}
+				c = strings.Replace(c, `["SOURCES"]`, fmt.Sprintf("[%q]", e2eGroupNotAllID()), 1)
+				return strings.Replace(c, `["DESTINATIONS"]`, groups, 1)
+			}
+			onServer := func(want ...string) resource.TestCheckFunc {
+				return func(*terraform.State) error {
+					policy, err := testClient().Policies.Get(context.Background(), createdID)
+					if err != nil {
+						return err
+					}
+					if len(policy.Rules) != 1 {
+						return fmt.Errorf("expected one rule, found %d", len(policy.Rules))
+					}
+					groups := policy.Rules[0].Sources
+					if side == "destinations" {
+						groups = policy.Rules[0].Destinations
+					}
+					var got []string
+					if groups != nil {
+						for _, g := range *groups {
+							got = append(got, g.Id)
+						}
+					}
+					if !slices.Equal(got, want) {
+						return fmt.Errorf("%s on the server: expected %v, found %v", side, want, got)
+					}
+					return nil
+				}
+			}
+			resource.Test(t, resource.TestCase{
+				PreCheck:                 func() { testEnsureManagementRunning(t) },
+				ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+				CheckDestroy:             testCheckGone(testClient().Policies.Get, &createdID),
+				Steps: []resource.TestStep{
+					{
+						Config: config("[]"),
+						ConfigStateChecks: []statecheck.StateCheck{
+							statecheck.ExpectKnownValue(rNameFull, tfjsonpath.New("rule").AtSliceIndex(0).AtMapKey(side), knownvalue.ListExact([]knownvalue.Check{})),
+						},
+						Check: resource.ComposeAggregateTestCheckFunc(testRecordID(rNameFull, &createdID), onServer()),
+					},
+					{
+						Config: config(fmt.Sprintf("[%q]", e2eGroupAllID())),
+						Check:  onServer(e2eGroupAllID()),
+					},
+					{
+						Config: config("[]"),
+						ConfigStateChecks: []statecheck.StateCheck{
+							statecheck.ExpectKnownValue(rNameFull, tfjsonpath.New("rule").AtSliceIndex(0).AtMapKey(side), knownvalue.ListExact([]knownvalue.Check{})),
+						},
+						Check: onServer(),
+					},
+					{
+						// Imported, the server's null cannot tell an empty
+						// list from none (the read is null; unit-tested).
+						ResourceName:            rNameFull,
+						ImportState:             true,
+						ImportStateVerify:       true,
+						ImportStateVerifyIgnore: []string{"rule.0." + side + ".#"},
+					},
+				},
+			})
+		})
 	}
-	noSourcesOnServer := func(*terraform.State) error {
-		policy, err := testClient().Policies.Get(context.Background(), createdID)
-		if err != nil {
-			return err
-		}
-		if len(policy.Rules) != 1 || (policy.Rules[0].Sources != nil && len(*policy.Rules[0].Sources) != 0) {
-			return fmt.Errorf("expected one rule without sources on the server, found %+v", policy.Rules)
-		}
-		return nil
-	}
-	resource.Test(t, resource.TestCase{
-		PreCheck:                 func() { testEnsureManagementRunning(t) },
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		CheckDestroy:             testCheckGone(testClient().Policies.Get, &createdID),
-		Steps: []resource.TestStep{
-			{
-				Config: config("[]"),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					testRecordID(rNameFull, &createdID),
-					resource.TestCheckResourceAttr(rNameFull, "rule.0.sources.#", "0"),
-					noSourcesOnServer,
-				),
-			},
-			{
-				Config: config(fmt.Sprintf("[%q]", e2eGroupAllID())),
-				Check:  resource.TestCheckResourceAttr(rNameFull, "rule.0.sources.0", e2eGroupAllID()),
-			},
-			{
-				Config: config("[]"),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr(rNameFull, "rule.0.sources.#", "0"),
-					noSourcesOnServer,
-				),
-			},
-			{
-				// Imported, the server's null cannot tell an empty list from
-				// none.
-				ResourceName:            rNameFull,
-				ImportState:             true,
-				ImportStateVerify:       true,
-				ImportStateVerifyIgnore: []string{"rule.0.sources.#"},
-			},
-		},
-	})
 }

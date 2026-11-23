@@ -68,7 +68,7 @@ it is based on.
 
 - `netbird_policy`: a rule with `sources = []` or `destinations = []` (for example from an empty
   variable) no longer fails the apply with an inconsistent result; the server reports no groups as
-  null, and an empty list keeps its spelling (#59; upstream
+  null, and an empty list keeps its spelling while the rule selects groups on that side (#59; upstream
   [#103](https://github.com/netbirdio/terraform-provider-netbird/issues/103)).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
