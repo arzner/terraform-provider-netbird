@@ -18,11 +18,13 @@
 package provider
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 // dataSourceByID reads back the resource the same configuration just created,
@@ -184,7 +186,18 @@ data "netbird_peer" "p" {
 		resource.TestCheckResourceAttr("data.netbird_peer.p", "name", "peer1"),
 		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "os"),
 		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "ip"),
-		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "ipv6"),
+		// The data source reads the list endpoint; compare with the peer
+		// endpoint's address.
+		func(s *terraform.State) error {
+			p, err := testClient().Peers.Get(context.Background(), peerID)
+			if err != nil {
+				return err
+			}
+			if p.Ipv6 == nil {
+				return fmt.Errorf("peer1 has no IPv6 address")
+			}
+			return resource.TestCheckResourceAttr("data.netbird_peer.p", "ipv6", *p.Ipv6)(s)
+		},
 	))
 }
 

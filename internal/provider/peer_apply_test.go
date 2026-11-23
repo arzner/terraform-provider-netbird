@@ -11,6 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
 	"github.com/netbirdio/netbird/shared/management/http/api"
@@ -168,3 +171,62 @@ func Test_peerChangedSincePlan(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// Test_Peer_Update_savesPartialUpdate drives Update against a stub server that
+// moves the address and then refuses the rest of the update, as NetBird does
+// for a refused rename: the error is reported and the state holds the peer as
+// read back (new address, old name), not the prior state.
+func Test_Peer_Update_savesPartialUpdate(t *testing.T) {
+	ctx := context.Background()
+	moved := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPut {
+			moved = true
+			w.WriteHeader(http.StatusPreconditionFailed)
+			_, _ = io.WriteString(w, `{"message":"peer with the same name already exists","code":412}`)
+			return
+		}
+		ipv6 := "fd00::7"
+		if moved {
+			ipv6 = "fd00::9"
+		}
+		_, _ = io.WriteString(w, `{"id":"p","name":"old","ipv6":"`+ipv6+`","user_id":"u"}`)
+	}))
+	defer srv.Close()
+	r := &Peer{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	model := func(name, ipv6 string) PeerModel {
+		return PeerModel{
+			Id: types.StringValue("p"), Name: types.StringValue(name), Ipv6: types.StringValue(ipv6),
+			SshEnabled: types.BoolValue(false), LoginExpirationEnabled: types.BoolValue(false),
+			InactivityExpirationEnabled: types.BoolValue(false), ApprovalRequired: types.BoolValue(false),
+			Groups: types.ListNull(types.StringType), ExtraDnsLabels: types.ListNull(types.StringType),
+		}
+	}
+	state := tfsdk.State{Schema: sch.Schema}
+	plan := tfsdk.Plan{Schema: sch.Schema}
+	config := tfsdk.Config{Schema: sch.Schema}
+	for _, d := range []diag.Diagnostics{
+		state.Set(ctx, model("old", "fd00::7")),
+		plan.Set(ctx, model("new", "fd00::9")),
+	} {
+		if d.HasError() {
+			t.Fatal(d)
+		}
+	}
+	config.Raw = plan.Raw.Copy()
+	resp := resource.UpdateResponse{State: state}
+	r.Update(ctx, resource.UpdateRequest{Plan: plan, Config: config, State: state}, &resp)
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected the refusal as an error")
+	}
+	var saved PeerModel
+	if d := resp.State.Get(ctx, &saved); d.HasError() {
+		t.Fatal(d)
+	}
+	if saved.Ipv6.ValueString() != "fd00::9" || saved.Name.ValueString() != "old" {
+		t.Errorf("expected the peer as read back (fd00::9, old) in state, found %s, %s", saved.Ipv6, saved.Name)
+	}
+}

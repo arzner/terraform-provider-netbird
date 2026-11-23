@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -203,6 +204,19 @@ func Test_Peer_IPv6(t *testing.T) {
 	// A disjoint range of the same size, and a fixed address in it.
 	otherRange, fixed := testOtherIPv6Range(t, originalRange)
 	other := testPeerID(t, "peer1")
+	otherPeer, err := testClient().Peers.Get(context.Background(), other)
+	if err != nil {
+		t.Fatalf("read peer1: %v", err)
+	}
+	otherUnchanged := func() {
+		p, err := testClient().Peers.Get(context.Background(), other)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Name != otherPeer.Name || !reflect.DeepEqual(p.Ipv6, otherPeer.Ipv6) {
+			t.Fatalf("peer1 changed: %q at %v, was %q at %v", p.Name, p.Ipv6, otherPeer.Name, otherPeer.Ipv6)
+		}
+	}
 	named := func(name, ipv6 string) string {
 		if ipv6 == "" {
 			return fmt.Sprintf(`resource "netbird_peer" %q {
@@ -297,11 +311,13 @@ resource "netbird_peer" %q {
 			// A rename together with an address the server refuses: the server
 			// checks the address first, so the refusal leaves the name as it was.
 			{Config: named(peer.Name+"-x", outside), ExpectError: regexp.MustCompile(`(?i)not within the account IPv6 range`)},
-			// Adopting another peer fails: the state keeps managing this one
-			// (the next step plans nothing), and the other peer is untouched.
-			{PreConfig: onServerBefore(peer.Name, moved), Config: retargeted(other, outside),
-				ExpectError: regexp.MustCompile(`(?i)not within the account IPv6 range`)},
-			{PreConfig: onServerBefore(peer.Name, moved), Config: config(moved),
+			// Adopting another peer fails: it is asked for this peer's address,
+			// which only the other peer collides with. The state keeps managing
+			// this peer (the next step plans nothing), and the other peer is
+			// untouched.
+			{PreConfig: onServerBefore(peer.Name, moved), Config: retargeted(other, moved),
+				ExpectError: regexp.MustCompile(`(?i)is already assigned to peer`)},
+			{PreConfig: func() { otherUnchanged(); onServerBefore(peer.Name, moved)() }, Config: config(moved),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
 			// Renamed outside Terraform between plan and apply while the plan
 			// keeps the name and moves the address: the apply stops before
