@@ -92,7 +92,7 @@ func (r *Peer) Schema(ctx context.Context, req resource.SchemaRequest, resp *res
 				Computed:            true,
 			},
 			"ipv6": schema.StringAttribute{
-				MarkdownDescription: "Peer IPv6 overlay address, inside the account's `network_range_v6`. Null when IPv6 is not enabled for the peer. Left out, the server-assigned address is kept; set, it is moved to this address. Canonical form only (lower case, shortest form), the way the server returns it.",
+				MarkdownDescription: "Peer IPv6 overlay address, inside the account's `network_range_v6`. Null when the server has not assigned the peer an IPv6 address (an assigned address does not mean the agent uses IPv6; it can disable it locally). Left out, the server-assigned address is kept; set, it is moved to this address. Canonical form only (lower case, shortest form), the way the server returns it.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},

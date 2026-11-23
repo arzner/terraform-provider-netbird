@@ -50,7 +50,7 @@ func (d *PeerDataSource) Schema(ctx context.Context, req datasource.SchemaReques
 				Computed:            true,
 			},
 			"ipv6": schema.StringAttribute{
-				MarkdownDescription: "Peer IPv6 overlay address; null when IPv6 is not enabled for the peer",
+				MarkdownDescription: "Peer IPv6 overlay address; null when the server has not assigned the peer an IPv6 address",
 				Computed:            true,
 			},
 			"connection_ip": schema.StringAttribute{
