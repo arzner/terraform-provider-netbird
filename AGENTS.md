@@ -14,6 +14,8 @@ type, or a lifecycle rule (plan modifier / validator). Keep that framing in mind
 the provider's job is a faithful, predictable mapping, not business logic.
 
 This file is the single source of truth for agent guidance in this repository.
+How a change travels from issue to release, the roles and the labels are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 It shares conventions with [netbirdio/netbird's `AGENTS.md`](https://github.com/netbirdio/netbird/blob/main/AGENTS.md);
 where a general Go or process rule is not repeated here, that file applies.
 
@@ -240,8 +242,9 @@ Follow NetBird's Go conventions:
   fixes out of features. For a change that genuinely cannot be small, agree the
   split in the issue first and prefer GitHub stacked PRs (each opened against the
   branch below it) over hand-managed base branches.
-- **Push review fixes as separate commits**; the PR squashes on merge, so there
-  is no reason to rewrite history mid-review. Do not force-push a branch that is
+- **Push review fixes as separate commits**; the PR is merged with a merge
+  commit and `main` history is never rewritten, so there is no reason to rewrite
+  history mid-review. Do not force-push a branch that is
   already under review (it detaches existing review comments); add commits instead.
 - Avoid the usual LLM tells in commits, comments, and PR text: em dashes, hedging
   narration, and trailing summaries.
