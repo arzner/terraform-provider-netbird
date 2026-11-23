@@ -102,7 +102,7 @@ func TestAccountSettingsCreateEmptyListReportsError(t *testing.T) {
 	plan := tfsdk.Plan{Schema: schema.Schema, Raw: objectValue(t, schema.Schema.Type().TerraformType(ctx), nil)}
 
 	resp := resource.CreateResponse{State: tfsdk.State{Schema: schema.Schema, Raw: tftypes.NewValue(schema.Schema.Type().TerraformType(ctx), nil)}}
-	r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+	r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config(plan)}, &resp)
 
 	if !resp.Diagnostics.HasError() {
 		t.Fatal("expected a diagnostic for an empty account list")
@@ -118,7 +118,7 @@ func TestAccountSettingsUpdateEmptyListReportsError(t *testing.T) {
 	state := tfsdk.State{Schema: schema.Schema, Raw: value}
 
 	resp := resource.UpdateResponse{State: state}
-	r.Update(ctx, resource.UpdateRequest{Plan: plan, State: state}, &resp)
+	r.Update(ctx, resource.UpdateRequest{Plan: plan, State: state, Config: tfsdk.Config(plan)}, &resp)
 
 	if !resp.Diagnostics.HasError() {
 		t.Fatal("expected a diagnostic for an empty account list")

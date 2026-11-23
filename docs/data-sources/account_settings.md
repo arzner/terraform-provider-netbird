@@ -22,7 +22,10 @@ data "netbird_account_settings" "example" {}
 
 ### Read-Only
 
+- `agent_network_only` (Boolean) Whether the dashboard is limited to the Agent Network surface.
+- `auto_update_always` (Boolean) Whether client updates are installed automatically in the background.
 - `auto_update_version` (String) Set Clients auto-update version. "latest", "disabled", or a specific version (e.g "0.64.5")
+- `dashboard_features` (Attributes) Per-account dashboard section visibility overrides. (see [below for nested schema](#nestedatt--dashboard_features))
 - `dns_domain` (String) Allows to define a custom DNS domain for the account
 - `groups_propagation_enabled` (Boolean) Allows propagate the new user auto groups to peers that belongs to the user
 - `id` (String) The unique identifier of an account
@@ -32,6 +35,7 @@ data "netbird_account_settings" "example" {}
 - `jwt_groups_enabled` (Boolean) Allows extract groups from JWT claim and add it to account groups.
 - `lazy_connection_enabled` (Boolean) Enables or disables experimental lazy connection
 - `local_mfa_enabled` (Boolean) Enables or disables TOTP multi-factor authentication for local users. Only applicable when the embedded identity provider is enabled.
+- `metrics_push_enabled` (Boolean) Whether client metrics push is enabled for all peers in the account.
 - `network_range` (String) Allows to define a custom network range for the account in CIDR format
 - `network_range_v6` (String) Custom IPv6 overlay network range of the account in CIDR format
 - `network_traffic_logs_enabled` (Boolean) Enables or disables network traffic logging. If enabled, all network traffic events from peers will be stored.
@@ -40,6 +44,7 @@ data "netbird_account_settings" "example" {}
 - `peer_approval_enabled` (Boolean) (Cloud only) Enables or disables peer approval globally. If enabled, all peers added will be in pending state until approved by an admin.
 - `peer_expose_enabled` (Boolean) Enables or disables peer expose. If enabled, peers can expose local services through the reverse proxy using the CLI.
 - `peer_expose_groups` (List of String) Limits which peer groups are allowed to expose services. If empty, all peers are allowed when peer expose is enabled.
+- `peer_hostname_collision_rejected` (Boolean) Whether a peer hostname already used in the account is rejected instead of suffixed.
 - `peer_inactivity_expiration` (Number) Period of time of inactivity after which peer session expires (seconds).
 - `peer_inactivity_expiration_enabled` (Boolean) Enables or disables peer inactivity expiration globally. After peer's session has expired the user has to log in (authenticate). Applies only to peers that were added by a user (interactive SSO login).
 - `peer_login_expiration` (Number) Period of time after which peer login expires (seconds).
@@ -47,3 +52,10 @@ data "netbird_account_settings" "example" {}
 - `regular_users_view_blocked` (Boolean) Allows blocking regular users from viewing parts of the system.
 - `routing_peer_dns_resolution_enabled` (Boolean) Enables or disables DNS resolution on the routing peers
 - `user_approval_required` (Boolean) Enables manual approval for new users joining via domain matching. When enabled, users are blocked with pending approval status until explicitly approved by an admin.
+
+<a id="nestedatt--dashboard_features"></a>
+### Nested Schema for `dashboard_features`
+
+Read-Only:
+
+- `agent_network` (Boolean) Whether the Agent Network menu is shown regardless of the deployment feature flag.
