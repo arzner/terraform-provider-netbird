@@ -5,6 +5,10 @@ package provider
 import (
 	"context"
 	"fmt"
+	"github.com/netbirdio/netbird/shared/management/http/api"
+	"net/netip"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -159,4 +163,82 @@ func testPeerResource(rName, id, name string) string {
 	id = "%s"
 	name = "%s"
 }`, rName, id, name)
+}
+
+// Test_Peer_IPv6 reads the peer's IPv6 overlay address, moves the peer to
+// another address in the account's range, imports it, and moves it back. The
+// account gives every peer an IPv6 address (ipv6_enabled_groups defaults to
+// All), so a missing address fails the test rather than skipping it.
+func Test_Peer_IPv6(t *testing.T) {
+	testE2E(t)
+	rName := "p" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_peer." + rName
+	peerID := testPeerID(t, "peer2")
+	peer, err := testClient().Peers.Get(context.Background(), peerID)
+	if err != nil {
+		t.Fatalf("read the peer: %v", err)
+	}
+	if peer.Ipv6 == nil || *peer.Ipv6 == "" {
+		t.Fatal("the fixture peer has no IPv6 address; IPv6 should be enabled for All")
+	}
+	original := *peer.Ipv6
+	current, err := netip.ParseAddr(original)
+	if err != nil {
+		t.Fatalf("parse %s: %v", original, err)
+	}
+	// Same /64, an interface ID the allocator is unlikely to have handed out.
+	b := current.As16()
+	b[12], b[13], b[14], b[15] = 0xfe, 0xed, 0x00, 0x42
+	moved := netip.AddrFrom16(b).String()
+	if moved == original {
+		b[15] = 0x43
+		moved = netip.AddrFrom16(b).String()
+	}
+	t.Cleanup(func() {
+		if _, err := testClient().Peers.Update(context.Background(), peerID, api.PeerRequest{
+			Name: peer.Name, SshEnabled: peer.SshEnabled, LoginExpirationEnabled: peer.LoginExpirationEnabled,
+			InactivityExpirationEnabled: peer.InactivityExpirationEnabled, Ipv6: &original,
+		}); err != nil {
+			t.Errorf("restore the peer's IPv6 address: %v", err)
+		}
+	})
+	config := func(ipv6 string) string {
+		if ipv6 == "" {
+			return fmt.Sprintf(`resource "netbird_peer" %q {
+  id   = %q
+  name = %q
+}`, rName, peerID, peer.Name)
+		}
+		return fmt.Sprintf(`resource "netbird_peer" %q {
+  id   = %q
+  name = %q
+  ipv6 = %q
+}`, rName, peerID, peer.Name, ipv6)
+	}
+	onServer := func(want string) resource.TestCheckFunc {
+		return func(s *terraform.State) error {
+			p, err := testClient().Peers.Get(context.Background(), peerID)
+			if err != nil {
+				return err
+			}
+			if p.Ipv6 == nil || *p.Ipv6 != want {
+				return fmt.Errorf("IPv6 on the server: expected %s, found %v", want, p.Ipv6)
+			}
+			return nil
+		}
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{Config: config(""), Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr(rNameFull, "ipv6", original), onServer(original))},
+			{Config: config(moved), ConfigPlanChecks: updatesInPlace(rNameFull), Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr(rNameFull, "ipv6", moved), onServer(moved))},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{Config: config(strings.ToUpper(moved)), ExpectError: regexp.MustCompile(`not in canonical form`)},
+			{Config: config(original), Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr(rNameFull, "ipv6", original), onServer(original))},
+		},
+	})
 }

@@ -8,6 +8,12 @@ it is based on.
 
 ## [Unreleased]
 
+### Added
+
+- `netbird_peer`: `ipv6`, the peer's IPv6 overlay address; left out, the server-assigned address
+  is kept, set, the peer moves to it (canonical form only). Also in the `netbird_peer` data
+  source (#24).
+
 ## [0.1.0] - 2026-11-23
 
 First release of the fork. Based on upstream `4aa1f36` (v0.0.11 plus [#263](https://github.com/netbirdio/terraform-provider-netbird/pull/263)),

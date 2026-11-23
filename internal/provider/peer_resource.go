@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/boolplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
@@ -40,6 +41,7 @@ type PeerModel struct {
 	Id                          types.String `tfsdk:"id"`
 	Name                        types.String `tfsdk:"name"`
 	Ip                          types.String `tfsdk:"ip"`
+	Ipv6                        types.String `tfsdk:"ipv6"`
 	ConnectionIp                types.String `tfsdk:"connection_ip"`
 	Connected                   types.Bool   `tfsdk:"connected"`
 	LastSeen                    types.String `tfsdk:"last_seen"`
@@ -88,6 +90,13 @@ func (r *Peer) Schema(ctx context.Context, req resource.SchemaRequest, resp *res
 			"ip": schema.StringAttribute{
 				MarkdownDescription: "Peer  IP",
 				Computed:            true,
+			},
+			"ipv6": schema.StringAttribute{
+				MarkdownDescription: "Peer IPv6 overlay address, inside the account's `network_range_v6`. Null when IPv6 is not enabled for the peer. Left out, the server-assigned address is kept; set, it is moved to this address. Canonical form only (lower case, shortest form), the way the server returns it.",
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				Validators:          []validator.String{canonicalAddress{ipv6: true}},
 			},
 			"connection_ip": schema.StringAttribute{
 				MarkdownDescription: "Peer Public IP",
@@ -216,6 +225,7 @@ func peerAPIToTerraform(ctx context.Context, peer *api.Peer, data *PeerModel) di
 	data.Id = types.StringValue(peer.Id)
 	data.Name = types.StringValue(peer.Name)
 	data.Ip = types.StringValue(peer.Ip)
+	data.Ipv6 = types.StringPointerValue(peer.Ipv6)
 	data.ConnectionIp = types.StringValue(peer.ConnectionIp)
 	data.Connected = types.BoolValue(peer.Connected)
 	data.LastSeen = types.StringValue(peer.LastSeen.Format(time.RFC3339))
@@ -293,6 +303,10 @@ func (r *Peer) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		updateRequest.SshEnabled = data.SshEnabled.ValueBool()
 		updateRequired = true
 	}
+	if ipv6 := peerIPv6Request(data.Ipv6, peer.Ipv6); ipv6 != nil {
+		updateRequest.Ipv6 = ipv6
+		updateRequired = true
+	}
 
 	if updateRequired {
 		peer, err = r.client.Peers.Update(ctx, peer.Id, updateRequest)
@@ -359,12 +373,19 @@ func (r *Peer) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		return
 	}
 
+	var state PeerModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	peer, err := r.client.Peers.Update(ctx, data.Id.ValueString(), api.PeerRequest{
 		ApprovalRequired:            data.ApprovalRequired.ValueBoolPointer(),
 		InactivityExpirationEnabled: data.InactivityExpirationEnabled.ValueBool(),
 		LoginExpirationEnabled:      data.LoginExpirationEnabled.ValueBool(),
 		Name:                        data.Name.ValueString(),
 		SshEnabled:                  data.SshEnabled.ValueBool(),
+		Ipv6:                        peerIPv6Request(data.Ipv6, state.Ipv6.ValueStringPointer()),
 	})
 
 	if err != nil {
@@ -406,4 +427,18 @@ func (r *Peer) Delete(ctx context.Context, req resource.DeleteRequest, resp *res
 
 func (r *Peer) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// peerIPv6Request returns the IPv6 address to send when the plan sets one that
+// differs from the current address, and nil otherwise: the server keeps the
+// address when the field is omitted, and moving a peer to its own address is
+// not a change.
+func peerIPv6Request(planned types.String, current *string) *string {
+	if planned.IsNull() || planned.IsUnknown() {
+		return nil
+	}
+	if current != nil && *current == planned.ValueString() {
+		return nil
+	}
+	return planned.ValueStringPointer()
 }
