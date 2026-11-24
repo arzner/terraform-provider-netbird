@@ -642,6 +642,16 @@ func Test_ReverseProxyService_TCPMode(t *testing.T) {
 	rNameFull := "netbird_reverse_proxy_service." + rName
 	peerID := testPeerID(t, "peer1")
 
+	// The update step's configuration leaves mode out.
+	withoutMode := strings.Replace(testReverseProxyServiceL4(rName, domain, peerID, "tcp", 15432, `
+    options = {
+      proxy_protocol  = true
+      request_timeout = "2m0s"
+    }`), "  mode        = \"tcp\"\n", "", 1)
+	if strings.Contains(withoutMode, "mode ") {
+		t.Fatal("the configuration without mode still sets it")
+	}
+
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testEnsureManagementRunning(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -706,11 +716,7 @@ func Test_ReverseProxyService_TCPMode(t *testing.T) {
 				// With mode left out, an update keeps (and sends) the TCP
 				// mode; a request without one would be refused as a change
 				// to HTTP.
-				Config: strings.Replace(testReverseProxyServiceL4(rName, domain, peerID, "tcp", 15432, `
-    options = {
-      proxy_protocol  = true
-      request_timeout = "2m0s"
-    }`), "  mode        = \"tcp\"\n", "", 1),
+				Config: withoutMode,
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionUpdate),
 					plancheck.ExpectKnownValue(rNameFull, tfjsonpath.New("mode"), knownvalue.StringExact("tcp")),
