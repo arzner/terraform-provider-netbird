@@ -83,7 +83,7 @@ func (r *AccountSettings) Metadata(ctx context.Context, req resource.MetadataReq
 
 func (r *AccountSettings) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manage Account-wide Settings",
+		MarkdownDescription: "Manage Account-wide Settings. Destroying the resource only removes it from the state: the settings on the server stay as they are.",
 
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{

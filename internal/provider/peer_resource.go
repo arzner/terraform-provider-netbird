@@ -73,7 +73,7 @@ func (r *Peer) Metadata(ctx context.Context, req resource.MetadataRequest, resp 
 func (r *Peer) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description:         "Manage NetBird Peers",
-		MarkdownDescription: "NetBird peer is a machine that runs the NetBird agent and is connected to the network. This resource doesn't create the Peer itself but manages it.",
+		MarkdownDescription: "NetBird peer is a machine that runs the NetBird agent and is connected to the network. This resource doesn't create the Peer itself but manages it: creating the resource adopts the existing peer with the given `id` and applies the configured settings, and a new `id` adopts another peer in place (the previous one stays registered, with the settings it has). Destroying the resource deletes the peer from NetBird, which removes the device from the network until it registers again; use `terraform state rm` to stop managing a peer without deleting it.",
 
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{

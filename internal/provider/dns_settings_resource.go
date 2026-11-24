@@ -48,7 +48,7 @@ func (r *DNSSettings) Metadata(ctx context.Context, req resource.MetadataRequest
 
 func (r *DNSSettings) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manage Account DNS Settings (Only one of this resource should be used per provider).",
+		MarkdownDescription: "Manage Account DNS Settings (Only one of this resource should be used per provider). Destroying the resource only removes it from the state: the settings on the server stay as they are.",
 		Description:         "Manage Account DNS Settings",
 
 		Attributes: map[string]schema.Attribute{
