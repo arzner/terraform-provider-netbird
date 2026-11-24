@@ -5,6 +5,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"slices"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -294,4 +296,64 @@ func testPolicyResourceResources(rName, name, description, rAction, rProt, rSour
 		]
 	}
 }`, rName, name, description, rAction, rProt, name, rSourceID, rSourceType, rDestID, rDestType, pStart, pEnd)
+}
+
+// Test_Policy_AuthorizedGroups: the server needs an authorized_groups entry
+// for every source group of a netbird-ssh rule and accepts other keys.
+func Test_Policy_AuthorizedGroups(t *testing.T) {
+	testE2E(t)
+	rName := "po" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_policy." + rName
+	var createdID string
+	config := func(groups string) string {
+		return fmt.Sprintf(`resource "netbird_policy" %q {
+  name    = %q
+  enabled = true
+
+  rule {
+    name              = %q
+    action            = "accept"
+    bidirectional     = false
+    enabled           = true
+    protocol          = "netbird-ssh"
+    sources           = [%q]
+    destinations      = [%q]
+    authorized_groups = %s
+  }
+}`, rName, rName, rName, e2eGroupNotAllID(), e2eGroupAllID(), groups)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().Policies.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				// The source group has no entry: refused at plan time.
+				Config:      config(fmt.Sprintf(`{ %q = ["root"] }`, e2eGroupAllID())),
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`authorized_groups incomplete`),
+			},
+			{
+				// An entry for the source and one more key: the server takes both.
+				Config: config(fmt.Sprintf(`{ %q = ["root"], %q = ["admin"] }`, e2eGroupNotAllID(), e2eGroupAllID())),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					func(*terraform.State) error {
+						policy, err := testClient().Policies.Get(context.Background(), createdID)
+						if err != nil {
+							return err
+						}
+						if len(policy.Rules) != 1 || policy.Rules[0].AuthorizedGroups == nil {
+							return fmt.Errorf("expected one rule with authorized groups, found %+v", policy.Rules)
+						}
+						got := *policy.Rules[0].AuthorizedGroups
+						if !slices.Equal(got[e2eGroupNotAllID()], []string{"root"}) || !slices.Equal(got[e2eGroupAllID()], []string{"admin"}) {
+							return fmt.Errorf("authorized groups on the server: %v", got)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
 }

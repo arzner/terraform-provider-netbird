@@ -2,8 +2,12 @@ package provider
 
 import (
 	"context"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -349,7 +353,100 @@ func Test_policyRulesAuthorizedGroupsValidation(t *testing.T) {
 	}
 	_, diag := policyRulesTerraformToAPI(context.Background(), model)
 	if !diag.HasError() {
-		t.Fatal("Expected validation error for authorized_groups key not in sources, but got none")
+		t.Fatal("Expected validation error for a source without an authorized_groups entry, but got none")
+	}
+}
+
+// The server needs an entry for every source and accepts other keys.
+func Test_sourcesWithoutAuthorizedUsers(t *testing.T) {
+	users := types.ListValueMust(types.StringType, []attr.Value{types.StringValue("root")})
+	groups := func(keys ...string) types.Map {
+		m := map[string]attr.Value{}
+		for _, k := range keys {
+			m[k] = users
+		}
+		return types.MapValueMust(types.ListType{ElemType: types.StringType}, m)
+	}
+	for name, tc := range map[string]struct {
+		sources []string
+		groups  types.Map
+		want    []string
+	}{
+		"every source":      {[]string{"g1", "g2"}, groups("g1", "g2"), nil},
+		"an extra key":      {[]string{"g1"}, groups("g1", "other"), nil},
+		"a source left out": {[]string{"g1", "g2"}, groups("g1"), []string{"g2"}},
+		"empty map":         {[]string{"g1"}, groups(), nil},
+		"no sources":        {nil, groups("g1"), nil},
+		"unknown map":       {[]string{"g1"}, types.MapUnknown(types.ListType{ElemType: types.StringType}), nil},
+	} {
+		var sources *[]string
+		if tc.sources != nil {
+			sources = &tc.sources
+		}
+		if got := sourcesWithoutAuthorizedUsers(sources, tc.groups); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: expected %v, found %v", name, tc.want, got)
+		}
+	}
+}
+
+// ValidateConfig refuses at plan time what the server would refuse or drop.
+func Test_policyValidateConfigAuthorizedGroups(t *testing.T) {
+	ctx := context.Background()
+	r := &Policy{}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	rulesType, ok := typ.AttributeTypes["rule"].(tftypes.List)
+	if !ok {
+		t.Fatal("rule is not a list")
+	}
+	ruleType, ok := rulesType.ElementType.(tftypes.Object)
+	if !ok {
+		t.Fatal("a rule is not an object")
+	}
+	strs := func(v ...string) tftypes.Value {
+		var l []tftypes.Value
+		for _, s := range v {
+			l = append(l, tftypes.NewValue(tftypes.String, s))
+		}
+		return tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, l)
+	}
+	config := func(protocol string, keys ...string) tftypes.Value {
+		rule := map[string]tftypes.Value{}
+		for n, at := range ruleType.AttributeTypes {
+			rule[n] = tftypes.NewValue(at, nil)
+		}
+		rule["protocol"] = tftypes.NewValue(tftypes.String, protocol)
+		rule["sources"] = strs("g1", "g2")
+		m := map[string]tftypes.Value{}
+		for _, k := range keys {
+			m[k] = strs("root")
+		}
+		rule["authorized_groups"] = tftypes.NewValue(tftypes.Map{ElementType: tftypes.List{ElementType: tftypes.String}}, m)
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["rule"] = tftypes.NewValue(rulesType, []tftypes.Value{tftypes.NewValue(ruleType, rule)})
+		return tftypes.NewValue(typ, values)
+	}
+	for name, tc := range map[string]struct {
+		config    tftypes.Value
+		wantError bool
+	}{
+		"every source":      {config("netbird-ssh", "g1", "g2"), false},
+		"an extra key":      {config("netbird-ssh", "g1", "g2", "g3"), false},
+		"a source left out": {config("netbird-ssh", "g1"), true},
+		"not netbird-ssh":   {config("tcp", "g1", "g2"), true},
+	} {
+		resp := resource.ValidateConfigResponse{}
+		r.ValidateConfig(ctx, resource.ValidateConfigRequest{Config: tfsdk.Config{Schema: sch.Schema, Raw: tc.config}}, &resp)
+		if resp.Diagnostics.HasError() != tc.wantError {
+			t.Errorf("%s: expected error %v, found %v", name, tc.wantError, resp.Diagnostics)
+		}
 	}
 }
 

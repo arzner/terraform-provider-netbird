@@ -33,6 +33,66 @@ import (
 // Ensure provider defined types fully satisfy framework interfaces.
 var _ resource.Resource = &Policy{}
 var _ resource.ResourceWithImportState = &Policy{}
+var _ resource.ResourceWithValidateConfig = &Policy{}
+
+// sourcesWithoutAuthorizedUsers lists the source groups a non-empty
+// authorized_groups has no entry for: the server requires one for each
+// source of a netbird-ssh rule and accepts extra keys
+// (policies_handler.go, v0.83.2 and v0.82.1). An empty map is not checked.
+func sourcesWithoutAuthorizedUsers(sources *[]string, groups types.Map) []string {
+	if sources == nil || groups.IsNull() || groups.IsUnknown() || len(groups.Elements()) == 0 {
+		return nil
+	}
+	var missing []string
+	for _, s := range *sources {
+		if _, ok := groups.Elements()[s]; !ok {
+			missing = append(missing, s)
+		}
+	}
+	return missing
+}
+
+// ValidateConfig checks authorized_groups at plan time for the values
+// already known: only for netbird-ssh, and an entry for every source.
+func (r *Policy) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var rules types.List
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("rule"), &rules)...)
+	if resp.Diagnostics.HasError() || rules.IsNull() || rules.IsUnknown() {
+		return
+	}
+	for i, e := range rules.Elements() {
+		obj, ok := e.(types.Object)
+		if !ok || obj.IsNull() || obj.IsUnknown() {
+			continue
+		}
+		attrs := obj.Attributes()
+		groups, _ := attrs["authorized_groups"].(types.Map)
+		protocol, _ := attrs["protocol"].(types.String)
+		if groups.IsNull() || groups.IsUnknown() || protocol.IsNull() || protocol.IsUnknown() {
+			continue
+		}
+		at := path.Root("rule").AtListIndex(i).AtName("authorized_groups")
+		if protocol.ValueString() != "netbird-ssh" {
+			resp.Diagnostics.AddAttributeError(at, "authorized_groups needs netbird-ssh",
+				fmt.Sprintf("authorized_groups applies only to protocol netbird-ssh, and the server ignores it for %q.", protocol.ValueString()))
+			continue
+		}
+		sources, _ := attrs["sources"].(types.List)
+		if sources.IsNull() || sources.IsUnknown() {
+			continue
+		}
+		var known []string
+		for _, s := range sources.Elements() {
+			if str, ok := s.(types.String); ok && !str.IsNull() && !str.IsUnknown() {
+				known = append(known, str.ValueString())
+			}
+		}
+		if missing := sourcesWithoutAuthorizedUsers(&known, groups); len(missing) > 0 {
+			resp.Diagnostics.AddAttributeError(at, "authorized_groups incomplete",
+				fmt.Sprintf("The server needs an entry for every group in sources when authorized_groups is set; missing: %s.", strings.Join(missing, ", ")))
+		}
+	}
+}
 
 const portStringRegex = "^([0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$"
 
@@ -243,7 +303,7 @@ func (r *Policy) Schema(ctx context.Context, req resource.SchemaRequest, resp *r
 							Validators: []validator.Object{objectvalidator.ConflictsWith(path.MatchRelative().AtParent().AtName("destinations"))},
 						},
 						"authorized_groups": schema.MapAttribute{
-							MarkdownDescription: "Map of source group IDs to a list of local users authorized for SSH access. Keys must be group IDs present in `sources`. If not set, all local users are permitted. Only applicable when protocol is `netbird-ssh`.",
+							MarkdownDescription: "Map of source group IDs to a list of local users authorized for SSH access. When set and not empty, it needs an entry for every group in `sources` (other keys are accepted). If not set, all local users are permitted. Only applicable when protocol is `netbird-ssh`.",
 							ElementType:         types.ListType{ElemType: types.StringType},
 							Optional:            true,
 							Computed:            true,
@@ -542,18 +602,12 @@ func policyRulesTerraformToAPI(ctx context.Context, data *PolicyModel) ([]api.Po
 				ret.AddError("Invalid Configuration", fmt.Sprintf(`rule[%d]: "authorized_groups" can only be set when protocol is "netbird-ssh"`, i))
 				return nil, ret
 			}
-			sourceIDs := make(map[string]bool)
-			if rule.Sources != nil {
-				for _, s := range *rule.Sources {
-					sourceIDs[s] = true
-				}
+			if missing := sourcesWithoutAuthorizedUsers(rule.Sources, v); len(missing) > 0 {
+				ret.AddError("Invalid Configuration", fmt.Sprintf(`rule[%d]: authorized_groups needs an entry for every group in "sources"; missing: %s`, i, strings.Join(missing, ", ")))
+				return nil, ret
 			}
 			ag := make(map[string][]string)
 			for k, val := range v.Elements() {
-				if !sourceIDs[k] {
-					ret.AddError("Invalid Configuration", fmt.Sprintf(`rule[%d]: authorized_groups key %q must be one of the group IDs in "sources"`, i, k))
-					return nil, ret
-				}
 				listVal, ok := val.(types.List)
 				if !ok {
 					ret.AddError("Unexpected Value", fmt.Sprintf("data.Rules[%d].authorized_groups[%s] expected to be types.List, found %T", i, k, val))
