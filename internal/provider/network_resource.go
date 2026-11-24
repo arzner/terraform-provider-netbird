@@ -236,7 +236,10 @@ func (r *Network) Delete(ctx context.Context, req resource.DeleteRequest, resp *
 	}
 
 	err := r.client.Networks.Delete(ctx, data.Id.ValueString())
-	if err != nil && !netbird.IsNotFound(err) {
+	if err = deleteError(ctx, r.client, err, func(ctx context.Context) error {
+		_, err := r.client.Networks.Get(ctx, data.Id.ValueString())
+		return err
+	}); err != nil {
 		resp.Diagnostics.AddError("Error deleting Network", err.Error())
 	}
 }

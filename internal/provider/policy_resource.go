@@ -703,7 +703,10 @@ func (r *Policy) Delete(ctx context.Context, req resource.DeleteRequest, resp *r
 	}
 
 	err := r.client.Policies.Delete(ctx, data.Id.ValueString())
-	if err != nil && !netbird.IsNotFound(err) {
+	if err = deleteError(ctx, r.client, err, func(ctx context.Context) error {
+		_, err := r.client.Policies.Get(ctx, data.Id.ValueString())
+		return err
+	}); err != nil {
 		resp.Diagnostics.AddError("Error deleting Policy", err.Error())
 	}
 }

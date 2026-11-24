@@ -249,7 +249,10 @@ func (r *DNSZone) Delete(ctx context.Context, req resource.DeleteRequest, resp *
 	}
 
 	err := r.client.DNSZones.DeleteZone(ctx, data.Id.ValueString())
-	if err != nil && !netbird.IsNotFound(err) {
+	if err = deleteError(ctx, r.client, err, func(ctx context.Context) error {
+		_, err := r.client.DNSZones.GetZone(ctx, data.Id.ValueString())
+		return err
+	}); err != nil {
 		resp.Diagnostics.AddError("Error deleting DNS Zone", err.Error())
 	}
 }
