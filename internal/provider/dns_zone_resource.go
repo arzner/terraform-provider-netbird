@@ -6,8 +6,10 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -22,12 +24,14 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
+	nbdomain "github.com/netbirdio/netbird/shared/management/domain"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
 
 // Ensure provider defined types fully satisfy framework interfaces.
 var _ resource.Resource = &DNSZone{}
 var _ resource.ResourceWithImportState = &DNSZone{}
+var _ resource.ResourceWithModifyPlan = &DNSZone{}
 
 func NewDNSZone() resource.Resource {
 	return &DNSZone{}
@@ -66,12 +70,13 @@ func (r *DNSZone) Schema(ctx context.Context, req resource.SchemaRequest, resp *
 			"name": schema.StringAttribute{
 				MarkdownDescription: "DNS Zone name identifier",
 				Required:            true,
-				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
+				Validators:          []validator.String{stringvalidator.LengthBetween(1, 255)},
 			},
 			"domain": schema.StringAttribute{
-				MarkdownDescription: "Zone domain (FQDN)",
+				MarkdownDescription: "Zone domain (FQDN, no wildcard, no trailing dot; a known value is checked at plan time the way the server does). The server does not change the domain of a zone, so a new domain replaces the zone. The server deletes the old zone with all its records. A `netbird_dns_record` in the same configuration whose `zone_id` refers to this zone is normally replaced in the new zone by the same apply (its name has to move to the new domain too); check that the plan shows it replaced, as a targeted apply (`-target`) without it or `ignore_changes` on it leaves it out. Any other record, added outside Terraform, with a literal zone ID or in another state, is lost. The plan does not check that the new domain is free: one used by another zone or by the peer DNS domain fails after the old zone is deleted, unless `lifecycle { create_before_destroy = true }` is set.",
 				Required:            true,
-				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
+				Validators:          []validator.String{zoneDomain{}},
+				PlanModifiers:       []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"enabled": schema.BoolAttribute{
 				MarkdownDescription: "DNS Zone status",
@@ -88,7 +93,8 @@ func (r *DNSZone) Schema(ctx context.Context, req resource.SchemaRequest, resp *
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"distribution_groups": schema.SetAttribute{
-				MarkdownDescription: "Group IDs that define groups of peers that will resolve this zone",
+				MarkdownDescription: "Group IDs that define groups of peers that will resolve this zone. Needed to create the zone, also when a new domain replaces it; left out on an existing zone, its groups are kept.",
+				Validators:          []validator.Set{setvalidator.SizeAtLeast(1), setvalidator.NoNullValues(), setvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1))},
 				ElementType:         types.StringType,
 				Optional:            true,
 				Computed:            true,
@@ -256,4 +262,104 @@ func (r *DNSZone) Delete(ctx context.Context, req resource.DeleteRequest, resp *
 
 func (r *DNSZone) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// zoneDomain checks a zone domain the way the server does (v0.83, v0.82:
+// Zone.Validate, domain.IsValidDomainNoWildcard): a domain replacement
+// deletes the old zone first, so a domain the server refuses must fail the
+// plan instead.
+type zoneDomain struct{}
+
+func (zoneDomain) Description(context.Context) string {
+	return "must be a domain name without a wildcard or a trailing dot"
+}
+
+func (v zoneDomain) MarkdownDescription(ctx context.Context) string { return v.Description(ctx) }
+
+func (zoneDomain) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	if !nbdomain.IsValidDomainNoWildcard(req.ConfigValue.ValueString()) {
+		resp.Diagnostics.AddAttributeError(req.Path, "Invalid zone domain",
+			"The server refuses this zone domain: it must be a domain name without a wildcard or a trailing dot.")
+	}
+}
+
+// ModifyPlan refuses a create, or a replacement for a new domain, without
+// distribution_groups: the server needs at least one group to create a zone,
+// and a replacement would delete the old zone before that create fails.
+func (r *DNSZone) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	var configured types.Set
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("distribution_groups"), &configured)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	creates := req.State.Raw.IsNull()
+	replaces := false
+	if !creates {
+		var planned, current types.String
+		resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("domain"), &planned)...)
+		resp.Diagnostics.Append(req.State.GetAttribute(ctx, path.Root("domain"), &current)...)
+		// A domain not known yet also forces the replacement (RequiresReplace
+		// compares it with the state).
+		replaces = planned.IsUnknown() || !planned.Equal(current)
+	}
+	if !creates && !replaces {
+		return
+	}
+	if configured.IsNull() {
+		resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Distribution groups required",
+			"Creating the zone, also to replace it for a new domain, needs at least one group in distribution_groups.")
+		return
+	}
+	// The server refuses to create a zone with a group that does not exist,
+	// and a domain replacement deletes the old zone first: look the known
+	// groups up. Only then, with the zone just refreshed from the configured
+	// server; a first create needs no request at plan time (a refused create
+	// loses nothing), and the endpoint may not be known yet.
+	if !replaces || r.client == nil || configured.IsUnknown() {
+		return
+	}
+	for _, e := range configured.Elements() {
+		id, ok := e.(types.String)
+		if !ok || id.IsNull() || id.IsUnknown() {
+			continue
+		}
+		// The client puts the ID into the URL path as it is, and the server
+		// cleans dot segments: an ID that is not one plain segment is refused
+		// without a request, so the authenticated GET stays on the group
+		// endpoint.
+		if !plainPathSegment(id.ValueString()) {
+			resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Invalid group ID",
+				fmt.Sprintf("%q is not a group ID.", id.ValueString()))
+			return
+		}
+		group, err := r.client.Groups.Get(ctx, url.PathEscape(id.ValueString()))
+		switch {
+		case err != nil && netbird.IsNotFound(err):
+			resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Distribution group not found",
+				fmt.Sprintf("Group %q does not exist, so the zone for the new domain could not be created after the old one is deleted.", id.ValueString()))
+		case err != nil:
+			// Inconclusive: refuse rather than risk deleting the zone.
+			resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Distribution group not checked",
+				fmt.Sprintf("Group %q could not be looked up before the replacement, which deletes the zone first: %s. Plan again once the server answers.", id.ValueString(), err))
+			// The plan fails either way: no further lookups.
+			return
+		case group.Id != id.ValueString():
+			// The lookup goes through the URL, which does not carry every
+			// character the create sends (a "#..." suffix, for one).
+			resp.Diagnostics.AddAttributeError(path.Root("distribution_groups"), "Distribution group not found",
+				fmt.Sprintf("Group %q is not a group ID the server knows (the lookup returned %q).", id.ValueString(), group.Id))
+		}
+	}
+}
+
+// plainPathSegment reports whether v can stand as one URL path segment
+// without the server's path cleaning moving the request elsewhere.
+func plainPathSegment(v string) bool {
+	return v != "." && v != ".." && !strings.ContainsAny(v, "/\\?#%")
 }
