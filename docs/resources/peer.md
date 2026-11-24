@@ -64,3 +64,15 @@ resource "netbird_peer" "example" {
 - `ui_version` (String) Peer  UI Version
 - `user_id` (String) User ID of peer
 - `version` (String) Peer  Version
+
+## Import
+
+Import is supported using the following syntax:
+
+```shell
+terraform import netbird_peer.example peer_id
+
+# For example
+
+terraform import netbird_peer.example cvi60dbl0ubs73ask0n0
+```

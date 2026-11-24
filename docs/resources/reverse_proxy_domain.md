@@ -34,3 +34,15 @@ resource "netbird_reverse_proxy_domain" "example" {
 - `id` (String) Domain ID
 - `type` (String) Type of reverse proxy domain (free, custom)
 - `validated` (Boolean) Whether the domain has been validated
+
+## Import
+
+Import is supported using the following syntax:
+
+```shell
+terraform import netbird_reverse_proxy_domain.example reverse_proxy_domain_id
+
+# For example
+
+terraform import netbird_reverse_proxy_domain.example d50m8vatvgfc7398k3a0
+```

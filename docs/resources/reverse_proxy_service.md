@@ -278,3 +278,15 @@ Optional:
 - `blocked_cidrs` (List of String) CIDR blocklist
 - `blocked_countries` (List of String) ISO 3166-1 alpha-2 country codes to block
 - `crowdsec_mode` (String) CrowdSec IP reputation mode: `off`, `enforce` or `observe`. The server accepts each mode whether or not the cluster supports CrowdSec: with `enforce`, a proxy without a ready CrowdSec checker denies every request from outside the tunnel, while `observe` lets them through. Requests over the NetBird tunnel, including all access to a private service, are not checked against CrowdSec. Left out, the server treats it as `off`.
+
+## Import
+
+Import is supported using the following syntax:
+
+```shell
+terraform import netbird_reverse_proxy_service.example reverse_proxy_service_id
+
+# For example
+
+terraform import netbird_reverse_proxy_service.example d50m9a2tvgfc7398k3b0
+```

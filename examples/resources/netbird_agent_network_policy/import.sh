@@ -1,0 +1,5 @@
+terraform import netbird_agent_network_policy.example policy_id
+
+# For example
+
+terraform import netbird_agent_network_policy.example d50mab2tvgfc7398k3d0

@@ -1,0 +1,5 @@
+terraform import netbird_identity_provider.example identity_provider_id
+
+# For example
+
+terraform import netbird_identity_provider.example d4h2tvqtvgfc73ercgl0

@@ -73,9 +73,9 @@ resource "netbird_dns_record" "wildcard" {
 Import is supported using the following syntax:
 
 ```shell
-terraform import netbird_dns_zone.example dns_zone_id
+terraform import netbird_dns_record.example dns_zone_id:dns_record_id
 
 # For example
 
-terraform import netbird_dns_zone.example d50lthitvgfc7398k370
+terraform import netbird_dns_record.example d50lthitvgfc7398k370:d50ltu2tvgfc7398k37g
 ```

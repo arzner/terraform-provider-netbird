@@ -65,3 +65,15 @@ Optional:
 
 - `enabled` (Boolean) Whether prompt capture is enabled for this guardrail
 - `redact_pii` (Boolean) Whether captured prompts have PII redacted
+
+## Import
+
+Import is supported using the following syntax:
+
+```shell
+terraform import netbird_agent_network_guardrail.example guardrail_id
+
+# For example
+
+terraform import netbird_agent_network_guardrail.example d50ma0itvgfc7398k3c0
+```

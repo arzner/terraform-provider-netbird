@@ -66,6 +66,11 @@ it is based on.
 
 ### Fixed
 
+- Docs: the import examples of `netbird_dns_record` (`zone_id:record_id`) and `netbird_dns_zone`
+  imported the wrong resource; the resources that support import without an example
+  (`netbird_peer`, `netbird_identity_provider`, `netbird_scim`, `netbird_reverse_proxy_domain`,
+  `netbird_reverse_proxy_service` and the agent network guardrail, policy and provider) have one
+  now (#98).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the

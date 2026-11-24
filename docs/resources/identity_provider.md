@@ -36,3 +36,15 @@ resource "netbird_identity_provider" "example" {
 ### Read-Only
 
 - `id` (String) Identity provider ID
+
+## Import
+
+Import is supported using the following syntax:
+
+```shell
+terraform import netbird_identity_provider.example identity_provider_id
+
+# For example
+
+terraform import netbird_identity_provider.example d4h2tvqtvgfc73ercgl0
+```

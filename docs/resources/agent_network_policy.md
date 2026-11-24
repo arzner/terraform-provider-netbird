@@ -79,3 +79,15 @@ Optional:
 - `group_cap` (Number) Tokens allowed per source group per window (0 = uncapped)
 - `user_cap` (Number) Tokens allowed per individual user per window (0 = uncapped)
 - `window_seconds` (Number) Reset frequency in seconds (minimum 60 when enabled)
+
+## Import
+
+Import is supported using the following syntax:
+
+```shell
+terraform import netbird_agent_network_policy.example policy_id
+
+# For example
+
+terraform import netbird_agent_network_policy.example d50mab2tvgfc7398k3d0
+```

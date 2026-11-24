@@ -1,0 +1,5 @@
+terraform import netbird_agent_network_provider.example provider_id
+
+# For example
+
+terraform import netbird_agent_network_provider.example d50mal2tvgfc7398k3e0
