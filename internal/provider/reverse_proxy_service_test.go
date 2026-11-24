@@ -2,7 +2,18 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
+	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -1780,5 +1791,298 @@ func Test_reconcileOptions(t *testing.T) {
 	got, _ = reconcileOptions(options(n, n, types.BoolValue(false)), types.ObjectNull(optsType.AttrTypes))
 	if got.IsNull() || !got.Attributes()["skip_tls_verify"].Equal(types.BoolValue(false)) {
 		t.Errorf("options that set only defaults stay as planned, found %v", got)
+	}
+}
+
+// A known mode other than the stored one is refused; a left-out or unknown
+// mode and the same mode are not.
+func Test_modeChangeProblem(t *testing.T) {
+	for name, tc := range map[string]struct {
+		stored, planned types.String
+		wantError       bool
+	}{
+		"tcp to http":  {types.StringValue("tcp"), types.StringValue("http"), true},
+		"http to udp":  {types.StringValue("http"), types.StringValue("udp"), true},
+		"tcp kept":     {types.StringValue("tcp"), types.StringValue("tcp"), false},
+		"unknown":      {types.StringValue("tcp"), types.StringUnknown(), false},
+		"none planned": {types.StringValue("tcp"), types.StringNull(), false},
+	} {
+		if got := modeChangeProblem(tc.stored, tc.planned).HasError(); got != tc.wantError {
+			t.Errorf("%s: expected error %v, found %v", name, tc.wantError, got)
+		}
+	}
+}
+
+// The server reports an unset mode as nil or as "": both read as HTTP.
+func Test_reverseProxyServiceAPIToTerraform_unsetMode(t *testing.T) {
+	empty := api.ServiceMode("")
+	for name, mode := range map[string]*api.ServiceMode{"nil": nil, "empty": &empty} {
+		var model ReverseProxyServiceModel
+		svc := &api.Service{Id: "s1", Name: "s", Domain: "s.example", Mode: mode}
+		if d := reverseProxyServiceAPIToTerraform(context.Background(), svc, &model); d.HasError() {
+			t.Fatalf("%s: %v", name, d)
+		}
+		if model.Mode.ValueString() != "http" {
+			t.Errorf("%s: expected http, found %v", name, model.Mode)
+		}
+	}
+}
+
+// With state from before mode, an update that changes the mode is checked
+// against the live mode and stops before the PUT.
+func Test_reverseProxyService_updateChecksLiveMode(t *testing.T) {
+	ctx := context.Background()
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"s1","name":"svc","domain":"svc.example","enabled":true,"mode":"http","targets":[],"auth":{},"meta":{"created_at":"2026-01-01T00:00:00Z","status":"active"}}`)
+	}))
+	defer srv.Close()
+	r := &ReverseProxyService{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	value := func(mode tftypes.Value) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["id"] = tftypes.NewValue(tftypes.String, "s1")
+		values["name"] = tftypes.NewValue(tftypes.String, "svc")
+		values["domain"] = tftypes.NewValue(tftypes.String, "svc.example")
+		values["enabled"] = tftypes.NewValue(tftypes.Bool, true)
+		values["mode"] = mode
+		return tftypes.NewValue(typ, values)
+	}
+	plan := value(tftypes.NewValue(tftypes.String, "tcp"))
+	resp := resource.UpdateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: value(tftypes.NewValue(tftypes.String, nil))}}
+	r.Update(ctx, resource.UpdateRequest{
+		Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
+		Config: tfsdk.Config{Schema: sch.Schema, Raw: plan},
+		State:  tfsdk.State{Schema: sch.Schema, Raw: value(tftypes.NewValue(tftypes.String, nil))},
+	}, &resp)
+	found := false
+	for _, d := range resp.Diagnostics.Errors() {
+		found = found || d.Summary() == "Mode cannot be changed"
+	}
+	if !found || slices.Contains(methods, http.MethodPut) {
+		t.Errorf("expected the mode change refused without a PUT, found %v after %v", resp.Diagnostics, methods)
+	}
+}
+
+// An update whose planned mode is not known (state from before mode, not
+// refreshed) sends the live mode, and the state takes it.
+func Test_reverseProxyService_updateSendsLiveMode(t *testing.T) {
+	ctx := context.Background()
+	var sent map[string]any
+	svc := `{"id":"s1","name":"svc","domain":"svc.example","enabled":true,"mode":"tcp","listen_port":15432,"targets":[],"auth":{},"meta":{"created_at":"2026-01-01T00:00:00Z","status":"active"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			_ = json.NewDecoder(r.Body).Decode(&sent)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, svc)
+	}))
+	defer srv.Close()
+	r := &ReverseProxyService{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	value := func(mode tftypes.Value) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["id"] = tftypes.NewValue(tftypes.String, "s1")
+		values["name"] = tftypes.NewValue(tftypes.String, "svc")
+		values["domain"] = tftypes.NewValue(tftypes.String, "svc.example")
+		values["enabled"] = tftypes.NewValue(tftypes.Bool, true)
+		values["listen_port"] = tftypes.NewValue(tftypes.Number, 15432)
+		values["mode"] = mode
+		return tftypes.NewValue(typ, values)
+	}
+	plan := value(tftypes.NewValue(tftypes.String, tftypes.UnknownValue))
+	state := value(tftypes.NewValue(tftypes.String, nil))
+	resp := resource.UpdateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: state}}
+	r.Update(ctx, resource.UpdateRequest{
+		Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
+		Config: tfsdk.Config{Schema: sch.Schema, Raw: value(tftypes.NewValue(tftypes.String, nil))},
+		State:  tfsdk.State{Schema: sch.Schema, Raw: state},
+	}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatal(resp.Diagnostics)
+	}
+	if sent["mode"] != "tcp" {
+		t.Errorf("expected the live mode tcp in the PUT, found %v", sent["mode"])
+	}
+	var got types.String
+	resp.State.GetAttribute(ctx, path.Root("mode"), &got)
+	if got.ValueString() != "tcp" {
+		t.Errorf("expected mode tcp in state, found %v", got)
+	}
+}
+
+// With the mode known only from the live service, a disabled target on an
+// L4 service is refused before the PUT.
+func Test_reverseProxyService_updateChecksTargetsForLiveMode(t *testing.T) {
+	ctx := context.Background()
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"s1","name":"svc","domain":"svc.example","enabled":true,"mode":"tcp","listen_port":15432,"targets":[],"auth":{},"meta":{"created_at":"2026-01-01T00:00:00Z","status":"active"}}`)
+	}))
+	defer srv.Close()
+	r := &ReverseProxyService{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	targetsType, ok := typ.AttributeTypes["targets"].(tftypes.List)
+	if !ok {
+		t.Fatal("targets is not a list")
+	}
+	targetType, ok := targetsType.ElementType.(tftypes.Object)
+	if !ok {
+		t.Fatal("a target is not an object")
+	}
+	tv := map[string]tftypes.Value{}
+	for n, at := range targetType.AttributeTypes {
+		tv[n] = tftypes.NewValue(at, nil)
+	}
+	tv["target_id"] = tftypes.NewValue(tftypes.String, "peer1")
+	tv["target_type"] = tftypes.NewValue(tftypes.String, "peer")
+	tv["port"] = tftypes.NewValue(tftypes.Number, 5002)
+	tv["protocol"] = tftypes.NewValue(tftypes.String, "tcp")
+	tv["enabled"] = tftypes.NewValue(tftypes.Bool, false)
+	value := func(mode tftypes.Value) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["id"] = tftypes.NewValue(tftypes.String, "s1")
+		values["name"] = tftypes.NewValue(tftypes.String, "svc")
+		values["domain"] = tftypes.NewValue(tftypes.String, "svc.example")
+		values["enabled"] = tftypes.NewValue(tftypes.Bool, true)
+		values["listen_port"] = tftypes.NewValue(tftypes.Number, 15432)
+		values["mode"] = mode
+		values["targets"] = tftypes.NewValue(targetsType, []tftypes.Value{tftypes.NewValue(targetType, tv)})
+		return tftypes.NewValue(typ, values)
+	}
+	// The planned mode unknown, or configured as the live one; the stored
+	// mode is null either way (state from before mode, not refreshed).
+	for name, planned := range map[string]tftypes.Value{
+		"mode unknown":    tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"mode configured": tftypes.NewValue(tftypes.String, "tcp"),
+	} {
+		methods = nil
+		plan := value(planned)
+		state := value(tftypes.NewValue(tftypes.String, nil))
+		resp := resource.UpdateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: state}}
+		r.Update(ctx, resource.UpdateRequest{
+			Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
+			Config: tfsdk.Config{Schema: sch.Schema, Raw: plan},
+			State:  tfsdk.State{Schema: sch.Schema, Raw: state},
+		}, &resp)
+		found := false
+		for _, d := range resp.Diagnostics.Errors() {
+			found = found || d.Summary() == "L4 targets are always enabled"
+		}
+		if !found || slices.Contains(methods, http.MethodPut) {
+			t.Errorf("%s: expected the disabled target refused without a PUT, found %v after %v", name, resp.Diagnostics, methods)
+		}
+	}
+}
+
+// When the update learns an L4 mode from the live service, it warns about
+// direct_upstream, which has no effect there, as the plan would.
+func Test_reverseProxyService_updateWarnsDirectUpstreamForLiveMode(t *testing.T) {
+	ctx := context.Background()
+	var sent map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			_ = json.NewDecoder(r.Body).Decode(&sent)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"s1","name":"svc","domain":"svc.example","enabled":true,"mode":"tcp","listen_port":15432,"targets":[],"auth":{},"meta":{"created_at":"2026-01-01T00:00:00Z","status":"active"}}`)
+	}))
+	defer srv.Close()
+	r := &ReverseProxyService{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	targetsType, ok := typ.AttributeTypes["targets"].(tftypes.List)
+	if !ok {
+		t.Fatal("targets is not a list")
+	}
+	targetType, ok := targetsType.ElementType.(tftypes.Object)
+	if !ok {
+		t.Fatal("a target is not an object")
+	}
+	optsType, ok := targetType.AttributeTypes["options"].(tftypes.Object)
+	if !ok {
+		t.Fatal("options is not an object")
+	}
+	opts := map[string]tftypes.Value{}
+	for n, at := range optsType.AttributeTypes {
+		opts[n] = tftypes.NewValue(at, nil)
+	}
+	opts["direct_upstream"] = tftypes.NewValue(tftypes.Bool, true)
+	tv := map[string]tftypes.Value{}
+	for n, at := range targetType.AttributeTypes {
+		tv[n] = tftypes.NewValue(at, nil)
+	}
+	tv["target_id"] = tftypes.NewValue(tftypes.String, "peer1")
+	tv["target_type"] = tftypes.NewValue(tftypes.String, "peer")
+	tv["port"] = tftypes.NewValue(tftypes.Number, 5002)
+	tv["protocol"] = tftypes.NewValue(tftypes.String, "tcp")
+	tv["options"] = tftypes.NewValue(optsType, opts)
+	value := func(mode tftypes.Value) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["id"] = tftypes.NewValue(tftypes.String, "s1")
+		values["name"] = tftypes.NewValue(tftypes.String, "svc")
+		values["domain"] = tftypes.NewValue(tftypes.String, "svc.example")
+		values["enabled"] = tftypes.NewValue(tftypes.Bool, true)
+		values["listen_port"] = tftypes.NewValue(tftypes.Number, 15432)
+		values["mode"] = mode
+		values["targets"] = tftypes.NewValue(targetsType, []tftypes.Value{tftypes.NewValue(targetType, tv)})
+		return tftypes.NewValue(typ, values)
+	}
+	state := value(tftypes.NewValue(tftypes.String, nil))
+	resp := resource.UpdateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: state}}
+	r.Update(ctx, resource.UpdateRequest{
+		Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: value(tftypes.NewValue(tftypes.String, tftypes.UnknownValue))},
+		Config: tfsdk.Config{Schema: sch.Schema, Raw: value(tftypes.NewValue(tftypes.String, nil))},
+		State:  tfsdk.State{Schema: sch.Schema, Raw: state},
+	}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("the warning must not stop the update, found %v", resp.Diagnostics)
+	}
+	found := false
+	for _, d := range resp.Diagnostics.Warnings() {
+		wp, ok := d.(diag.DiagnosticWithPath)
+		found = found || (ok && strings.Contains(strings.ToLower(d.Summary()), "direct") && wp.Path().String() != "")
+	}
+	if !found {
+		t.Errorf("expected a direct_upstream warning on a target path, found %v", resp.Diagnostics)
+	}
+	targets, _ := sent["targets"].([]any)
+	if sent["mode"] != "tcp" || len(targets) != 1 {
+		t.Errorf("expected the PUT with mode tcp and the target, found %v", sent)
 	}
 }

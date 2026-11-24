@@ -233,6 +233,7 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 		state, config, plan vals
 		wantError           bool
 		wantPublic          bool
+		wantModeWarning     bool
 	}{
 		"new without groups":     {create: true, config: vals{"private": on}, plan: vals{"private": on, "access_groups": tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, tftypes.UnknownValue)}, wantError: true},
 		"new with groups":        {create: true, config: vals{"private": on, "access_groups": groups}, plan: vals{"private": on, "access_groups": groups}},
@@ -269,7 +270,7 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 		},
 		"private kept, mode changed to tcp": {
 			state:  vals{"private": on, "mode": http, "access_groups": groups},
-			config: vals{"mode": tcp}, plan: vals{"private": on, "mode": tcp, "access_groups": groups},
+			config: vals{"mode": tcp}, plan: vals{"private": on, "mode": tcp, "access_groups": groups}, wantModeWarning: true,
 		},
 		"no-op with an adopted blank group": {
 			state:  vals{"private": on, "mode": http, "access_groups": blankGroup},
@@ -307,6 +308,16 @@ func Test_reverseProxyService_modifyPlanPrivate(t *testing.T) {
 			r.ModifyPlan(ctx, req, &resp)
 			if resp.Diagnostics.HasError() != tc.wantError {
 				t.Fatalf("expected error %v, found %v", tc.wantError, resp.Diagnostics)
+			}
+			if tc.wantModeWarning {
+				found := false
+				for _, d := range resp.Diagnostics.Warnings() {
+					wp, ok := d.(diag.DiagnosticWithPath)
+					found = found || (ok && wp.Path().Equal(path.Root("mode")) && d.Summary() == "Mode cannot be changed" && strings.Contains(d.Detail(), "-replace"))
+				}
+				if !found {
+					t.Errorf("expected a warning on mode with the replacement advice, found %v", resp.Diagnostics)
+				}
 			}
 			if tc.wantPublic {
 				var planned ReverseProxyServiceModel

@@ -271,10 +271,15 @@ func (r *ReverseProxyService) Schema(ctx context.Context, req resource.SchemaReq
 				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"mode": schema.StringAttribute{
-				MarkdownDescription: "Service mode: \"http\" for L7 reverse proxy, \"tcp\"/\"udp\"/\"tls\" for L4 passthrough",
+				MarkdownDescription: "Service mode: \"http\" for L7 reverse proxy, \"tcp\"/\"udp\"/\"tls\" for L4 passthrough. Left out, a new service is HTTP and an existing one keeps its mode. The server does not change the mode of a service: a change is a plan warning and the update stops before writing; replace the service instead (`-replace`).",
 				Optional:            true,
 				Computed:            true,
 				Validators:          []validator.String{stringvalidator.OneOf("http", "tcp", "udp", "tls")},
+				// Sent on every update: a request without a mode is validated
+				// as HTTP, which an L4 service refuses. A null stored mode
+				// (state from before the attribute) stays unknown, and the
+				// update takes the live one.
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseNonNullStateForUnknown()},
 			},
 			"listen_port": schema.Int64Attribute{
 				MarkdownDescription: "Port the proxy listens on (L4/TLS only). Set to 0 for auto-assignment.",
@@ -660,10 +665,10 @@ func reverseProxyServiceAPIToTerraform(ctx context.Context, svc *api.Service, da
 	data.Domain = types.StringValue(svc.Domain)
 	data.Enabled = types.BoolValue(svc.Enabled)
 
-	if svc.Mode != nil {
+	// An unset mode is HTTP; the server reports it as nil or "".
+	data.Mode = types.StringValue("http")
+	if svc.Mode != nil && *svc.Mode != "" {
 		data.Mode = types.StringValue(string(*svc.Mode))
-	} else {
-		data.Mode = types.StringValue("http")
 	}
 
 	if svc.ListenPort != nil {
@@ -1437,12 +1442,43 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 		resp.Diagnostics.AddError("Error reading reverse proxy service", err.Error())
 		return
 	}
+	// Against the live mode: a state from before the attribute holds none.
+	liveMode := types.StringValue("http")
+	if live.Mode != nil && *live.Mode != "" {
+		liveMode = types.StringValue(string(*live.Mode))
+	}
+	if d := modeChangeProblem(liveMode, data.Mode); d.HasError() {
+		resp.Diagnostics.Append(d...)
+		return
+	}
 	if changed := serviceAccessChangedSincePlan(prior, data, live); len(changed) > 0 {
 		resp.Diagnostics.AddError("Reverse proxy service changed after the plan",
 			"The service's access settings changed after this plan was made, so applying the plan would overwrite "+
 				"that change although the plan shows the setting unchanged:\n\n"+strings.Join(changed, "\n")+
 				"\n\nNothing was changed. Run plan again.")
 		return
+	}
+	if serviceReq.Mode == nil && live.Mode != nil && *live.Mode != "" {
+		// A mode the plan does not know is the live one, and the warnings the
+		// plan could not give for it are given now.
+		mode := api.ServiceRequestMode(*live.Mode)
+		serviceReq.Mode = &mode
+		if *live.Mode != "http" {
+			var config ReverseProxyServiceModel
+			resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+			resp.Diagnostics.Append(directUpstreamWarnings(config.Targets, string(*live.Mode))...)
+		}
+	}
+	if liveMode.ValueString() != "http" {
+		// The server turns every L4 target on: refuse a disabled one before
+		// the write, also when the plan could not check it (no stored mode).
+		if d := l4DisabledTargetProblems(data.Targets); d.HasError() {
+			resp.Diagnostics.Append(d...)
+			return
+		}
 	}
 	keepLiveUnknownAccess(&serviceReq, data, live)
 	if err := privateRequestProblem(serviceReq, live.Private != nil && *live.Private); err != nil {
@@ -1559,7 +1595,7 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 		plan.Private = types.BoolValue(false)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("private"), plan.Private)...)
 	}
-	if !plan.Mode.IsNull() && !plan.Mode.IsUnknown() && plan.Mode.ValueString() != "http" {
+	if !plan.Mode.IsNull() && !plan.Mode.IsUnknown() && normalMode(plan.Mode) != "http" {
 		// Also on a plan without changes, which is where an imported value
 		// would otherwise pass for one that works.
 		resp.Diagnostics.Append(directUpstreamWarnings(config.Targets, plan.Mode.ValueString())...)
@@ -1581,6 +1617,18 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	if !create && config.Mode.IsNull() && plan.Mode.Equal(types.StringValue("")) {
+		// A stored "" (an older read) is HTTP, which an update sends; while
+		// the plan may not write at all, it stays unknown.
+		plan.Mode = types.StringUnknown()
+		if writes {
+			plan.Mode = types.StringValue("http")
+		}
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("mode"), plan.Mode)...)
+	}
+	if !create {
+		resp.Diagnostics.Append(inPlaceOnly(modeChangeProblem(state.Mode, config.Mode))...)
+	}
 	// The mode the server will hold: a left-out mode is not sent, so an
 	// existing service keeps its own and a new one is HTTP.
 	mode := plan.Mode
@@ -1592,7 +1640,14 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	}
 	modeKnown := ""
 	if !mode.IsNull() && !mode.IsUnknown() {
-		modeKnown = mode.ValueString()
+		modeKnown = normalMode(mode)
+	}
+	if modeKnown != "" && modeKnown != "http" && (create || normalMode(state.Mode) == modeKnown) {
+		// The server turns every L4 target on (validateL4Target, v0.83.2
+		// and v0.82.1), so a disabled one would be written enabled. With
+		// the mode changing, the update stops anyway and a replacement's
+		// create plan checks its own targets.
+		resp.Diagnostics.Append(l4DisabledTargetProblems(config.Targets)...)
 	}
 	private := !plan.Private.IsUnknown() && plan.Private.ValueBool()
 	var existing []ReverseProxyServiceTargetModel
@@ -1639,6 +1694,9 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	}
 	// A configuration error stops at ValidateConfig, so this reports only
 	// problems with values kept from state.
+	if modeKnown != "" {
+		mode = types.StringValue(modeKnown) // "" is HTTP
+	}
 	problems := privateServiceProblems(mode, plan.AccessGroups, plan.Auth, checkBlank)
 	problems.Append(targetPrivacy...)
 	// The hint covers errors that come from the service being private, not
@@ -2018,6 +2076,47 @@ func keptActionProblems(ctx context.Context, req api.ServiceRequest, live *api.S
 	_, _, updateOnly := actions.problems(req.Private != nil && *req.Private, mode)
 	diags.Append(updateOnly...)
 	return diags
+}
+
+// modeChangeProblem refuses a known mode other than the stored one:
+// validateProtocolChange (v0.83.2, v0.82.1) allows no change but between an
+// unset mode and HTTP, and the read reports unset as HTTP.
+func modeChangeProblem(stored, planned types.String) diag.Diagnostics {
+	var d diag.Diagnostics
+	if stored.IsNull() || stored.IsUnknown() || planned.IsNull() || planned.IsUnknown() || normalMode(stored) == normalMode(planned) {
+		return d
+	}
+	d.AddAttributeError(path.Root("mode"), "Mode cannot be changed",
+		fmt.Sprintf("NetBird does not change the mode of a service (%q to %q). Keep the current mode, or replace the service (-replace, or a new netbird_reverse_proxy_service).", stored.ValueString(), planned.ValueString()))
+	return d
+}
+
+// l4DisabledTargetProblems refuses a target configured enabled = false on
+// an L4 service.
+func l4DisabledTargetProblems(targets types.List) diag.Diagnostics {
+	var d diag.Diagnostics
+	if targets.IsNull() || targets.IsUnknown() {
+		return d
+	}
+	for i, e := range targets.Elements() {
+		obj, ok := e.(types.Object)
+		if !ok || obj.IsNull() || obj.IsUnknown() {
+			continue
+		}
+		if enabled, ok := obj.Attributes()["enabled"].(types.Bool); ok && enabled.Equal(types.BoolValue(false)) {
+			d.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("enabled"), "L4 targets are always enabled",
+				"NetBird keeps the target of a TCP, UDP or TLS service enabled; set enabled on the service instead.")
+		}
+	}
+	return d
+}
+
+// normalMode is a known mode with unset read as HTTP, as the server does.
+func normalMode(v types.String) string {
+	if v.ValueString() == "" {
+		return "http"
+	}
+	return v.ValueString()
 }
 
 // inPlaceOnly turns errors that only an in-place update meets into

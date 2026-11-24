@@ -642,6 +642,16 @@ func Test_ReverseProxyService_TCPMode(t *testing.T) {
 	rNameFull := "netbird_reverse_proxy_service." + rName
 	peerID := testPeerID(t, "peer1")
 
+	// The update step's configuration leaves mode out.
+	withoutMode := strings.Replace(testReverseProxyServiceL4(rName, domain, peerID, "tcp", 15432, `
+    options = {
+      proxy_protocol  = true
+      request_timeout = "2m0s"
+    }`), "  mode        = \"tcp\"\n", "", 1)
+	if strings.Contains(withoutMode, "mode ") {
+		t.Fatal("the configuration without mode still sets it")
+	}
+
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testEnsureManagementRunning(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
@@ -691,6 +701,44 @@ func Test_ReverseProxyService_TCPMode(t *testing.T) {
 				ResourceName:      rNameFull,
 				ImportState:       true,
 				ImportStateVerify: true,
+			},
+			{
+				// The server does not change a service's mode: the plan
+				// passes with a warning (a replacement would be fine), and the
+				// update stops before writing.
+				Config: testReverseProxyServiceL4(rName, domain, peerID, "udp", 15432, ""),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionUpdate),
+				}},
+				ExpectError: regexp.MustCompile(`(?s)Error running apply.*Mode cannot be changed`),
+			},
+			{
+				// With mode left out, an update keeps (and sends) the TCP
+				// mode; a request without one would be refused as a change
+				// to HTTP.
+				Config: withoutMode,
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionUpdate),
+					plancheck.ExpectKnownValue(rNameFull, tfjsonpath.New("mode"), knownvalue.StringExact("tcp")),
+				}},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "mode", "tcp"),
+					resource.TestCheckResourceAttr(rNameFull, "targets.0.options.request_timeout", "2m0s"),
+					func(s *terraform.State) error {
+						svc, err := testClient().ReverseProxyServices.Get(context.Background(), s.RootModule().Resources[rNameFull].Primary.Attributes["id"])
+						if err != nil {
+							return err
+						}
+						if svc.Mode == nil || *svc.Mode != "tcp" {
+							return fmt.Errorf("expected mode tcp on the server, found %v", svc.Mode)
+						}
+						if len(svc.Targets) != 1 || svc.Targets[0].Options == nil || svc.Targets[0].Options.RequestTimeout == nil ||
+							*svc.Targets[0].Options.RequestTimeout != "2m0s" {
+							return fmt.Errorf("expected request_timeout 2m0s on the server, found %+v", svc.Targets)
+						}
+						return nil
+					},
+				),
 			},
 		},
 	})
@@ -1670,6 +1718,106 @@ resource "netbird_reverse_proxy_service" %q {
 				ImportState:       true,
 				ImportStateVerify: true,
 			},
+		},
+	})
+}
+
+// Test_ReverseProxyService_TLSModeOmitted: a TLS service updated with mode
+// left out keeps (and sends) tls; the server requires listen_port on every
+// TLS request, so the configuration keeps it.
+func Test_ReverseProxyService_TLSModeOmitted(t *testing.T) {
+	cluster := testRequireProxyCluster(t)
+	rName := "s" + acctest.RandStringFromCharSet(8, acctest.CharSetAlpha)
+	domain := rName + "." + cluster.Address
+	rNameFull := "netbird_reverse_proxy_service." + rName
+	peerID := testPeerID(t, "peer1")
+	var createdID string
+	config := func(mode string, port int, targetExtra string) string {
+		return fmt.Sprintf(`
+resource "netbird_reverse_proxy_service" %q {
+  name        = %q
+  domain      = %q
+  %s
+  listen_port = 15443
+
+  targets = [{
+    target_id   = %q
+    target_type = "peer"
+    port        = %d
+    protocol    = "tcp"
+    %s
+  }]
+
+  auth = {}
+}`, rName, rName, domain, mode, peerID, port, targetExtra)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().ReverseProxyServices.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				// A service created outside Terraform, imported into empty
+				// state: the read recovers tls with no prior mode, and the
+				// next plan keeps it.
+				PreConfig: func() {
+					mode := api.ServiceRequestModeTls
+					port := 15443
+					svc, err := testClient().ReverseProxyServices.Create(context.Background(), api.ServiceRequest{
+						Name: rName, Domain: domain, Enabled: true, Mode: &mode, ListenPort: &port,
+						Targets: &[]api.ServiceTarget{{
+							TargetId: peerID, TargetType: api.ServiceTargetTargetTypePeer,
+							Port: 5001, Protocol: api.ServiceTargetProtocolTcp, Enabled: true,
+						}},
+						Auth: &api.ServiceAuthConfig{},
+					})
+					if err != nil {
+						t.Fatalf("create the TLS service: %v", err)
+					}
+					createdID = svc.Id
+				},
+				Config:             config("", 5001, ""),
+				ResourceName:       rNameFull,
+				ImportState:        true,
+				ImportStateKind:    resource.ImportCommandWithID,
+				ImportStateIdFunc:  func(*terraform.State) (string, error) { return createdID, nil },
+				ImportStatePersist: true,
+				ImportStateCheck: func(states []*terraform.InstanceState) error {
+					if len(states) != 1 || states[0].ID != createdID || states[0].Attributes["mode"] != "tls" {
+						return fmt.Errorf("expected the service imported with mode tls, found %+v", states)
+					}
+					return nil
+				},
+			},
+			{
+				// The imported state matches the configuration.
+				Config:   config("", 5001, ""),
+				PlanOnly: true,
+			},
+			{
+				// The server keeps an L4 target enabled.
+				Config:      config("", 5002, "enabled = false"),
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`L4 targets are always enabled`),
+			},
+			{
+				Config: config("", 5002, ""),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionUpdate),
+					plancheck.ExpectKnownValue(rNameFull, tfjsonpath.New("mode"), knownvalue.StringExact("tls")),
+				}},
+				Check: func(*terraform.State) error {
+					svc, err := testClient().ReverseProxyServices.Get(context.Background(), createdID)
+					if err != nil {
+						return err
+					}
+					if svc.Mode == nil || *svc.Mode != "tls" || len(svc.Targets) != 1 || svc.Targets[0].Port != 5002 {
+						return fmt.Errorf("expected a tls service with target port 5002 on the server, found mode %v and %+v", svc.Mode, svc.Targets)
+					}
+					return nil
+				},
+			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 		},
 	})
 }
