@@ -250,6 +250,10 @@ resource "netbird_group" "zone" {
 					if id == zoneID {
 						return fmt.Errorf("the zone kept its ID %s; expected a replacement", id)
 					}
+					if err := testCheckGone(testClient().DNSZones.GetZone, &zoneID)(s); err != nil {
+						return err
+					}
+					zoneID = id // the zone CheckDestroy looks for
 					zone, err := testClient().DNSZones.GetZone(context.Background(), id)
 					if err != nil {
 						return err
