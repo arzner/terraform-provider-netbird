@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
@@ -86,12 +87,17 @@ func (r *DNSRecord) Schema(ctx context.Context, req resource.SchemaRequest, resp
 				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"ttl": schema.Int64Attribute{
-				MarkdownDescription: "Time to live in seconds",
+				MarkdownDescription: "Time to live in seconds, 0 to 2147483647 (the DNS maximum)",
 				Optional:            true,
 				Computed:            true,
 				Default:             int64default.StaticInt64(300),
 				PlanModifiers:       []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
-				Validators:          []validator.Int64{int64validator.Between(60, 86400)},
+				// The server refuses only a negative TTL (records/record.go,
+				// v0.83.2 and v0.82.1). DNS caps a TTL at 2^31-1 (RFC 2181,
+				// section 8), which also fits the int request field of 32-bit
+				// provider and server builds; a larger one is stored but the
+				// peers' resolver skips the record.
+				Validators: []validator.Int64{int64validator.Between(0, math.MaxInt32)},
 			},
 		},
 	}

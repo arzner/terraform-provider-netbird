@@ -1,6 +1,12 @@
 package provider
 
 import (
+	"context"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"math"
 	"reflect"
 	"testing"
 
@@ -76,6 +82,27 @@ func Test_dnsRecordAPIToTerraform(t *testing.T) {
 
 		if !reflect.DeepEqual(out, c.expected) {
 			t.Fatalf("Expected:\n%#v\nFound:\n%#v", c.expected, out)
+		}
+	}
+}
+
+// The TTL takes what the server accepts: 0 or more.
+func Test_dnsRecordTTLValidator(t *testing.T) {
+	ctx := context.Background()
+	var sch resource.SchemaResponse
+	(&DNSRecord{}).Schema(ctx, resource.SchemaRequest{}, &sch)
+	attr, ok := sch.Schema.Attributes["ttl"].(schema.Int64Attribute)
+	if !ok {
+		t.Fatal("ttl is not an Int64Attribute")
+	}
+	// DNS caps a TTL at 2^31-1 (RFC 2181).
+	for ttl, wantError := range map[int64]bool{-1: true, 0: false, 30: false, 300: false, 172800: false, math.MaxInt32: false, math.MaxInt32 + 1: true, math.MaxUint32 + 1: true} {
+		var resp validator.Int64Response
+		for _, v := range attr.Validators {
+			v.ValidateInt64(ctx, validator.Int64Request{Path: path.Root("ttl"), ConfigValue: types.Int64Value(ttl)}, &resp)
+		}
+		if resp.Diagnostics.HasError() != wantError {
+			t.Errorf("ttl %d: expected error %v, found %v", ttl, wantError, resp.Diagnostics)
 		}
 	}
 }

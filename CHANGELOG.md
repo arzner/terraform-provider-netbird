@@ -66,6 +66,8 @@ it is based on.
 
 ### Fixed
 
+- `netbird_dns_record`: `ttl` takes 0 to 2147483647, the DNS maximum (RFC 2181); it was limited
+  to 60 to 86400, while the server accepts any TTL of 0 or more (#96).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the
