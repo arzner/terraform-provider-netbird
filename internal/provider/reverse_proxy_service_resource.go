@@ -1468,6 +1468,12 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 				resp.Diagnostics.Append(d...)
 				return
 			}
+			var config ReverseProxyServiceModel
+			resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+			resp.Diagnostics.Append(directUpstreamWarnings(config.Targets, string(*live.Mode))...)
 		}
 	}
 	keepLiveUnknownAccess(&serviceReq, data, live)

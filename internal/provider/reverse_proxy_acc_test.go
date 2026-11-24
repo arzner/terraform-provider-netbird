@@ -1782,6 +1782,12 @@ resource "netbird_reverse_proxy_service" %q {
 				ImportStateKind:    resource.ImportCommandWithID,
 				ImportStateIdFunc:  func(*terraform.State) (string, error) { return createdID, nil },
 				ImportStatePersist: true,
+				ImportStateCheck: func(states []*terraform.InstanceState) error {
+					if len(states) != 1 || states[0].ID != createdID || states[0].Attributes["mode"] != "tls" {
+						return fmt.Errorf("expected the service imported with mode tls, found %+v", states)
+					}
+					return nil
+				},
 			},
 			{
 				// The imported state matches the configuration.
