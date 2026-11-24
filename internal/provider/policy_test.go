@@ -494,6 +494,14 @@ func Test_policyValidateConfigAuthorizedGroups(t *testing.T) {
 			})
 		})
 	}
+	userList := func(v, user tftypes.Value) tftypes.Value {
+		return withRule(v, func(r map[string]tftypes.Value) {
+			list := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{tftypes.NewValue(tftypes.String, "admin"), user})
+			r["authorized_groups"] = tftypes.NewValue(tftypes.Map{ElementType: tftypes.List{ElementType: tftypes.String}}, map[string]tftypes.Value{
+				"g1": strs("root"), "g2": list,
+			})
+		})
+	}
 	for name, tc := range map[string]struct {
 		config    tftypes.Value
 		wantError bool
@@ -506,6 +514,8 @@ func Test_policyValidateConfigAuthorizedGroups(t *testing.T) {
 		"protocol unknown, complete":       {withProtocol(config("netbird-ssh", "g1", "g2"), tftypes.NewValue(tftypes.String, tftypes.UnknownValue)), false},
 		"protocol unknown, source missing": {withProtocol(config("netbird-ssh", "g1"), tftypes.NewValue(tftypes.String, tftypes.UnknownValue)), true},
 		"null users":                       {nullUsers(config("netbird-ssh", "g1", "g2")), true},
+		"null user":                        {userList(config("netbird-ssh", "g1", "g2"), tftypes.NewValue(tftypes.String, nil)), true},
+		"unknown user":                     {userList(config("netbird-ssh", "g1", "g2"), tftypes.NewValue(tftypes.String, tftypes.UnknownValue)), false},
 	} {
 		resp := resource.ValidateConfigResponse{}
 		r.ValidateConfig(ctx, resource.ValidateConfigRequest{Config: tfsdk.Config{Schema: sch.Schema, Raw: tc.config}}, &resp)

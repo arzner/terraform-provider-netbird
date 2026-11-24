@@ -83,6 +83,17 @@ func (r *Policy) ValidateConfig(ctx context.Context, req resource.ValidateConfig
 			if v.IsNull() {
 				resp.Diagnostics.AddAttributeError(at.AtMapKey(k), "Local users required",
 					"A null list would be stored as an empty one, which allows every local user; set the users, or [] to allow every local user.")
+				continue
+			}
+			list, ok := v.(types.List)
+			if !ok || list.IsUnknown() {
+				continue
+			}
+			for j, u := range list.Elements() {
+				if u.IsNull() {
+					resp.Diagnostics.AddAttributeError(at.AtMapKey(k).AtListIndex(j), "Local user required",
+						"A local user name cannot be null.")
+				}
 			}
 		}
 		if !protocol.IsUnknown() && protocol.ValueString() != "netbird-ssh" {
@@ -318,7 +329,7 @@ func (r *Policy) Schema(ctx context.Context, req resource.SchemaRequest, resp *r
 							Validators: []validator.Object{objectvalidator.ConflictsWith(path.MatchRelative().AtParent().AtName("destinations"))},
 						},
 						"authorized_groups": schema.MapAttribute{
-							MarkdownDescription: "Map of group IDs to the local users their members may log in as over SSH; an empty list allows every local user. When set and not empty, it needs an entry for every group in `sources`, and any other key grants its group's users access too. Not set or empty, the rule's users may log in as any local user. Only applicable when protocol is `netbird-ssh`.",
+							MarkdownDescription: "Map of group IDs to the local users their members may log in as over SSH; an empty list allows every local user. When set and not empty, it needs an entry for every group in `sources`, and any other key grants its group's users access too. Not set or empty, every active NetBird user (not only those in `sources`) may log in as any local user; which peers can reach the destination is still decided by `sources`. Only applicable when protocol is `netbird-ssh`.",
 							ElementType:         types.ListType{ElemType: types.StringType},
 							Optional:            true,
 							Computed:            true,

@@ -379,7 +379,19 @@ func Test_Policy_AuthorizedGroups(t *testing.T) {
 				// An empty map: the server leaves it out of the response and
 				// the configured {} stays.
 				Config: config("{}"),
-				Check:  resource.TestCheckResourceAttr(rNameFull, "rule.0.authorized_groups.%", "0"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "rule.0.authorized_groups.%", "0"),
+					func(*terraform.State) error {
+						policy, err := testClient().Policies.Get(context.Background(), createdID)
+						if err != nil {
+							return err
+						}
+						if len(policy.Rules) != 1 || policy.Rules[0].AuthorizedGroups != nil {
+							return fmt.Errorf("expected the restrictions cleared on the server, found %+v", policy.Rules)
+						}
+						return nil
+					},
+				),
 			},
 		},
 	})

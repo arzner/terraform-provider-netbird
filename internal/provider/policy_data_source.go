@@ -114,7 +114,7 @@ func (d *PolicyDataSource) Schema(ctx context.Context, req datasource.SchemaRequ
 							Computed: true,
 						},
 						"authorized_groups": schema.MapAttribute{
-							MarkdownDescription: "Map of group IDs to the local users their members may log in as over SSH; an empty list allows every local user. When set, it has an entry for every group in `sources`, and any other key grants its group's users access too. Not set, the rule's users may log in as any local user. Only applicable when protocol is `netbird-ssh`.",
+							MarkdownDescription: "Map of group IDs to the local users their members may log in as over SSH; an empty list allows every local user. When set, it has an entry for every group in `sources`, and any other key grants its group's users access too. Not set, every active NetBird user (not only those in `sources`) may log in as any local user; which peers can reach the destination is still decided by `sources`. Only applicable when protocol is `netbird-ssh`.",
 							ElementType:         types.ListType{ElemType: types.StringType},
 							Computed:            true,
 						},
