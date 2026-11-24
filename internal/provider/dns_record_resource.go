@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
@@ -92,8 +93,9 @@ func (r *DNSRecord) Schema(ctx context.Context, req resource.SchemaRequest, resp
 				Default:             int64default.StaticInt64(300),
 				PlanModifiers:       []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 				// The server refuses only a negative TTL (records/record.go,
-				// v0.83.2 and v0.82.1).
-				Validators: []validator.Int64{int64validator.AtLeast(0)},
+				// v0.83.2 and v0.82.1); the request field is an int, which
+				// is 32 bits on 386 and arm builds.
+				Validators: []validator.Int64{int64validator.Between(0, math.MaxInt)},
 			},
 		},
 	}

@@ -5,7 +5,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strconv"
 	"testing"
 
@@ -76,18 +75,20 @@ func Test_DNSRecord_Update(t *testing.T) {
 				),
 			},
 			{
-				// TTLs outside 60 to 86400, which the server accepts.
-				Config: testDNSRecordResource(zoneName, "test.local", rName, "api", "A", "192.168.1.2", 30),
-				Check:  testDNSRecordTTLOnServer(rNameFull, &zoneID, 30),
-			},
-			{
+				// TTLs outside 60 to 86400, which the server accepts; 0 is not
+				// taken for unset.
 				Config: testDNSRecordResource(zoneName, "test.local", rName, "api", "A", "192.168.1.2", 172800),
 				Check:  testDNSRecordTTLOnServer(rNameFull, &zoneID, 172800),
 			},
 			{
-				Config:      testDNSRecordResource(zoneName, "test.local", rName, "api", "A", "192.168.1.2", -1),
-				PlanOnly:    true,
-				ExpectError: regexp.MustCompile(`at least 0`),
+				Config: testDNSRecordResource(zoneName, "test.local", rName, "api", "A", "192.168.1.2", 0),
+				Check:  testDNSRecordTTLOnServer(rNameFull, &zoneID, 0),
+			},
+			{
+				ResourceName:      rNameFull,
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateIdFunc: testDNSRecordImportStateIdFunc(rNameFull),
 			},
 		},
 	})

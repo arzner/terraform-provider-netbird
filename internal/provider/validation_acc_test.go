@@ -178,8 +178,8 @@ func Test_Rejects_OutsideValidatorLimits(t *testing.T) {
 		want   *regexp.Regexp
 	}{
 		{
-			// 60 seconds is the shortest TTL the resource accepts.
-			name: "dns_record ttl below the range",
+			// The server refuses only a negative TTL.
+			name: "dns_record negative ttl",
 			want: outOfRange,
 			config: fmt.Sprintf(`
 resource "netbird_dns_zone" "%[1]s" {
@@ -192,7 +192,7 @@ resource "netbird_dns_record" "%[1]s" {
   name    = "www"
   type    = "A"
   content = "10.0.0.1"
-  ttl     = 30
+  ttl     = -1
 }`, rName),
 		},
 		{
