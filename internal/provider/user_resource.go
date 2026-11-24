@@ -369,11 +369,15 @@ func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, r
 		}
 		resp.Diagnostics.AddAttributeError(path.Root("role"), "Cannot create an owner", detail)
 	}
+	// What each kind cannot take; with the kind not known yet, the plan is
+	// refused only when neither kind could be created.
+	regularFails := missing(config.Email) || missing(config.Name)
+	serviceFails := known(config.Email) && config.Email.ValueString() != ""
 	switch {
-	case regular && (missing(config.Email) || missing(config.Name)):
+	case regular && regularFails, config.IsServiceUser.IsUnknown() && regularFails && serviceFails:
 		resp.Diagnostics.AddError("Name and email required",
-			"A regular user is created as an invitation, which needs a name and an email; set both, or is_service_user = true for a service user.")
-	case service && known(config.Email) && config.Email.ValueString() != "":
+			"A regular user is created as an invitation, which needs a name and an email; set both, or is_service_user = true (without an email) for a service user.")
+	case service && serviceFails:
 		resp.Diagnostics.AddAttributeError(path.Root("email"), "Service users have no email",
 			"NetBird creates service users without an email; leave email out for a service user.")
 	}
@@ -384,7 +388,8 @@ func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, r
 // left to the update, which sees them resolved.
 func immutableUserChanges(plan, state UserModel) diag.Diagnostics {
 	var d diag.Diagnostics
-	changed := func(p, s attr.Value) bool { return !p.IsNull() && !p.IsUnknown() && !p.Equal(s) }
+	// A value the server never reported (null in state) is not compared.
+	changed := func(p, s attr.Value) bool { return !p.IsNull() && !p.IsUnknown() && !s.IsNull() && !p.Equal(s) }
 	if changed(plan.Email, state.Email) {
 		d.AddAttributeError(path.Root("email"), "Email cannot be changed",
 			"NetBird does not change a user's email. Keep the current email in the configuration, or leave it out.")
@@ -411,12 +416,13 @@ func immutableUserChanges(plan, state UserModel) diag.Diagnostics {
 func userResourceAPIToTerraform(ctx context.Context, user *api.User, data *UserModel) diag.Diagnostics {
 	prior := data.IsServiceUser
 	d := userAPIToTerraform(ctx, user, data)
-	// Compatibility: a response without the flag keeps a known kind and is
-	// otherwise, as on import, a regular user.
+	// Compatibility: a response without the flag keeps a known kind; with
+	// none known (an import) the kind stays unreported, as in the data
+	// sources. Current servers always send it.
 	if user.IsServiceUser == nil {
 		data.IsServiceUser = prior
-		if prior.IsNull() || prior.IsUnknown() {
-			data.IsServiceUser = types.BoolValue(false)
+		if prior.IsUnknown() {
+			data.IsServiceUser = types.BoolNull()
 		}
 	}
 	return d

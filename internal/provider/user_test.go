@@ -116,25 +116,28 @@ func Test_user_modifyPlanNameEmail(t *testing.T) {
 		state, config tftypes.Value
 		wantError     string
 	}{
-		"new regular user without email": {tftypes.NewValue(typ, nil), object("Alice", nil, nil), "Name and email required"},
-		"new service user without email": {tftypes.NewValue(typ, nil), object("ci", nil, true), ""},
-		"new regular user with both":     {tftypes.NewValue(typ, nil), object("Alice", "a@example.com", false), ""},
-		"new service user with an email": {tftypes.NewValue(typ, nil), object("ci", "ci@example.com", true), "Service users have no email"},
-		"new blocked user":               {tftypes.NewValue(typ, nil), blocked(object("ci", nil, true)), "Cannot create a blocked user"},
-		"new service user as owner":      {tftypes.NewValue(typ, nil), owner(object("ci", nil, true)), "Cannot create an owner"},
-		"invitation as owner":            {tftypes.NewValue(typ, nil), owner(object("Alice", "a@example.com", false)), "Cannot create an owner"},
-		"kind changed":                   {object("ci", "", true), object("Alice", "a@example.com", false), "User kind cannot be changed"},
-		"kind left out":                  {object("ci", "", true), object("ci", nil, nil), ""},
-		"kind not known":                 {object("ci", "", true), object("ci", nil, tftypes.UnknownValue), ""},
-		"service user renamed":           {object("ci", "", true), object("ci2", nil, true), "Name cannot be changed"},
-		"service rename, kind left out":  {object("ci", "", true), object("ci2", nil, nil), "Name cannot be changed"},
-		"regular user renamed":           {object("alice", "a@example.com", false), object("alicia", nil, false), "Name cannot be changed"},
-		"email changed":                  {object("ci", "a@example.com", true), object(nil, "b@example.com", true), "Email cannot be changed"},
-		"email not known":                {object("alice", "a@example.com", false), object("alice", tftypes.UnknownValue, false), ""},
-		"name from an expression":        {object("alice", "a@example.com", false), object(tftypes.UnknownValue, nil, false), ""},
-		"unchanged name":                 {object("alice", "a@example.com", false), object("alice", "a@example.com", false), ""},
-		"name and email left out":        {object("alice", "a@example.com", false), object(nil, nil, false), ""},
-		"existing user blocked":          {object("ci", "", true), blocked(object("ci", nil, true)), ""},
+		"new regular user without email":     {tftypes.NewValue(typ, nil), object("Alice", nil, nil), "Name and email required"},
+		"new service user without email":     {tftypes.NewValue(typ, nil), object("ci", nil, true), ""},
+		"new regular user with both":         {tftypes.NewValue(typ, nil), object("Alice", "a@example.com", false), ""},
+		"new service user with an email":     {tftypes.NewValue(typ, nil), object("ci", "ci@example.com", true), "Service users have no email"},
+		"new blocked user":                   {tftypes.NewValue(typ, nil), blocked(object("ci", nil, true)), "Cannot create a blocked user"},
+		"new service user as owner":          {tftypes.NewValue(typ, nil), owner(object("ci", nil, true)), "Cannot create an owner"},
+		"invitation as owner":                {tftypes.NewValue(typ, nil), owner(object("Alice", "a@example.com", false)), "Cannot create an owner"},
+		"kind changed":                       {object("ci", "", true), object("Alice", "a@example.com", false), "User kind cannot be changed"},
+		"kind left out":                      {object("ci", "", true), object("ci", nil, nil), ""},
+		"kind not known":                     {object("ci", "", true), object("ci", nil, tftypes.UnknownValue), ""},
+		"new user, kind unknown, neither":    {tftypes.NewValue(typ, nil), object(nil, "a@example.com", tftypes.UnknownValue), "Name and email required"},
+		"new user, kind unknown, service ok": {tftypes.NewValue(typ, nil), object("ci", nil, tftypes.UnknownValue), ""},
+		"new user, kind unknown, both ok":    {tftypes.NewValue(typ, nil), object("Alice", tftypes.UnknownValue, tftypes.UnknownValue), ""},
+		"service user renamed":               {object("ci", "", true), object("ci2", nil, true), "Name cannot be changed"},
+		"service rename, kind left out":      {object("ci", "", true), object("ci2", nil, nil), "Name cannot be changed"},
+		"regular user renamed":               {object("alice", "a@example.com", false), object("alicia", nil, false), "Name cannot be changed"},
+		"email changed":                      {object("ci", "a@example.com", true), object(nil, "b@example.com", true), "Email cannot be changed"},
+		"email not known":                    {object("alice", "a@example.com", false), object("alice", tftypes.UnknownValue, false), ""},
+		"name from an expression":            {object("alice", "a@example.com", false), object(tftypes.UnknownValue, nil, false), ""},
+		"unchanged name":                     {object("alice", "a@example.com", false), object("alice", "a@example.com", false), ""},
+		"name and email left out":            {object("alice", "a@example.com", false), object(nil, nil, false), ""},
+		"existing user blocked":              {object("ci", "", true), blocked(object("ci", nil, true)), ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			req := resource.ModifyPlanRequest{
@@ -162,12 +165,12 @@ func Test_user_modifyPlanNameEmail(t *testing.T) {
 }
 
 // The resource reads a response without the service-user flag (compatibility;
-// current servers always send it) as the kind it knows, and as a regular user
-// without one, as on import.
+// current servers always send it) as the kind it knows, and leaves it
+// unreported without one, as on import.
 func Test_userResourceAPIToTerraform_absentFlag(t *testing.T) {
 	for name, tc := range map[string]struct{ prior, want types.Bool }{
 		"known service user": {types.BoolValue(true), types.BoolValue(true)},
-		"import":             {types.BoolNull(), types.BoolValue(false)},
+		"import":             {types.BoolNull(), types.BoolNull()},
 	} {
 		data := UserModel{IsServiceUser: tc.prior, AutoGroups: types.ListNull(types.StringType)}
 		if d := userResourceAPIToTerraform(context.Background(), &api.User{Id: "u1", Role: "user", Status: api.UserStatusActive}, &data); d.HasError() {
