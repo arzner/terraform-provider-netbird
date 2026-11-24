@@ -20,7 +20,9 @@ package provider
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -185,8 +187,6 @@ data "netbird_peer" "p" {
 		resource.TestCheckResourceAttr("data.netbird_peer.p", "id", peerID),
 		resource.TestCheckResourceAttr("data.netbird_peer.p", "name", "peer1"),
 		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "os"),
-		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "created_at"),
-		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "ephemeral"),
 		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "ip"),
 		// The data source reads the list endpoint; compare with the peer
 		// endpoint's address.
@@ -198,7 +198,11 @@ data "netbird_peer" "p" {
 			if p.Ipv6 == nil {
 				return fmt.Errorf("peer1 has no IPv6 address")
 			}
-			return resource.TestCheckResourceAttr("data.netbird_peer.p", "ipv6", *p.Ipv6)(s)
+			return resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr("data.netbird_peer.p", "ipv6", *p.Ipv6),
+				resource.TestCheckResourceAttr("data.netbird_peer.p", "created_at", p.CreatedAt.UTC().Format(time.RFC3339Nano)),
+				resource.TestCheckResourceAttr("data.netbird_peer.p", "ephemeral", strconv.FormatBool(p.Ephemeral)),
+			)(s)
 		},
 	))
 }

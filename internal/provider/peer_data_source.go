@@ -66,11 +66,11 @@ func (d *PeerDataSource) Schema(ctx context.Context, req datasource.SchemaReques
 				Computed:            true,
 			},
 			"created_at": schema.StringAttribute{
-				MarkdownDescription: "When the peer was created (RFC 3339, UTC)",
+				MarkdownDescription: "When the peer was created (RFC 3339 in UTC, with fractional seconds when the server has them)",
 				Computed:            true,
 			},
 			"ephemeral": schema.BoolAttribute{
-				MarkdownDescription: "Whether the peer is ephemeral (registered with an ephemeral setup key; removed after it has been offline for a while)",
+				MarkdownDescription: "Whether the peer is ephemeral: NetBird removes it after it has been offline for a while",
 				Computed:            true,
 			},
 			"os": schema.StringAttribute{

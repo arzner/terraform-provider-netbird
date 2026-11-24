@@ -113,11 +113,11 @@ func (r *Peer) Schema(ctx context.Context, req resource.SchemaRequest, resp *res
 				Computed:            true,
 			},
 			"created_at": schema.StringAttribute{
-				MarkdownDescription: "When the peer was created (RFC 3339, UTC)",
+				MarkdownDescription: "When the peer was created (RFC 3339 in UTC, with fractional seconds when the server has them)",
 				Computed:            true,
 			},
 			"ephemeral": schema.BoolAttribute{
-				MarkdownDescription: "Whether the peer is ephemeral (registered with an ephemeral setup key; removed after it has been offline for a while)",
+				MarkdownDescription: "Whether the peer is ephemeral: NetBird removes it after it has been offline for a while",
 				Computed:            true,
 			},
 			"os": schema.StringAttribute{
@@ -239,7 +239,7 @@ func peerAPIToTerraform(ctx context.Context, peer *api.Peer, data *PeerModel) di
 	data.ConnectionIp = types.StringValue(peer.ConnectionIp)
 	data.Connected = types.BoolValue(peer.Connected)
 	data.LastSeen = types.StringValue(peer.LastSeen.Format(time.RFC3339))
-	data.CreatedAt = types.StringValue(peer.CreatedAt.UTC().Format(time.RFC3339))
+	data.CreatedAt = types.StringValue(peer.CreatedAt.UTC().Format(time.RFC3339Nano))
 	data.Ephemeral = types.BoolValue(peer.Ephemeral)
 	data.Os = types.StringValue(peer.Os)
 	data.KernelVersion = types.StringValue(peer.KernelVersion)

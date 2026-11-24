@@ -17,6 +17,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
 
@@ -45,7 +46,7 @@ func Test_Peer_Create(t *testing.T) {
 							return err
 						}
 						want := map[string]string{
-							"created_at": peer.CreatedAt.UTC().Format(time.RFC3339),
+							"created_at": peer.CreatedAt.UTC().Format(time.RFC3339Nano),
 							"ephemeral":  strconv.FormatBool(peer.Ephemeral),
 						}
 						for k, v := range want {
@@ -339,6 +340,12 @@ resource "netbird_peer" %q {
 			// this peer (the next step plans nothing), and the other peer is
 			// untouched.
 			{PreConfig: onServerBefore(peer.Name, moved), Config: retargeted(other, moved),
+				// The other peer's read-only values are not promised from
+				// this one's state.
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectUnknownValue(rNameFull, tfjsonpath.New("created_at")),
+					plancheck.ExpectUnknownValue(rNameFull, tfjsonpath.New("ephemeral")),
+				}},
 				ExpectError: regexp.MustCompile(`(?i)is already assigned to peer`)},
 			{PreConfig: func() { otherUnchanged(); onServerBefore(peer.Name, moved)() }, Config: config(moved),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
