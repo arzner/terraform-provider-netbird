@@ -1721,3 +1721,64 @@ resource "netbird_reverse_proxy_service" %q {
 		},
 	})
 }
+
+// Test_ReverseProxyService_TLSModeOmitted: a TLS service updated with mode
+// left out keeps (and sends) tls; the server requires listen_port on every
+// TLS request, so the configuration keeps it.
+func Test_ReverseProxyService_TLSModeOmitted(t *testing.T) {
+	cluster := testRequireProxyCluster(t)
+	rName := "s" + acctest.RandStringFromCharSet(8, acctest.CharSetAlpha)
+	domain := rName + "." + cluster.Address
+	rNameFull := "netbird_reverse_proxy_service." + rName
+	peerID := testPeerID(t, "peer1")
+	var createdID string
+	config := func(mode string, port int) string {
+		return fmt.Sprintf(`
+resource "netbird_reverse_proxy_service" %q {
+  name        = %q
+  domain      = %q
+  %s
+  listen_port = 15443
+
+  targets = [{
+    target_id   = %q
+    target_type = "peer"
+    port        = %d
+    protocol    = "tcp"
+  }]
+
+  auth = {}
+}`, rName, rName, domain, mode, peerID, port)
+	}
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().ReverseProxyServices.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: config(`mode = "tls"`, 5001),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testRecordID(rNameFull, &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "mode", "tls"),
+				),
+			},
+			{
+				Config: config("", 5002),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionUpdate),
+					plancheck.ExpectKnownValue(rNameFull, tfjsonpath.New("mode"), knownvalue.StringExact("tls")),
+				}},
+				Check: func(*terraform.State) error {
+					svc, err := testClient().ReverseProxyServices.Get(context.Background(), createdID)
+					if err != nil {
+						return err
+					}
+					if svc.Mode == nil || *svc.Mode != "tls" || len(svc.Targets) != 1 || svc.Targets[0].Port != 5002 {
+						return fmt.Errorf("expected a tls service with target port 5002 on the server, found mode %v and %+v", svc.Mode, svc.Targets)
+					}
+					return nil
+				},
+			},
+		},
+	})
+}

@@ -1600,8 +1600,12 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if !create && !config.Mode.IsNull() && !config.Mode.IsUnknown() && !state.Mode.IsNull() && !state.Mode.IsUnknown() &&
-		config.Mode.ValueString() != state.Mode.ValueString() {
+	if !create && config.Mode.IsNull() && plan.Mode.Equal(types.StringValue("")) {
+		// A stored "" (an older read) is HTTP, which the update sends.
+		plan.Mode = types.StringValue("http")
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("mode"), plan.Mode)...)
+	}
+	if !create {
 		resp.Diagnostics.Append(inPlaceOnly(modeChangeProblem(state.Mode, config.Mode))...)
 	}
 	// The mode the server will hold: a left-out mode is not sent, so an
@@ -2048,12 +2052,20 @@ func keptActionProblems(ctx context.Context, req api.ServiceRequest, live *api.S
 // unset mode and HTTP, and the read reports unset as HTTP.
 func modeChangeProblem(stored, planned types.String) diag.Diagnostics {
 	var d diag.Diagnostics
-	if stored.IsNull() || stored.IsUnknown() || planned.IsNull() || planned.IsUnknown() || stored.Equal(planned) {
+	if stored.IsNull() || stored.IsUnknown() || planned.IsNull() || planned.IsUnknown() || normalMode(stored) == normalMode(planned) {
 		return d
 	}
 	d.AddAttributeError(path.Root("mode"), "Mode cannot be changed",
 		fmt.Sprintf("NetBird does not change the mode of a service (%q to %q). Keep the current mode, or replace the service (-replace, or a new netbird_reverse_proxy_service).", stored.ValueString(), planned.ValueString()))
 	return d
+}
+
+// normalMode is a known mode with unset read as HTTP, as the server does.
+func normalMode(v types.String) string {
+	if v.ValueString() == "" {
+		return "http"
+	}
+	return v.ValueString()
 }
 
 // inPlaceOnly turns errors that only an in-place update meets into

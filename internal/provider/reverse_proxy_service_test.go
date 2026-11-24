@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
@@ -1867,5 +1869,60 @@ func Test_reverseProxyService_updateChecksLiveMode(t *testing.T) {
 	}
 	if !found || slices.Contains(methods, http.MethodPut) {
 		t.Errorf("expected the mode change refused without a PUT, found %v after %v", resp.Diagnostics, methods)
+	}
+}
+
+// An update whose planned mode is not known (state from before mode, not
+// refreshed) sends the live mode, and the state takes it.
+func Test_reverseProxyService_updateSendsLiveMode(t *testing.T) {
+	ctx := context.Background()
+	var sent map[string]any
+	svc := `{"id":"s1","name":"svc","domain":"svc.example","enabled":true,"mode":"tcp","listen_port":15432,"targets":[],"auth":{},"meta":{"created_at":"2026-01-01T00:00:00Z","status":"active"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			_ = json.NewDecoder(r.Body).Decode(&sent)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, svc)
+	}))
+	defer srv.Close()
+	r := &ReverseProxyService{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	value := func(mode tftypes.Value) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["id"] = tftypes.NewValue(tftypes.String, "s1")
+		values["name"] = tftypes.NewValue(tftypes.String, "svc")
+		values["domain"] = tftypes.NewValue(tftypes.String, "svc.example")
+		values["enabled"] = tftypes.NewValue(tftypes.Bool, true)
+		values["listen_port"] = tftypes.NewValue(tftypes.Number, 15432)
+		values["mode"] = mode
+		return tftypes.NewValue(typ, values)
+	}
+	plan := value(tftypes.NewValue(tftypes.String, tftypes.UnknownValue))
+	state := value(tftypes.NewValue(tftypes.String, nil))
+	resp := resource.UpdateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: state}}
+	r.Update(ctx, resource.UpdateRequest{
+		Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
+		Config: tfsdk.Config{Schema: sch.Schema, Raw: value(tftypes.NewValue(tftypes.String, nil))},
+		State:  tfsdk.State{Schema: sch.Schema, Raw: state},
+	}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatal(resp.Diagnostics)
+	}
+	if sent["mode"] != "tcp" {
+		t.Errorf("expected the live mode tcp in the PUT, found %v", sent["mode"])
+	}
+	var got types.String
+	resp.State.GetAttribute(ctx, path.Root("mode"), &got)
+	if got.ValueString() != "tcp" {
+		t.Errorf("expected mode tcp in state, found %v", got)
 	}
 }

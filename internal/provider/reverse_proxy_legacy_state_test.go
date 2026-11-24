@@ -101,10 +101,12 @@ func Test_ReverseProxyService_legacyStatePlan(t *testing.T) {
 		rename      bool
 		wantUnknown bool
 		noMode      bool // state from before mode, configuration without it
+		emptyMode   bool // mode stored as "" by an older read, left out
 	}{
-		"unchanged":        {},
-		"renamed":          {rename: true, wantUnknown: true},
-		"renamed, no mode": {rename: true, wantUnknown: true, noMode: true},
+		"renamed, empty mode": {rename: true, wantUnknown: true, emptyMode: true},
+		"unchanged":           {},
+		"renamed":             {rename: true, wantUnknown: true},
+		"renamed, no mode":    {rename: true, wantUnknown: true, noMode: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := map[string]tftypes.Value{}
@@ -116,6 +118,16 @@ func Test_ReverseProxyService_legacyStatePlan(t *testing.T) {
 				proposed[k] = v
 			}
 			prior := prior
+			if tc.emptyMode {
+				empty := map[string]tftypes.Value{}
+				for k, v := range prior {
+					empty[k] = v
+				}
+				empty["mode"] = str("")
+				delete(config, "mode")
+				proposed["mode"] = str("")
+				prior = empty
+			}
 			if tc.noMode {
 				noMode := map[string]tftypes.Value{}
 				for k, v := range prior {
@@ -167,6 +179,9 @@ func Test_ReverseProxyService_legacyStatePlan(t *testing.T) {
 			}
 			if !tc.rename && !planned.Equal(object(prior)) {
 				t.Errorf("an unchanged plan must equal the prior state, found %v", planned)
+			}
+			if tc.emptyMode && !attrs["mode"].Equal(str("http")) {
+				t.Errorf("mode: a stored empty mode must plan as http, found %v", attrs["mode"])
 			}
 			if tc.noMode && attrs["mode"].IsKnown() {
 				// Null would be planned, and the update's "http" would not
