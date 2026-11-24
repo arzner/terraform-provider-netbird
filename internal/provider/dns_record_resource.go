@@ -87,7 +87,7 @@ func (r *DNSRecord) Schema(ctx context.Context, req resource.SchemaRequest, resp
 				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"ttl": schema.Int64Attribute{
-				MarkdownDescription: "Time to live in seconds (0 or more, as the server accepts)",
+				MarkdownDescription: "Time to live in seconds (0 or more, as the server accepts; at most 2147483647 with a 32-bit provider build)",
 				Optional:            true,
 				Computed:            true,
 				Default:             int64default.StaticInt64(300),

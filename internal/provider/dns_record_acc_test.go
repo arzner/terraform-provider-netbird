@@ -99,22 +99,16 @@ func Test_DNSRecord_Update(t *testing.T) {
 func testDNSRecordTTLOnServer(name string, zoneID *string, want int) resource.TestCheckFunc {
 	return resource.ComposeAggregateTestCheckFunc(
 		resource.TestCheckResourceAttr(name, "ttl", strconv.Itoa(want)),
-		func(s *terraform.State) error {
-			id := s.RootModule().Resources[name].Primary.ID
-			zone, err := testClient().DNSZones.GetZone(context.Background(), *zoneID)
+		resource.TestCheckResourceAttrWith(name, "id", func(id string) error {
+			rec, err := testClient().DNSZones.GetRecord(context.Background(), *zoneID, id)
 			if err != nil {
 				return err
 			}
-			for _, rec := range zone.Records {
-				if rec.Id == id {
-					if rec.Ttl != want {
-						return fmt.Errorf("TTL on the server: expected %d, found %d", want, rec.Ttl)
-					}
-					return nil
-				}
+			if rec.Ttl != want {
+				return fmt.Errorf("TTL on the server: expected %d, found %d", want, rec.Ttl)
 			}
-			return fmt.Errorf("record %s is not in zone %s", id, *zoneID)
-		},
+			return nil
+		}),
 	)
 }
 

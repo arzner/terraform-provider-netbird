@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"math"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -95,7 +96,8 @@ func Test_dnsRecordTTLValidator(t *testing.T) {
 	if !ok {
 		t.Fatal("ttl is not an Int64Attribute")
 	}
-	for ttl, wantError := range map[int64]bool{-1: true, 0: false, 30: false, 300: false, 172800: false, int64(math.MaxInt): false} {
+	// The request field is an int: 32 bits on 386 and arm builds.
+	for ttl, wantError := range map[int64]bool{-1: true, 0: false, 30: false, 300: false, 172800: false, int64(math.MaxInt): false, math.MaxInt32 + 1: strconv.IntSize == 32} {
 		var resp validator.Int64Response
 		for _, v := range attr.Validators {
 			v.ValidateInt64(ctx, validator.Int64Request{Path: path.Root("ttl"), ConfigValue: types.Int64Value(ttl)}, &resp)
