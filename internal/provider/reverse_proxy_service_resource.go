@@ -1638,9 +1638,11 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	if !mode.IsNull() && !mode.IsUnknown() {
 		modeKnown = normalMode(mode)
 	}
-	if modeKnown != "" && modeKnown != "http" {
+	if modeKnown != "" && modeKnown != "http" && (create || normalMode(state.Mode) == modeKnown) {
 		// The server turns every L4 target on (validateL4Target, v0.83.2
-		// and v0.82.1), so a disabled one would be written enabled.
+		// and v0.82.1), so a disabled one would be written enabled. With
+		// the mode changing, the update stops anyway and a replacement's
+		// create plan checks its own targets.
 		resp.Diagnostics.Append(l4DisabledTargetProblems(config.Targets)...)
 	}
 	private := !plan.Private.IsUnknown() && plan.Private.ValueBool()

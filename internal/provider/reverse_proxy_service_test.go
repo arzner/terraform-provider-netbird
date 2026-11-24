@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -1997,7 +1999,11 @@ func Test_reverseProxyService_updateChecksTargetsForLiveMode(t *testing.T) {
 // direct_upstream, which has no effect there, as the plan would.
 func Test_reverseProxyService_updateWarnsDirectUpstreamForLiveMode(t *testing.T) {
 	ctx := context.Background()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var sent map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			_ = json.NewDecoder(r.Body).Decode(&sent)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"id":"s1","name":"svc","domain":"svc.example","enabled":true,"mode":"tcp","listen_port":15432,"targets":[],"auth":{},"meta":{"created_at":"2026-01-01T00:00:00Z","status":"active"}}`)
 	}))
@@ -2056,7 +2062,19 @@ func Test_reverseProxyService_updateWarnsDirectUpstreamForLiveMode(t *testing.T)
 		Config: tfsdk.Config{Schema: sch.Schema, Raw: value(tftypes.NewValue(tftypes.String, nil))},
 		State:  tfsdk.State{Schema: sch.Schema, Raw: state},
 	}, &resp)
-	if len(resp.Diagnostics.Warnings()) == 0 {
-		t.Errorf("expected a direct_upstream warning for the live tcp mode, found %v", resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("the warning must not stop the update, found %v", resp.Diagnostics)
+	}
+	found := false
+	for _, d := range resp.Diagnostics.Warnings() {
+		wp, ok := d.(diag.DiagnosticWithPath)
+		found = found || (ok && strings.Contains(strings.ToLower(d.Summary()), "direct") && wp.Path().String() != "")
+	}
+	if !found {
+		t.Errorf("expected a direct_upstream warning on a target path, found %v", resp.Diagnostics)
+	}
+	targets, _ := sent["targets"].([]any)
+	if sent["mode"] != "tcp" || len(targets) != 1 {
+		t.Errorf("expected the PUT with mode tcp and the target, found %v", sent)
 	}
 }

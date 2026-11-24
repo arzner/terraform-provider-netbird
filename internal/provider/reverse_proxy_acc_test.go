@@ -1817,6 +1817,7 @@ resource "netbird_reverse_proxy_service" %q {
 					return nil
 				},
 			},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
 		},
 	})
 }
