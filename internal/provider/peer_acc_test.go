@@ -8,13 +8,16 @@ import (
 	"net/netip"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 	"github.com/netbirdio/netbird/shared/management/http/api"
 )
 
@@ -32,6 +35,27 @@ func Test_Peer_Create(t *testing.T) {
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttrSet(rNameFull, "id"),
 					resource.TestCheckResourceAttr(rNameFull, "name", rName),
+					// As the server reports them.
+					func(s *terraform.State) error {
+						rs, ok := s.RootModule().Resources[rNameFull]
+						if !ok {
+							return fmt.Errorf("not found: %s", rNameFull)
+						}
+						peer, err := testClient().Peers.Get(context.Background(), rs.Primary.ID)
+						if err != nil {
+							return err
+						}
+						want := map[string]string{
+							"created_at": peer.CreatedAt.UTC().Format(time.RFC3339Nano),
+							"ephemeral":  strconv.FormatBool(peer.Ephemeral),
+						}
+						for k, v := range want {
+							if rs.Primary.Attributes[k] != v {
+								return fmt.Errorf("%s: expected %q from the server, found %q", k, v, rs.Primary.Attributes[k])
+							}
+						}
+						return nil
+					},
 					func(s *terraform.State) error {
 						pID := s.RootModule().Resources[rNameFull].Primary.Attributes["id"]
 						peer, err := testClient().Peers.Get(context.Background(), pID)
@@ -316,6 +340,12 @@ resource "netbird_peer" %q {
 			// this peer (the next step plans nothing), and the other peer is
 			// untouched.
 			{PreConfig: onServerBefore(peer.Name, moved), Config: retargeted(other, moved),
+				// The other peer's read-only values are not promised from
+				// this one's state.
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectUnknownValue(rNameFull, tfjsonpath.New("created_at")),
+					plancheck.ExpectUnknownValue(rNameFull, tfjsonpath.New("ephemeral")),
+				}},
 				ExpectError: regexp.MustCompile(`(?i)is already assigned to peer`)},
 			{PreConfig: func() { otherUnchanged(); onServerBefore(peer.Name, moved)() }, Config: config(moved),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},

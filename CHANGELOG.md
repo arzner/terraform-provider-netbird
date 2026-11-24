@@ -10,6 +10,8 @@ it is based on.
 
 ### Added
 
+- `netbird_peer`: `created_at` and `ephemeral`, as the server reports them; also in the data
+  source (#101).
 - `netbird_account_settings` can be imported with the ID `current`: the account of the token,
   when the token sees exactly one account (#19).
 - `netbird_account_settings`: `metrics_push_enabled`, `auto_update_always`,
