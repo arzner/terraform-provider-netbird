@@ -258,7 +258,7 @@ func (r *NetworkRouter) Delete(ctx context.Context, req resource.DeleteRequest, 
 	}
 
 	err := r.client.Networks.Routers(data.NetworkId.ValueString()).Delete(ctx, data.Id.ValueString())
-	if err != nil {
+	if err != nil && !netbird.IsNotFound(err) {
 		resp.Diagnostics.AddError("Error deleting NetworkRouter", err.Error())
 	}
 }

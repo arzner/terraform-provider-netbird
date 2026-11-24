@@ -66,6 +66,10 @@ it is based on.
 
 ### Fixed
 
+- Every resource's delete treats an object that is already gone (404) as deleted, as the agent
+  network resources and `netbird_reverse_proxy_domain` did; a destroy failed when the object
+  disappeared between the refresh and the delete (#100; upstream
+  [#196](https://github.com/netbirdio/terraform-provider-netbird/pull/196)).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the

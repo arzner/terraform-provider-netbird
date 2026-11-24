@@ -1495,7 +1495,7 @@ func (r *ReverseProxyService) Delete(ctx context.Context, req resource.DeleteReq
 		return
 	}
 
-	if err := r.client.ReverseProxyServices.Delete(ctx, data.Id.ValueString()); err != nil {
+	if err := r.client.ReverseProxyServices.Delete(ctx, data.Id.ValueString()); err != nil && !netbird.IsNotFound(err) {
 		resp.Diagnostics.AddError("Error deleting reverse proxy service", err.Error())
 	}
 }

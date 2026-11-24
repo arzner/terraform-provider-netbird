@@ -227,7 +227,7 @@ func (r *DNSRecord) Delete(ctx context.Context, req resource.DeleteRequest, resp
 	}
 
 	err := r.client.DNSZones.DeleteRecord(ctx, data.ZoneId.ValueString(), data.Id.ValueString())
-	if err != nil {
+	if err != nil && !netbird.IsNotFound(err) {
 		resp.Diagnostics.AddError("Error deleting DNS Record", err.Error())
 	}
 }

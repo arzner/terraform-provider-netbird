@@ -702,7 +702,7 @@ func (r *PostureCheck) Delete(ctx context.Context, req resource.DeleteRequest, r
 	}
 
 	err := r.client.PostureChecks.Delete(ctx, data.Id.ValueString())
-	if err != nil {
+	if err != nil && !netbird.IsNotFound(err) {
 		resp.Diagnostics.AddError("Error deleting PostureCheck", err.Error())
 	}
 }

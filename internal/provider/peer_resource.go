@@ -427,7 +427,7 @@ func (r *Peer) Delete(ctx context.Context, req resource.DeleteRequest, resp *res
 		return
 	}
 
-	if err := r.client.Peers.Delete(ctx, data.Id.ValueString()); err != nil {
+	if err := r.client.Peers.Delete(ctx, data.Id.ValueString()); err != nil && !netbird.IsNotFound(err) {
 		resp.Diagnostics.AddError("Error deleting Peer", err.Error())
 	}
 }

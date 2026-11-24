@@ -370,7 +370,7 @@ func (r *NameserverGroup) Delete(ctx context.Context, req resource.DeleteRequest
 	}
 
 	err := r.client.DNS.DeleteNameserverGroup(ctx, data.Id.ValueString())
-	if err != nil {
+	if err != nil && !netbird.IsNotFound(err) {
 		resp.Diagnostics.AddError("Error deleting NameserverGroup", err.Error())
 	}
 }

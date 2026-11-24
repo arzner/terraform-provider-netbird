@@ -268,7 +268,7 @@ func (r *Scim) Delete(ctx context.Context, req resource.DeleteRequest, resp *res
 	}
 
 	err := r.client.SCIM.Delete(ctx, data.Id.ValueString())
-	if err != nil {
+	if err != nil && !netbird.IsNotFound(err) {
 		resp.Diagnostics.AddError("Error deleting SCIM integration", err.Error())
 	}
 }

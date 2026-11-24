@@ -295,7 +295,7 @@ func (r *User) Delete(ctx context.Context, req resource.DeleteRequest, resp *res
 	}
 
 	err := r.client.Users.Delete(ctx, data.Id.ValueString())
-	if err != nil {
+	if err != nil && !netbird.IsNotFound(err) {
 		resp.Diagnostics.AddError("Error deleting User", err.Error())
 	}
 }
