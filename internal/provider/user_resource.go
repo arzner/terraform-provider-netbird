@@ -30,6 +30,7 @@ import (
 // Ensure provider defined types fully satisfy framework interfaces.
 var _ resource.Resource = &User{}
 var _ resource.ResourceWithImportState = &User{}
+var _ resource.ResourceWithModifyPlan = &User{}
 
 func NewUser() resource.Resource {
 	return &User{}
@@ -71,13 +72,13 @@ func (r *User) Schema(ctx context.Context, req resource.SchemaRequest, resp *res
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"email": schema.StringAttribute{
-				MarkdownDescription: "User Email",
+				MarkdownDescription: "User Email. NetBird does not change a user's email: a change is refused at plan time, or by the apply before it writes when the value is known only then.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"name": schema.StringAttribute{
-				MarkdownDescription: "User Name",
+				MarkdownDescription: "User Name. NetBird does not change a user's name, so a change is refused at plan time (or by the apply before it writes, for a value known only then); for a service user under a new name, declare a new `netbird_user` (with new tokens) and remove the old one. A new regular user is an invitation and needs `name` and `email`.",
 				Optional:            true,
 				Computed:            true,
 				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
@@ -123,9 +124,10 @@ func (r *User) Schema(ctx context.Context, req resource.SchemaRequest, resp *res
 				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"is_service_user": schema.BoolAttribute{
-				MarkdownDescription: "If set to true, creates a Service Account User",
-				Required:            true,
-				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.RequiresReplace()},
+				MarkdownDescription: "If set to true, creates a Service Account User. Left out, a new user is a regular user and an existing one keeps what it is, as for an imported identity provider user. NetBird does not change a user's kind, so a change is refused; declare a new `netbird_user` of the other kind and remove the old one.",
+				Optional:            true,
+				Computed:            true,
+				PlanModifiers:       []planmodifier.Bool{boolplanmodifier.UseStateForUnknown()},
 			},
 			"is_blocked": schema.BoolAttribute{
 				MarkdownDescription: "If set to true then user is blocked and can't use the system",
@@ -169,8 +171,9 @@ func userAPIToTerraform(ctx context.Context, user *api.User, data *UserModel) di
 	data.Email = types.StringValue(user.Email)
 	data.IsBlocked = types.BoolValue(user.IsBlocked)
 	data.IsCurrent = types.BoolPointerValue(user.IsCurrent)
-	// is_service_user is Required on netbird_user: keep the configured value
-	// when the API omits it. Fresh data source models are already null.
+	// is_service_user: keep the prior value when the API omits it. Fresh
+	// data source models are already null; the resource keeps a known kind
+	// and leaves an unreported one null (userResourceAPIToTerraform).
 	if user.IsServiceUser != nil {
 		data.IsServiceUser = types.BoolValue(*user.IsServiceUser)
 	}
@@ -193,6 +196,17 @@ func (r *User) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		return
 	}
 
+	var config UserModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	// Values known only now are checked before anything is sent.
+	if d := newUserProblems(config); d.HasError() {
+		resp.Diagnostics.Append(d...)
+		return
+	}
+
 	userReq := api.UserCreateRequest{
 		AutoGroups:    stringListDefault(ctx, data.AutoGroups, []string{}),
 		IsServiceUser: data.IsServiceUser.ValueBool(),
@@ -207,7 +221,7 @@ func (r *User) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		return
 	}
 
-	resp.Diagnostics.Append(userAPIToTerraform(ctx, user, &data)...)
+	resp.Diagnostics.Append(userResourceAPIToTerraform(ctx, user, &data)...)
 
 	if resp.Diagnostics.HasError() {
 		return
@@ -234,7 +248,7 @@ func (r *User) Read(ctx context.Context, req resource.ReadRequest, resp *resourc
 	}
 	for _, u := range users {
 		if u.Id == data.Id.ValueString() {
-			resp.Diagnostics.Append(userAPIToTerraform(ctx, &u, &data)...)
+			resp.Diagnostics.Append(userResourceAPIToTerraform(ctx, &u, &data)...)
 
 			if resp.Diagnostics.HasError() {
 				return
@@ -264,6 +278,17 @@ func (r *User) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		return
 	}
 
+	// Values not known at plan time are checked now, before any write.
+	var state UserModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if d := immutableUserChanges(data, state); d.HasError() {
+		resp.Diagnostics.Append(d...)
+		return
+	}
+
 	user, err := r.client.Users.Update(ctx, data.Id.ValueString(), api.UserRequest{
 		AutoGroups: stringListDefault(ctx, data.AutoGroups, []string{}),
 		IsBlocked:  data.IsBlocked.ValueBool(),
@@ -275,7 +300,7 @@ func (r *User) Update(ctx context.Context, req resource.UpdateRequest, resp *res
 		return
 	}
 
-	resp.Diagnostics.Append(userAPIToTerraform(ctx, user, &data)...)
+	resp.Diagnostics.Append(userResourceAPIToTerraform(ctx, user, &data)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -310,4 +335,119 @@ func (r *User) Delete(ctx context.Context, req resource.DeleteRequest, resp *res
 
 func (r *User) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+}
+
+// ModifyPlan refuses what the API cannot do. UserRequest (v0.83, v0.82)
+// carries only role, auto_groups and is_blocked, so a change of name, email
+// or kind is impossible; the create request has no block flag, NetBird
+// refuses an owner as a service user or an invitation, and a new regular user
+// is an invitation, which needs a name and an email.
+func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+	var config, plan, state UserModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if !req.State.Raw.IsNull() {
+		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !req.State.Raw.IsNull() {
+		// Unknown values are checked by the update, before it writes.
+		resp.Diagnostics.Append(immutableUserChanges(plan, state)...)
+		return
+	}
+
+	// Left out, a new user is a regular user: plan it as such.
+	if config.IsServiceUser.IsNull() {
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("is_service_user"), types.BoolValue(false))...)
+	}
+	resp.Diagnostics.Append(newUserProblems(config)...)
+}
+
+// newUserProblems reports what the create cannot make as configured. The
+// plan runs it on the configuration and the create again on the resolved
+// one, before it sends anything: a value known only at apply passes the plan.
+func newUserProblems(config UserModel) diag.Diagnostics {
+	var d diag.Diagnostics
+	known := func(v types.String) bool { return !v.IsNull() && !v.IsUnknown() }
+	missing := func(v types.String) bool { return v.IsNull() || (known(v) && v.ValueString() == "") }
+	service := config.IsServiceUser.Equal(types.BoolValue(true))
+	regular := config.IsServiceUser.IsNull() || config.IsServiceUser.Equal(types.BoolValue(false))
+	if config.IsBlocked.Equal(types.BoolValue(true)) {
+		d.AddAttributeError(path.Root("is_blocked"), "Cannot create a blocked user",
+			"NetBird creates users unblocked (the create request has no block flag); create the user first, then set is_blocked = true.")
+	}
+	if config.Role.Equal(types.StringValue("owner")) {
+		detail := "NetBird does not invite an owner; invite the user with another role and transfer ownership in NetBird."
+		if service {
+			detail = "NetBird refuses the owner role for a service user, also by transfer; choose another role."
+		}
+		d.AddAttributeError(path.Root("role"), "Cannot create an owner", detail)
+	}
+	// What each kind cannot take; with the kind not known yet, the plan is
+	// refused only when neither kind could be created.
+	regularFails := missing(config.Email) || missing(config.Name)
+	serviceFails := known(config.Email) && config.Email.ValueString() != ""
+	switch {
+	case regular && regularFails, config.IsServiceUser.IsUnknown() && regularFails && serviceFails:
+		d.AddError("Name and email required",
+			"A regular user is created as an invitation, which needs a name and an email; set both, or is_service_user = true (without an email) for a service user.")
+	case service && serviceFails:
+		d.AddAttributeError(path.Root("email"), "Service users have no email",
+			"NetBird creates service users without an email; leave email out for a service user.")
+	}
+	return d
+}
+
+// immutableUserChanges reports a known planned name, email or kind that
+// differs from the user's: NetBird changes none of them. Unknown values are
+// left to the update, which sees them resolved.
+func immutableUserChanges(plan, state UserModel) diag.Diagnostics {
+	var d diag.Diagnostics
+	// A value the server never reported (null in state) is not compared.
+	changed := func(p, s attr.Value) bool { return !p.IsNull() && !p.IsUnknown() && !s.IsNull() && !p.Equal(s) }
+	if changed(plan.Email, state.Email) {
+		d.AddAttributeError(path.Root("email"), "Email cannot be changed",
+			"NetBird does not change a user's email. Keep the current email in the configuration, or leave it out.")
+	}
+	if changed(plan.Name, state.Name) {
+		if state.IsServiceUser.ValueBool() {
+			d.AddAttributeError(path.Root("name"), "Name cannot be changed",
+				"NetBird does not change a service user's name. Keep the current name, or declare a new netbird_user under the new name (with new tokens) and remove this one.")
+		} else {
+			d.AddAttributeError(path.Root("name"), "Name cannot be changed",
+				"A regular user's name comes from the identity provider and NetBird does not change it. Keep the current name in the configuration, or leave it out.")
+		}
+	}
+	if !plan.IsServiceUser.IsNull() && !plan.IsServiceUser.IsUnknown() && state.IsServiceUser.IsNull() {
+		d.AddAttributeError(path.Root("is_service_user"), "User kind not reported",
+			"The server does not report this user's kind, so a configured is_service_user cannot be checked; leave it out.")
+	}
+	if changed(plan.IsServiceUser, state.IsServiceUser) {
+		d.AddAttributeError(path.Root("is_service_user"), "User kind cannot be changed",
+			"NetBird does not turn a regular user into a service user or back. Keep the current kind, or declare a new netbird_user of the other kind and remove this one.")
+	}
+	return d
+}
+
+// userResourceAPIToTerraform maps a user for the resource: an
+// is_service_user the API omits keeps a known prior kind and otherwise, as
+// on import, stays null.
+func userResourceAPIToTerraform(ctx context.Context, user *api.User, data *UserModel) diag.Diagnostics {
+	prior := data.IsServiceUser
+	d := userAPIToTerraform(ctx, user, data)
+	// Compatibility: a response without the flag keeps a known kind; with
+	// none known (an import) the kind stays unreported, as in the data
+	// sources. Current servers always send it.
+	if user.IsServiceUser == nil {
+		data.IsServiceUser = prior
+		if prior.IsUnknown() {
+			data.IsServiceUser = types.BoolNull()
+		}
+	}
+	return d
 }

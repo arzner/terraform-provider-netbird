@@ -70,6 +70,17 @@ it is based on.
 
 ### Fixed
 
+- `netbird_user`: a change the API cannot make is no longer planned as an update that is silently
+  lost or as a replacement that deletes the user and its tokens. NetBird does not change a user's
+  name, email or kind (`is_service_user`), so a change of any of them is refused at plan time, or,
+  for a value known only at apply, by the update before it writes (#56). For a service user under
+  another name or a user of the other kind, declare a new `netbird_user`; a regular user's name
+  comes from the identity provider, so change it there and leave `name` out or match it. `is_service_user` is optional: left
+  out, a new user is a regular user and an existing one, such as an imported identity provider
+  user, keeps what it is (#64; upstream [#140](https://github.com/netbirdio/terraform-provider-netbird/issues/140)).
+  A new user is refused at plan time when it cannot be created as configured: `is_blocked = true`
+  (the create request has no block flag), the `owner` role, a service user with an email, or a
+  regular user without a name and email.
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the
