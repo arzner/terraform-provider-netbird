@@ -566,15 +566,17 @@ func Test_policyAPIToTerraform_emptyAuthorizedGroups(t *testing.T) {
 	}
 	empty := types.MapValueMust(mapType, map[string]attr.Value{})
 	for name, tc := range map[string]struct {
-		prior types.List
-		want  types.Map
+		prior    types.List
+		want     types.Map
+		protocol api.PolicyRuleProtocol
 	}{
-		"planned empty": {prior(empty), empty},
-		"import":        {types.ListNull(PolicyRuleModel{}.TFType()), types.MapNull(mapType)},
+		"planned empty":           {prior(empty), empty, api.PolicyRuleProtocolNetbirdSsh},
+		"protocol changed to tcp": {prior(empty), types.MapNull(mapType), api.PolicyRuleProtocolTcp},
+		"import":                  {types.ListNull(PolicyRuleModel{}.TFType()), types.MapNull(mapType), api.PolicyRuleProtocolNetbirdSsh},
 	} {
 		data := PolicyModel{Rules: tc.prior, SourcePostureChecks: types.ListNull(types.StringType)}
 		policy := &api.Policy{Id: valPtr("p1"), Name: "p", Enabled: true, Rules: []api.PolicyRule{{
-			Id: valPtr("r1"), Name: "r", Action: api.PolicyRuleActionAccept, Protocol: api.PolicyRuleProtocolNetbirdSsh, Enabled: true,
+			Id: valPtr("r1"), Name: "r", Action: api.PolicyRuleActionAccept, Protocol: tc.protocol, Enabled: true,
 		}}}
 		if d := policyAPIToTerraform(ctx, policy, &data); d.HasError() {
 			t.Fatalf("%s: %v", name, d)

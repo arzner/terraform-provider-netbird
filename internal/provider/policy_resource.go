@@ -329,7 +329,7 @@ func (r *Policy) Schema(ctx context.Context, req resource.SchemaRequest, resp *r
 							Validators: []validator.Object{objectvalidator.ConflictsWith(path.MatchRelative().AtParent().AtName("destinations"))},
 						},
 						"authorized_groups": schema.MapAttribute{
-							MarkdownDescription: "Map of group IDs to the local users their members may log in as over SSH; an empty list allows every local user. When set and not empty, it needs an entry for every group in `sources`, and any other key grants its group's users access too. Not set or empty, every active NetBird user (not only those in `sources`) may log in as any local user; which peers can reach the destination is still decided by `sources`. Only applicable when protocol is `netbird-ssh`.",
+							MarkdownDescription: "Map of group IDs to the local users their members may log in as over SSH; an empty list allows every local user. When set and not empty, it needs an entry for every group in `sources`, and any other key grants its group's users access too. Not set or empty, every active NetBird user (not only those in `sources`) may log in as any local user, while the rule's sources still decide which peers can reach the destination; a temporary SSH access policy created by the server is the exception, as it names its user itself. Only applicable when protocol is `netbird-ssh`.",
 							ElementType:         types.ListType{ElemType: types.StringType},
 							Optional:            true,
 							Computed:            true,
@@ -497,7 +497,8 @@ func policyAPIToTerraform(ctx context.Context, policy *api.Policy, data *PolicyM
 			// The server leaves an empty map out of the response: a planned
 			// or stored empty map stays empty.
 			ruleModel.AuthorizedGroups = types.MapNull(mapElemType)
-			if priorGroups, ok := prior.Attributes()["authorized_groups"].(types.Map); ok && !priorGroups.IsNull() && !priorGroups.IsUnknown() && len(priorGroups.Elements()) == 0 {
+			if priorGroups, ok := prior.Attributes()["authorized_groups"].(types.Map); ok && r.Protocol == api.PolicyRuleProtocolNetbirdSsh &&
+				!priorGroups.IsNull() && !priorGroups.IsUnknown() && len(priorGroups.Elements()) == 0 {
 				ruleModel.AuthorizedGroups = types.MapValueMust(mapElemType, map[string]attr.Value{})
 			}
 		}
