@@ -2,7 +2,15 @@ package provider
 
 import (
 	"context"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
+	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -1516,22 +1524,23 @@ func Test_preserveTargetPlanValues_pathAndDirectUpstream(t *testing.T) {
 			}
 			var out []ReverseProxyServiceTargetModel
 			got.ElementsAs(ctx, &out, false)
-			if out[0].Path.ValueString() != "/admin" || out[0].AccessAction.ValueString() != "block" || out[1].Path.ValueString() != "/public" {
+			// Both pair, so the planned order stands.
+			if out[1].Path.ValueString() != "/admin" || out[1].AccessAction.ValueString() != "block" || out[0].Path.ValueString() != "/public" {
 				t.Fatalf("targets matched to the wrong path: %+v", out)
 			}
-			if !out[1].Options.IsNull() {
-				t.Errorf("/public must keep no options, found %v", out[1].Options)
+			if !out[0].Options.IsNull() {
+				t.Errorf("/public must keep no options, found %v", out[0].Options)
 			}
 			// With no options left on the server the parent is null unless the
 			// planned object sets only defaults.
 			wantNull := tc.liveDirect.IsNull() && tc.plannedDirect.Attributes()["direct_upstream"].Equal(types.BoolValue(true))
-			if out[0].Options.IsNull() != wantNull {
-				t.Fatalf("options: expected null %v, found %v", wantNull, out[0].Options)
+			if out[1].Options.IsNull() != wantNull {
+				t.Fatalf("options: expected null %v, found %v", wantNull, out[1].Options)
 			}
 			if wantNull {
 				return
 			}
-			if v := out[0].Options.Attributes()["direct_upstream"]; !v.Equal(tc.want) {
+			if v := out[1].Options.Attributes()["direct_upstream"]; !v.Equal(tc.want) {
 				t.Errorf("direct_upstream: expected %v, found %v", tc.want, v)
 			}
 		})
@@ -1780,5 +1789,115 @@ func Test_reconcileOptions(t *testing.T) {
 	got, _ = reconcileOptions(options(n, n, types.BoolValue(false)), types.ObjectNull(optsType.AttrTypes))
 	if got.IsNull() || !got.Attributes()["skip_tls_verify"].Equal(types.BoolValue(false)) {
 		t.Errorf("options that set only defaults stay as planned, found %v", got)
+	}
+}
+
+// The server loads targets without an order: a reordered response keeps the
+// planned order when every target pairs, and the API order otherwise.
+func Test_preserveTargetPlanValues_order(t *testing.T) {
+	ctx := context.Background()
+	target := func(id string) ReverseProxyServiceTargetModel {
+		return ReverseProxyServiceTargetModel{
+			TargetId: types.StringValue(id), TargetType: types.StringValue("peer"), Host: types.StringNull(),
+			Port: types.Int64Value(80), Protocol: types.StringValue("http"), Path: types.StringValue("/" + id),
+			Enabled: types.BoolValue(true), AccessAction: types.StringValue("inherit"),
+			Options: types.ObjectNull(ReverseProxyTargetOptionsModel{}.TFType().AttrTypes),
+		}
+	}
+	list := func(ids ...string) types.List {
+		var targets []ReverseProxyServiceTargetModel
+		for _, id := range ids {
+			targets = append(targets, target(id))
+		}
+		l, d := types.ListValueFrom(ctx, ReverseProxyServiceTargetModel{}.TFType(), targets)
+		if d.HasError() {
+			t.Fatal(d)
+		}
+		return l
+	}
+	for name, tc := range map[string]struct {
+		planned, live []string
+		want          []string
+	}{
+		"reordered":       {[]string{"a", "b", "c"}, []string{"c", "a", "b"}, []string{"a", "b", "c"}},
+		"one added":       {[]string{"a", "b"}, []string{"c", "b", "a"}, []string{"c", "b", "a"}},
+		"one removed":     {[]string{"a", "b", "c"}, []string{"c", "a"}, []string{"c", "a"}},
+		"one replaced":    {[]string{"a", "b"}, []string{"x", "a"}, []string{"x", "a"}},
+		"same order kept": {[]string{"a", "b"}, []string{"a", "b"}, []string{"a", "b"}},
+	} {
+		got, d := preserveTargetPlanValues(ctx, list(tc.planned...), list(tc.live...))
+		if d.HasError() {
+			t.Fatalf("%s: %v", name, d)
+		}
+		var out []ReverseProxyServiceTargetModel
+		got.ElementsAs(ctx, &out, false)
+		var ids []string
+		for _, o := range out {
+			ids = append(ids, o.TargetId.ValueString())
+		}
+		if !slices.Equal(ids, tc.want) {
+			t.Errorf("%s: expected %v, found %v", name, tc.want, ids)
+		}
+	}
+}
+
+// Read keeps the stored target order when the server returns the same
+// targets in another order.
+func Test_reverseProxyService_readKeepsTargetOrder(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"s1","name":"svc","domain":"svc.example","enabled":true,"mode":"http","listen_port":0,`+
+			`"targets":[{"target_id":"b","target_type":"peer","port":9090,"protocol":"http","path":"/","enabled":true},`+
+			`{"target_id":"a","target_type":"peer","port":8080,"protocol":"http","path":"/","enabled":true}],`+
+			`"auth":{},"meta":{"created_at":"2026-01-01T00:00:00Z","status":"active"}}`)
+	}))
+	defer srv.Close()
+	r := &ReverseProxyService{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	targetsType, ok := typ.AttributeTypes["targets"].(tftypes.List)
+	if !ok {
+		t.Fatal("targets is not a list")
+	}
+	targetType, ok := targetsType.ElementType.(tftypes.Object)
+	if !ok {
+		t.Fatal("a target is not an object")
+	}
+	target := func(id string, port int) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range targetType.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["target_id"] = tftypes.NewValue(tftypes.String, id)
+		values["target_type"] = tftypes.NewValue(tftypes.String, "peer")
+		values["port"] = tftypes.NewValue(tftypes.Number, port)
+		values["protocol"] = tftypes.NewValue(tftypes.String, "http")
+		values["path"] = tftypes.NewValue(tftypes.String, "/")
+		values["enabled"] = tftypes.NewValue(tftypes.Bool, true)
+		return tftypes.NewValue(targetType, values)
+	}
+	values := map[string]tftypes.Value{}
+	for n, at := range typ.AttributeTypes {
+		values[n] = tftypes.NewValue(at, nil)
+	}
+	values["id"] = tftypes.NewValue(tftypes.String, "s1")
+	values["targets"] = tftypes.NewValue(targetsType, []tftypes.Value{target("a", 8080), target("b", 9090)})
+	state := tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(typ, values)}
+	resp := resource.ReadResponse{State: state}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatal(resp.Diagnostics)
+	}
+	var got []ReverseProxyServiceTargetModel
+	var targets types.List
+	resp.State.GetAttribute(ctx, path.Root("targets"), &targets)
+	targets.ElementsAs(ctx, &got, false)
+	if len(got) != 2 || got[0].TargetId.ValueString() != "a" || got[0].Port.ValueInt64() != 8080 || got[1].TargetId.ValueString() != "b" {
+		t.Errorf("expected the stored order a, b, found %+v", got)
 	}
 }

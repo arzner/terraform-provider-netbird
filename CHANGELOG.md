@@ -66,6 +66,9 @@ it is based on.
 
 ### Fixed
 
+- `netbird_reverse_proxy_service`: targets keep the configured (or stored) order when every target
+  the server returns pairs with one; the server loads them without an order, so an unchanged
+  service could plan a reordering or fail the apply with an inconsistent result (#50).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the
