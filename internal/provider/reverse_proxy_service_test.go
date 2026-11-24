@@ -1978,20 +1978,28 @@ func Test_reverseProxyService_updateChecksTargetsForLiveMode(t *testing.T) {
 		values["targets"] = tftypes.NewValue(targetsType, []tftypes.Value{tftypes.NewValue(targetType, tv)})
 		return tftypes.NewValue(typ, values)
 	}
-	plan := value(tftypes.NewValue(tftypes.String, tftypes.UnknownValue))
-	state := value(tftypes.NewValue(tftypes.String, nil))
-	resp := resource.UpdateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: state}}
-	r.Update(ctx, resource.UpdateRequest{
-		Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
-		Config: tfsdk.Config{Schema: sch.Schema, Raw: value(tftypes.NewValue(tftypes.String, nil))},
-		State:  tfsdk.State{Schema: sch.Schema, Raw: state},
-	}, &resp)
-	found := false
-	for _, d := range resp.Diagnostics.Errors() {
-		found = found || d.Summary() == "L4 targets are always enabled"
-	}
-	if !found || slices.Contains(methods, http.MethodPut) {
-		t.Errorf("expected the disabled target refused without a PUT, found %v after %v", resp.Diagnostics, methods)
+	// The planned mode unknown, or configured as the live one; the stored
+	// mode is null either way (state from before mode, not refreshed).
+	for name, planned := range map[string]tftypes.Value{
+		"mode unknown":    tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"mode configured": tftypes.NewValue(tftypes.String, "tcp"),
+	} {
+		methods = nil
+		plan := value(planned)
+		state := value(tftypes.NewValue(tftypes.String, nil))
+		resp := resource.UpdateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: state}}
+		r.Update(ctx, resource.UpdateRequest{
+			Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
+			Config: tfsdk.Config{Schema: sch.Schema, Raw: plan},
+			State:  tfsdk.State{Schema: sch.Schema, Raw: state},
+		}, &resp)
+		found := false
+		for _, d := range resp.Diagnostics.Errors() {
+			found = found || d.Summary() == "L4 targets are always enabled"
+		}
+		if !found || slices.Contains(methods, http.MethodPut) {
+			t.Errorf("%s: expected the disabled target refused without a PUT, found %v after %v", name, resp.Diagnostics, methods)
+		}
 	}
 }
 

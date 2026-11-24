@@ -1459,21 +1459,25 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 	if serviceReq.Mode == nil && live.Mode != nil && *live.Mode != "" {
-		// A mode the plan does not know is the live one, and the checks the
-		// plan could not make for it are made now.
+		// A mode the plan does not know is the live one, and the warnings the
+		// plan could not give for it are given now.
 		mode := api.ServiceRequestMode(*live.Mode)
 		serviceReq.Mode = &mode
 		if *live.Mode != "http" {
-			if d := l4DisabledTargetProblems(data.Targets); d.HasError() {
-				resp.Diagnostics.Append(d...)
-				return
-			}
 			var config ReverseProxyServiceModel
 			resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 			if resp.Diagnostics.HasError() {
 				return
 			}
 			resp.Diagnostics.Append(directUpstreamWarnings(config.Targets, string(*live.Mode))...)
+		}
+	}
+	if liveMode.ValueString() != "http" {
+		// The server turns every L4 target on: refuse a disabled one before
+		// the write, also when the plan could not check it (no stored mode).
+		if d := l4DisabledTargetProblems(data.Targets); d.HasError() {
+			resp.Diagnostics.Append(d...)
+			return
 		}
 	}
 	keepLiveUnknownAccess(&serviceReq, data, live)
