@@ -5,6 +5,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -356,7 +357,32 @@ func Test_ReverseProxyService_MultipleTargets(t *testing.T) {
 			// the configured one, so the plan stays empty.
 			{Config: testReverseProxyServiceMultiTarget(rName, domain, peerID1, peerID2), PlanOnly: true},
 			{Config: testReverseProxyServiceMultiTarget(rName, domain, peerID1, peerID2), PlanOnly: true},
-			{Config: testReverseProxyServiceMultiTarget(rName, domain, peerID1, peerID2), PlanOnly: true},
+			{
+				// The configured order swapped: the update takes the new
+				// order, and the targets keep their ports.
+				Config: testReverseProxyServiceTargetsInOrder(rName, domain, peerID2, 9090, peerID1, 8080),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(rNameFull, "targets.0.target_id", peerID2),
+					resource.TestCheckResourceAttr(rNameFull, "targets.0.port", "9090"),
+					resource.TestCheckResourceAttr(rNameFull, "targets.1.target_id", peerID1),
+					resource.TestCheckResourceAttr(rNameFull, "targets.1.port", "8080"),
+					func(*terraform.State) error {
+						svc, err := testClient().ReverseProxyServices.Get(context.Background(), createdID)
+						if err != nil {
+							return err
+						}
+						ports := map[string]int{}
+						for _, tg := range svc.Targets {
+							ports[tg.TargetId] = tg.Port
+						}
+						if ports[peerID1] != 8080 || ports[peerID2] != 9090 || len(ports) != 2 {
+							return fmt.Errorf("targets on the server: expected %s:8080 and %s:9090, found %v", peerID1, peerID2, ports)
+						}
+						return nil
+					},
+				),
+			},
+			{Config: testReverseProxyServiceTargetsInOrder(rName, domain, peerID2, 9090, peerID1, 8080), PlanOnly: true},
 		},
 	})
 }
@@ -500,6 +526,12 @@ resource "netbird_reverse_proxy_service" "%s" {
 }
 
 func testReverseProxyServiceMultiTarget(rName, domain, peerID1, peerID2 string) string {
+	return testReverseProxyServiceTargetsInOrder(rName, domain, peerID1, 8080, peerID2, 9090)
+}
+
+// testReverseProxyServiceTargetsInOrder is the two-target service with the
+// targets in the given order.
+func testReverseProxyServiceTargetsInOrder(rName, domain, firstID string, firstPort int, secondID string, secondPort int) string {
 	return fmt.Sprintf(`
 resource "netbird_reverse_proxy_service" "%s" {
   name   = %q
@@ -509,13 +541,13 @@ resource "netbird_reverse_proxy_service" "%s" {
     {
       target_id   = %q
       target_type = "peer"
-      port        = 8080
+      port        = %d
       protocol    = "http"
     },
     {
       target_id   = %q
       target_type = "peer"
-      port        = 9090
+      port        = %d
       protocol    = "http"
     },
   ]
@@ -526,7 +558,7 @@ resource "netbird_reverse_proxy_service" "%s" {
       password = "multitest"
     }
   }
-}`, rName, rName, domain, peerID1, peerID2)
+}`, rName, rName, domain, firstID, firstPort, secondID, secondPort)
 }
 
 func testReverseProxyServiceWithDataSource(rName, domain, peerID string) string {
@@ -1196,6 +1228,7 @@ func Test_ReverseProxyService_AccessActionCrowdsecDirectUpstream(t *testing.T) {
 	domain := rName + "." + cluster.Address
 	rNameFull := "netbird_reverse_proxy_service." + rName
 	var createdID string
+	var stored map[string]map[string]string
 	peerID1 := testPeerID(t, "peer1")
 	groupID := e2eGroupAllID()
 	// The server stores every CrowdSec mode whatever the cluster supports,
@@ -1355,9 +1388,11 @@ resource "netbird_reverse_proxy_service" "l4" {
 					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "block"),
 					resource.TestCheckResourceAttr(rNameFull, "access_restrictions.crowdsec_mode", crowdsec),
 					onServer("block", false, crowdsec),
+					testStoreTargets(rNameFull, &stored),
 				),
 			},
-			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			// An import has no order to keep, so targets compare by ID and path.
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"targets"}, ImportStateCheck: testImportedTargets(&stored)},
 			{
 				// Values outside the enums are refused at plan time.
 				Config:      config(svc{adminAction: `access_action = "deny"`, adminPort: 8081, crowdsec: crowdsec}),
@@ -1460,9 +1495,10 @@ data "netbird_reverse_proxy_service" "test" {
 					resource.TestCheckResourceAttr(rNameFull, "targets.0.options.direct_upstream", "true"),
 					resource.TestCheckResourceAttr(rNameFull, "targets.1.access_action", "block"),
 					onServer("block", true, crowdsec),
+					testStoreTargets(rNameFull, &stored),
 				),
 			},
-			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"targets"}, ImportStateCheck: testImportedTargets(&stored)},
 			{
 				// direct_upstream cleared outside Terraform: the refresh shows
 				// it, and the apply sets it again.
@@ -1677,4 +1713,56 @@ resource "netbird_reverse_proxy_service" %q {
 			},
 		},
 	})
+}
+
+// targetsByKey groups the flattened targets of a state by target ID and
+// path.
+func targetsByKey(attrs map[string]string) map[string]map[string]string {
+	byIndex := map[string]map[string]string{}
+	for k, v := range attrs {
+		rest, ok := strings.CutPrefix(k, "targets.")
+		if !ok || rest == "#" {
+			continue
+		}
+		idx, field, ok := strings.Cut(rest, ".")
+		if !ok {
+			continue
+		}
+		if byIndex[idx] == nil {
+			byIndex[idx] = map[string]string{}
+		}
+		byIndex[idx][field] = v
+	}
+	out := map[string]map[string]string{}
+	for _, t := range byIndex {
+		out[t["target_id"]+" "+t["path"]] = t
+	}
+	return out
+}
+
+// testStoreTargets keeps the resource's targets, keyed by ID and path.
+func testStoreTargets(name string, into *map[string]map[string]string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[name]
+		if !ok {
+			return fmt.Errorf("not found: %s", name)
+		}
+		*into = targetsByKey(rs.Primary.Attributes)
+		return nil
+	}
+}
+
+// testImportedTargets compares imported targets with the stored ones by ID
+// and path, whatever their order.
+func testImportedTargets(stored *map[string]map[string]string) resource.ImportStateCheckFunc {
+	return func(states []*terraform.InstanceState) error {
+		if len(states) != 1 {
+			return fmt.Errorf("expected one imported instance, found %d", len(states))
+		}
+		got := targetsByKey(states[0].Attributes)
+		if !reflect.DeepEqual(got, *stored) {
+			return fmt.Errorf("imported targets differ:\nimported %v\nstored   %v", got, *stored)
+		}
+		return nil
+	}
 }

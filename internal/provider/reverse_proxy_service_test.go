@@ -1522,13 +1522,13 @@ func Test_preserveTargetPlanValues_pathAndDirectUpstream(t *testing.T) {
 				t.Fatalf("targets matched to the wrong path: %+v", out)
 			}
 			if !out[0].Options.IsNull() {
-				t.Errorf("/public must keep no options, found %v", out[1].Options)
+				t.Errorf("/public must keep no options, found %v", out[0].Options)
 			}
 			// With no options left on the server the parent is null unless the
 			// planned object sets only defaults.
 			wantNull := tc.liveDirect.IsNull() && tc.plannedDirect.Attributes()["direct_upstream"].Equal(types.BoolValue(true))
 			if out[1].Options.IsNull() != wantNull {
-				t.Fatalf("options: expected null %v, found %v", wantNull, out[0].Options)
+				t.Fatalf("options: expected null %v, found %v", wantNull, out[1].Options)
 			}
 			if wantNull {
 				return
