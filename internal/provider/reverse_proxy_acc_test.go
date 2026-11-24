@@ -5,8 +5,8 @@ package provider
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -1716,8 +1716,8 @@ resource "netbird_reverse_proxy_service" %q {
 }
 
 // targetsByKey groups the flattened targets of a state by target ID and
-// path.
-func targetsByKey(attrs map[string]string) map[string]map[string]string {
+// path; a key held by two targets is an error.
+func targetsByKey(attrs map[string]string) (map[string]map[string]string, error) {
 	byIndex := map[string]map[string]string{}
 	for k, v := range attrs {
 		rest, ok := strings.CutPrefix(k, "targets.")
@@ -1735,9 +1735,13 @@ func targetsByKey(attrs map[string]string) map[string]map[string]string {
 	}
 	out := map[string]map[string]string{}
 	for _, t := range byIndex {
-		out[t["target_id"]+" "+t["path"]] = t
+		k := t["target_id"] + " " + t["path"]
+		if _, dup := out[k]; dup {
+			return nil, fmt.Errorf("two targets with ID and path %q", k)
+		}
+		out[k] = t
 	}
-	return out
+	return out, nil
 }
 
 // testStoreTargets keeps the resource's targets, keyed by ID and path.
@@ -1747,8 +1751,9 @@ func testStoreTargets(name string, into *map[string]map[string]string) resource.
 		if !ok {
 			return fmt.Errorf("not found: %s", name)
 		}
-		*into = targetsByKey(rs.Primary.Attributes)
-		return nil
+		var err error
+		*into, err = targetsByKey(rs.Primary.Attributes)
+		return err
 	}
 }
 
@@ -1759,9 +1764,37 @@ func testImportedTargets(stored *map[string]map[string]string) resource.ImportSt
 		if len(states) != 1 {
 			return fmt.Errorf("expected one imported instance, found %d", len(states))
 		}
-		got := targetsByKey(states[0].Attributes)
-		if !reflect.DeepEqual(got, *stored) {
-			return fmt.Errorf("imported targets differ:\nimported %v\nstored   %v", got, *stored)
+		got, err := targetsByKey(states[0].Attributes)
+		if err != nil {
+			return err
+		}
+		// Names only: a value can be a secret (a custom header).
+		var diffs []string
+		for k, want := range *stored {
+			have, ok := got[k]
+			if !ok {
+				diffs = append(diffs, k+": not imported")
+				continue
+			}
+			for field := range want {
+				if have[field] != want[field] {
+					diffs = append(diffs, k+": "+field)
+				}
+			}
+			for field := range have {
+				if _, ok := want[field]; !ok {
+					diffs = append(diffs, k+": "+field)
+				}
+			}
+		}
+		for k := range got {
+			if _, ok := (*stored)[k]; !ok {
+				diffs = append(diffs, k+": not in state")
+			}
+		}
+		if len(diffs) > 0 {
+			sort.Strings(diffs)
+			return fmt.Errorf("imported targets differ in: %s", strings.Join(diffs, ", "))
 		}
 		return nil
 	}
