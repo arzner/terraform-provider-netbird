@@ -351,7 +351,7 @@ func (r *Route) Delete(ctx context.Context, req resource.DeleteRequest, resp *re
 	}
 
 	err := r.client.Routes.Delete(ctx, data.Id.ValueString())
-	if err != nil {
+	if err = deleteError(ctx, r.client, err, func(ctx context.Context) error { _, err := r.client.Routes.Get(ctx, data.Id.ValueString()); return err }); err != nil {
 		resp.Diagnostics.AddError("Error deleting Route", err.Error())
 	}
 }

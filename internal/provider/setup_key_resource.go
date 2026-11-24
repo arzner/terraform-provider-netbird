@@ -415,7 +415,10 @@ func (r *SetupKey) Delete(ctx context.Context, req resource.DeleteRequest, resp 
 	}
 
 	err := r.client.SetupKeys.Delete(ctx, data.Id.ValueString())
-	if err != nil {
+	if err = deleteError(ctx, r.client, err, func(ctx context.Context) error {
+		_, err := r.client.SetupKeys.Get(ctx, data.Id.ValueString())
+		return err
+	}); err != nil {
 		resp.Diagnostics.AddError("Error deleting SetupKey", err.Error())
 	}
 }

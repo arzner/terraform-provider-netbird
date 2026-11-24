@@ -255,7 +255,10 @@ func (r *Token) Delete(ctx context.Context, req resource.DeleteRequest, resp *re
 	}
 
 	err := r.client.Tokens.Delete(ctx, data.UserID.ValueString(), data.Id.ValueString())
-	if err != nil {
+	if err = deleteError(ctx, r.client, err, func(ctx context.Context) error {
+		_, err := r.client.Tokens.Get(ctx, data.UserID.ValueString(), data.Id.ValueString())
+		return err
+	}); err != nil {
 		resp.Diagnostics.AddError("Error deleting Token", err.Error())
 	}
 }

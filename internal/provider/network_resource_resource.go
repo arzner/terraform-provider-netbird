@@ -253,7 +253,10 @@ func (r *NetworkResource) Delete(ctx context.Context, req resource.DeleteRequest
 	}
 
 	err := r.client.Networks.Resources(data.NetworkId.ValueString()).Delete(ctx, data.Id.ValueString())
-	if err != nil {
+	if err = deleteError(ctx, r.client, err, func(ctx context.Context) error {
+		_, err := r.client.Networks.Resources(data.NetworkId.ValueString()).Get(ctx, data.Id.ValueString())
+		return err
+	}); err != nil {
 		resp.Diagnostics.AddError("Error deleting NetworkResource", err.Error())
 	}
 }

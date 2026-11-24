@@ -268,7 +268,7 @@ func (r *Scim) Delete(ctx context.Context, req resource.DeleteRequest, resp *res
 	}
 
 	err := r.client.SCIM.Delete(ctx, data.Id.ValueString())
-	if err != nil {
+	if err = deleteError(ctx, r.client, err, func(ctx context.Context) error { _, err := r.client.SCIM.Get(ctx, data.Id.ValueString()); return err }); err != nil {
 		resp.Diagnostics.AddError("Error deleting SCIM integration", err.Error())
 	}
 }

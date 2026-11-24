@@ -337,7 +337,7 @@ func (r *Group) Delete(ctx context.Context, req resource.DeleteRequest, resp *re
 	}
 
 	err := r.client.Groups.Delete(ctx, data.Id.ValueString())
-	if err != nil {
+	if err = deleteError(ctx, r.client, err, func(ctx context.Context) error { _, err := r.client.Groups.Get(ctx, data.Id.ValueString()); return err }); err != nil {
 		resp.Diagnostics.AddError("Error deleting Group", err.Error())
 	}
 }

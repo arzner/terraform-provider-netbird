@@ -227,7 +227,10 @@ func (r *DNSRecord) Delete(ctx context.Context, req resource.DeleteRequest, resp
 	}
 
 	err := r.client.DNSZones.DeleteRecord(ctx, data.ZoneId.ValueString(), data.Id.ValueString())
-	if err != nil {
+	if err = deleteError(ctx, r.client, err, func(ctx context.Context) error {
+		_, err := r.client.DNSZones.GetRecord(ctx, data.ZoneId.ValueString(), data.Id.ValueString())
+		return err
+	}); err != nil {
 		resp.Diagnostics.AddError("Error deleting DNS Record", err.Error())
 	}
 }

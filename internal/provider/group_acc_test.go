@@ -9,6 +9,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
@@ -332,4 +333,41 @@ func testGroupResource(rName, peers string) string {
 	name = "%s"
 	peers = %s
 }`, rName, rName, peers)
+}
+
+// Test_Group_DeletedAfterPlan: a group deleted outside Terraform after the
+// destroy was planned counts as deleted; the destroy completes.
+func Test_Group_DeletedAfterPlan(t *testing.T) {
+	testE2E(t)
+	rName := "g" + acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
+	rNameFull := "netbird_group." + rName
+	var createdID string
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testEnsureManagementRunning(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testCheckGone(testClient().Groups.Get, &createdID),
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`resource "netbird_group" %q {
+  name = %q
+}`, rName, rName),
+				Check: testRecordID(rNameFull, &createdID),
+			},
+			{
+				Config: `resource "terraform_data" "keep" {}`,
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionDestroy),
+					deleteGroupBeforeApply{id: &createdID},
+				}},
+			},
+		},
+	})
+}
+
+// deleteGroupBeforeApply deletes the group through the API once the plan is
+// made, as if someone else had.
+type deleteGroupBeforeApply struct{ id *string }
+
+func (c deleteGroupBeforeApply) CheckPlan(ctx context.Context, _ plancheck.CheckPlanRequest, resp *plancheck.CheckPlanResponse) {
+	resp.Error = testClient().Groups.Delete(ctx, *c.id)
 }
