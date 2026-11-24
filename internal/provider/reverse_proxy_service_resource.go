@@ -1601,8 +1601,12 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 		return
 	}
 	if !create && config.Mode.IsNull() && plan.Mode.Equal(types.StringValue("")) {
-		// A stored "" (an older read) is HTTP, which the update sends.
-		plan.Mode = types.StringValue("http")
+		// A stored "" (an older read) is HTTP, which an update sends; while
+		// the plan may not write at all, it stays unknown.
+		plan.Mode = types.StringUnknown()
+		if writes {
+			plan.Mode = types.StringValue("http")
+		}
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("mode"), plan.Mode)...)
 	}
 	if !create {
@@ -1619,7 +1623,12 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	}
 	modeKnown := ""
 	if !mode.IsNull() && !mode.IsUnknown() {
-		modeKnown = mode.ValueString()
+		modeKnown = normalMode(mode)
+	}
+	if modeKnown != "" && modeKnown != "http" {
+		// The server turns every L4 target on (validateL4Target, v0.83.2
+		// and v0.82.1), so a disabled one would be written enabled.
+		resp.Diagnostics.Append(l4DisabledTargetProblems(config.Targets)...)
 	}
 	private := !plan.Private.IsUnknown() && plan.Private.ValueBool()
 	var existing []ReverseProxyServiceTargetModel
@@ -1666,6 +1675,9 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 	}
 	// A configuration error stops at ValidateConfig, so this reports only
 	// problems with values kept from state.
+	if modeKnown != "" {
+		mode = types.StringValue(modeKnown) // "" is HTTP
+	}
 	problems := privateServiceProblems(mode, plan.AccessGroups, plan.Auth, checkBlank)
 	problems.Append(targetPrivacy...)
 	// The hint covers errors that come from the service being private, not
@@ -2057,6 +2069,26 @@ func modeChangeProblem(stored, planned types.String) diag.Diagnostics {
 	}
 	d.AddAttributeError(path.Root("mode"), "Mode cannot be changed",
 		fmt.Sprintf("NetBird does not change the mode of a service (%q to %q). Keep the current mode, or replace the service (-replace, or a new netbird_reverse_proxy_service).", stored.ValueString(), planned.ValueString()))
+	return d
+}
+
+// l4DisabledTargetProblems refuses a target configured enabled = false on
+// an L4 service.
+func l4DisabledTargetProblems(targets types.List) diag.Diagnostics {
+	var d diag.Diagnostics
+	if targets.IsNull() || targets.IsUnknown() {
+		return d
+	}
+	for i, e := range targets.Elements() {
+		obj, ok := e.(types.Object)
+		if !ok || obj.IsNull() || obj.IsUnknown() {
+			continue
+		}
+		if enabled, ok := obj.Attributes()["enabled"].(types.Bool); ok && enabled.Equal(types.BoolValue(false)) {
+			d.AddAttributeError(path.Root("targets").AtListIndex(i).AtName("enabled"), "L4 targets are always enabled",
+				"NetBird keeps the target of a TCP, UDP or TLS service enabled; set enabled on the service instead.")
+		}
+	}
 	return d
 }
 

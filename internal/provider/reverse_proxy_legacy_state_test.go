@@ -102,11 +102,15 @@ func Test_ReverseProxyService_legacyStatePlan(t *testing.T) {
 		wantUnknown bool
 		noMode      bool // state from before mode, configuration without it
 		emptyMode   bool // mode stored as "" by an older read, left out
+		unknownName bool // the new name is known only at apply
+		private     bool // made private with a group
 	}{
-		"renamed, empty mode": {rename: true, wantUnknown: true, emptyMode: true},
-		"unchanged":           {},
-		"renamed":             {rename: true, wantUnknown: true},
-		"renamed, no mode":    {rename: true, wantUnknown: true, noMode: true},
+		"name unknown, empty mode": {rename: true, emptyMode: true, unknownName: true},
+		"made private, empty mode": {emptyMode: true, private: true},
+		"renamed, empty mode":      {rename: true, wantUnknown: true, emptyMode: true},
+		"unchanged":                {},
+		"renamed":                  {rename: true, wantUnknown: true},
+		"renamed, no mode":         {rename: true, wantUnknown: true, noMode: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := map[string]tftypes.Value{}
@@ -140,6 +144,15 @@ func Test_ReverseProxyService_legacyStatePlan(t *testing.T) {
 			}
 			if tc.rename {
 				config["name"], proposed["name"] = str("svc2"), str("svc2")
+			}
+			if tc.unknownName {
+				unknown := tftypes.NewValue(tftypes.String, tftypes.UnknownValue)
+				config["name"], proposed["name"] = unknown, unknown
+			}
+			if tc.private {
+				groups := tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{str("g1")})
+				config["private"], proposed["private"] = boolean(true), boolean(true)
+				config["access_groups"], proposed["access_groups"] = groups, groups
 			}
 			if _, err := server.GetProviderSchema(ctx, &tfprotov6.GetProviderSchemaRequest{}); err != nil {
 				t.Fatal(err)
@@ -177,11 +190,21 @@ func Test_ReverseProxyService_legacyStatePlan(t *testing.T) {
 			if err := planned.As(&attrs); err != nil {
 				t.Fatal(err)
 			}
-			if !tc.rename && !planned.Equal(object(prior)) {
+			if !tc.rename && !tc.private && !planned.Equal(object(prior)) {
 				t.Errorf("an unchanged plan must equal the prior state, found %v", planned)
 			}
-			if tc.emptyMode && !attrs["mode"].Equal(str("http")) {
+			switch {
+			case tc.emptyMode && tc.unknownName:
+				// The plan may write nothing: the mode stays unknown.
+				if attrs["mode"].IsKnown() {
+					t.Errorf("mode: expected unknown while the plan may not write, found %v", attrs["mode"])
+				}
+				return
+			case tc.emptyMode && !attrs["mode"].Equal(str("http")):
 				t.Errorf("mode: a stored empty mode must plan as http, found %v", attrs["mode"])
+			}
+			if tc.private {
+				return
 			}
 			if tc.noMode && attrs["mode"].IsKnown() {
 				// Null would be planned, and the update's "http" would not

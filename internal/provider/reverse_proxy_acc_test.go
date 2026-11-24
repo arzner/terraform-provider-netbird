@@ -1732,7 +1732,7 @@ func Test_ReverseProxyService_TLSModeOmitted(t *testing.T) {
 	rNameFull := "netbird_reverse_proxy_service." + rName
 	peerID := testPeerID(t, "peer1")
 	var createdID string
-	config := func(mode string, port int) string {
+	config := func(mode string, port int, targetExtra string) string {
 		return fmt.Sprintf(`
 resource "netbird_reverse_proxy_service" %q {
   name        = %q
@@ -1745,10 +1745,11 @@ resource "netbird_reverse_proxy_service" %q {
     target_type = "peer"
     port        = %d
     protocol    = "tcp"
+    %s
   }]
 
   auth = {}
-}`, rName, rName, domain, mode, peerID, port)
+}`, rName, rName, domain, mode, peerID, port, targetExtra)
 	}
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testEnsureManagementRunning(t) },
@@ -1756,14 +1757,29 @@ resource "netbird_reverse_proxy_service" %q {
 		CheckDestroy:             testCheckGone(testClient().ReverseProxyServices.Get, &createdID),
 		Steps: []resource.TestStep{
 			{
-				Config: config(`mode = "tls"`, 5001),
+				Config: config(`mode = "tls"`, 5001, ""),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					testRecordID(rNameFull, &createdID),
 					resource.TestCheckResourceAttr(rNameFull, "mode", "tls"),
 				),
 			},
 			{
-				Config: config("", 5002),
+				// From imported state only: the read recovers tls with no
+				// prior mode, and the next plan keeps it.
+				Config:             config("", 5001, ""),
+				ResourceName:       rNameFull,
+				ImportState:        true,
+				ImportStateVerify:  true,
+				ImportStatePersist: true,
+			},
+			{
+				// The server keeps an L4 target enabled.
+				Config:      config("", 5002, "enabled = false"),
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`L4 targets are always enabled`),
+			},
+			{
+				Config: config("", 5002, ""),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					plancheck.ExpectResourceAction(rNameFull, plancheck.ResourceActionUpdate),
 					plancheck.ExpectKnownValue(rNameFull, tfjsonpath.New("mode"), knownvalue.StringExact("tls")),
