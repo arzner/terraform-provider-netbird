@@ -66,6 +66,10 @@ it is based on.
 
 ### Fixed
 
+- `netbird_policy`: `authorized_groups` is checked as the server does, at plan time: a non-empty
+  map needs an entry for every group in `sources` and may have other keys. It was refused for an
+  extra key and accepted without an entry for a source, which the API then refused. An empty map
+  is kept (the server leaves it out of the response) (#97).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the
