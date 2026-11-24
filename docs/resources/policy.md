@@ -80,7 +80,7 @@ Required:
 Optional:
 
 - `action` (String) Policy Rule Action (accept|drop)
-- `authorized_groups` (Map of List of String) Map of source group IDs to a list of local users authorized for SSH access. When set and not empty, it needs an entry for every group in `sources` (other keys are accepted). If not set, all local users are permitted. Only applicable when protocol is `netbird-ssh`.
+- `authorized_groups` (Map of List of String) Map of group IDs to the local users their members may log in as over SSH; an empty list allows every local user. When set and not empty, it needs an entry for every group in `sources`, and any other key grants its group's users access too. Not set or empty, the rule's users may log in as any local user. Only applicable when protocol is `netbird-ssh`.
 - `bidirectional` (Boolean) Policy Rule Bidirectional
 - `description` (String) Policy description
 - `destination_resource` (Object) Policy Rule Destination Resource (mutually exclusive with destinations) (see [below for nested schema](#nestedatt--rule--destination_resource))

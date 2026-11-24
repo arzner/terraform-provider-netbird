@@ -75,15 +75,23 @@ func (r *Policy) ValidateConfig(ctx context.Context, req resource.ValidateConfig
 		if protocol.IsNull() {
 			protocol = types.StringValue("all") // the schema default
 		}
-		if groups.IsNull() || groups.IsUnknown() || protocol.IsUnknown() {
+		if groups.IsNull() || groups.IsUnknown() {
 			continue
 		}
 		at := path.Root("rule").AtListIndex(i).AtName("authorized_groups")
-		if protocol.ValueString() != "netbird-ssh" {
+		for k, v := range groups.Elements() {
+			if v.IsNull() {
+				resp.Diagnostics.AddAttributeError(at.AtMapKey(k), "Local users required",
+					"A null list would be stored as an empty one, which allows every local user; set the users, or [] to allow every local user.")
+			}
+		}
+		if !protocol.IsUnknown() && protocol.ValueString() != "netbird-ssh" {
 			resp.Diagnostics.AddAttributeError(at, "authorized_groups needs netbird-ssh",
 				fmt.Sprintf("authorized_groups applies only to protocol netbird-ssh, and the server ignores it for %q.", protocol.ValueString()))
 			continue
 		}
+		// With the protocol not known yet, only netbird-ssh can take the
+		// map, so the source entries are checked already.
 		sources, _ := attrs["sources"].(types.List)
 		if sources.IsNull() || sources.IsUnknown() {
 			continue
@@ -310,7 +318,7 @@ func (r *Policy) Schema(ctx context.Context, req resource.SchemaRequest, resp *r
 							Validators: []validator.Object{objectvalidator.ConflictsWith(path.MatchRelative().AtParent().AtName("destinations"))},
 						},
 						"authorized_groups": schema.MapAttribute{
-							MarkdownDescription: "Map of source group IDs to a list of local users authorized for SSH access. When set and not empty, it needs an entry for every group in `sources` (other keys are accepted). If not set, all local users are permitted. Only applicable when protocol is `netbird-ssh`.",
+							MarkdownDescription: "Map of group IDs to the local users their members may log in as over SSH; an empty list allows every local user. When set and not empty, it needs an entry for every group in `sources`, and any other key grants its group's users access too. Not set or empty, the rule's users may log in as any local user. Only applicable when protocol is `netbird-ssh`.",
 							ElementType:         types.ListType{ElemType: types.StringType},
 							Optional:            true,
 							Computed:            true,
@@ -622,6 +630,10 @@ func policyRulesTerraformToAPI(ctx context.Context, data *PolicyModel) ([]api.Po
 			ag := make(map[string][]string)
 			for k, val := range v.Elements() {
 				listVal, ok := val.(types.List)
+				if ok && listVal.IsNull() {
+					ret.AddError("Invalid Configuration", fmt.Sprintf(`rule[%d]: authorized_groups[%q] is null, which the server would store as every local user`, i, k))
+					return nil, ret
+				}
 				if !ok {
 					ret.AddError("Unexpected Value", fmt.Sprintf("data.Rules[%d].authorized_groups[%s] expected to be types.List, found %T", i, k, val))
 					return nil, ret

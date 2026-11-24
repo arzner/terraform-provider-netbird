@@ -377,6 +377,15 @@ func Test_policyRulesAuthorizedGroupsValidation(t *testing.T) {
 	if req, diag := policyRulesTerraformToAPI(context.Background(), model); !diag.HasError() || req != nil {
 		t.Fatalf("Expected an error and no request for a null user, found %v, %v", req, diag)
 	}
+	// nor a null list, which the server would store as every local user
+	attrs["authorized_groups"] = types.MapValueMust(types.ListType{ElemType: types.StringType}, map[string]attr.Value{
+		"g1": types.ListValueMust(types.StringType, []attr.Value{types.StringValue("root")}),
+		"g2": types.ListNull(types.StringType),
+	})
+	model.Rules = types.ListValueMust(PolicyRuleModel{}.TFType(), []attr.Value{types.ObjectValueMust(PolicyRuleModel{}.TFType().AttrTypes, attrs)})
+	if req, diag := policyRulesTerraformToAPI(context.Background(), model); !diag.HasError() || req != nil {
+		t.Fatalf("Expected an error and no request for a null list, found %v, %v", req, diag)
+	}
 }
 
 // The server needs an entry for every source and accepts other keys.
@@ -457,15 +466,46 @@ func Test_policyValidateConfigAuthorizedGroups(t *testing.T) {
 		values["rule"] = tftypes.NewValue(rulesType, []tftypes.Value{tftypes.NewValue(ruleType, rule)})
 		return tftypes.NewValue(typ, values)
 	}
+	// withRule changes the rule of a configuration built by config.
+	withRule := func(v tftypes.Value, change func(map[string]tftypes.Value)) tftypes.Value {
+		var top map[string]tftypes.Value
+		if err := v.As(&top); err != nil {
+			t.Fatal(err)
+		}
+		var rules []tftypes.Value
+		if err := top["rule"].As(&rules); err != nil {
+			t.Fatal(err)
+		}
+		var rule map[string]tftypes.Value
+		if err := rules[0].As(&rule); err != nil {
+			t.Fatal(err)
+		}
+		change(rule)
+		top["rule"] = tftypes.NewValue(rulesType, []tftypes.Value{tftypes.NewValue(ruleType, rule)})
+		return tftypes.NewValue(typ, top)
+	}
+	withProtocol := func(v, protocol tftypes.Value) tftypes.Value {
+		return withRule(v, func(r map[string]tftypes.Value) { r["protocol"] = protocol })
+	}
+	nullUsers := func(v tftypes.Value) tftypes.Value {
+		return withRule(v, func(r map[string]tftypes.Value) {
+			r["authorized_groups"] = tftypes.NewValue(tftypes.Map{ElementType: tftypes.List{ElementType: tftypes.String}}, map[string]tftypes.Value{
+				"g1": strs("root"), "g2": tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, nil),
+			})
+		})
+	}
 	for name, tc := range map[string]struct {
 		config    tftypes.Value
 		wantError bool
 	}{
-		"every source":      {config("netbird-ssh", "g1", "g2"), false},
-		"an extra key":      {config("netbird-ssh", "g1", "g2", "g3"), false},
-		"a source left out": {config("netbird-ssh", "g1"), true},
-		"not netbird-ssh":   {config("tcp", "g1", "g2"), true},
-		"protocol left out": {config("", "g1", "g2"), true}, // the default all
+		"every source":                     {config("netbird-ssh", "g1", "g2"), false},
+		"an extra key":                     {config("netbird-ssh", "g1", "g2", "g3"), false},
+		"a source left out":                {config("netbird-ssh", "g1"), true},
+		"not netbird-ssh":                  {config("tcp", "g1", "g2"), true},
+		"protocol left out":                {config("", "g1", "g2"), true}, // the default all
+		"protocol unknown, complete":       {withProtocol(config("netbird-ssh", "g1", "g2"), tftypes.NewValue(tftypes.String, tftypes.UnknownValue)), false},
+		"protocol unknown, source missing": {withProtocol(config("netbird-ssh", "g1"), tftypes.NewValue(tftypes.String, tftypes.UnknownValue)), true},
+		"null users":                       {nullUsers(config("netbird-ssh", "g1", "g2")), true},
 	} {
 		resp := resource.ValidateConfigResponse{}
 		r.ValidateConfig(ctx, resource.ValidateConfigRequest{Config: tfsdk.Config{Schema: sch.Schema, Raw: tc.config}}, &resp)
