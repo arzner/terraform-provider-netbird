@@ -86,12 +86,14 @@ func (r *DNSRecord) Schema(ctx context.Context, req resource.SchemaRequest, resp
 				Validators:          []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 			"ttl": schema.Int64Attribute{
-				MarkdownDescription: "Time to live in seconds",
+				MarkdownDescription: "Time to live in seconds (0 or more, as the server accepts)",
 				Optional:            true,
 				Computed:            true,
 				Default:             int64default.StaticInt64(300),
 				PlanModifiers:       []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
-				Validators:          []validator.Int64{int64validator.Between(60, 86400)},
+				// The server refuses only a negative TTL (records/record.go,
+				// v0.83.2 and v0.82.1).
+				Validators: []validator.Int64{int64validator.AtLeast(0)},
 			},
 		},
 	}

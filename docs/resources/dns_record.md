@@ -62,7 +62,7 @@ resource "netbird_dns_record" "wildcard" {
 
 ### Optional
 
-- `ttl` (Number) Time to live in seconds
+- `ttl` (Number) Time to live in seconds (0 or more, as the server accepts)
 
 ### Read-Only
 

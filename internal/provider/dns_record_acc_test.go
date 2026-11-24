@@ -3,7 +3,10 @@
 package provider
 
 import (
+	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -72,8 +75,46 @@ func Test_DNSRecord_Update(t *testing.T) {
 					resource.TestCheckResourceAttr(rNameFull, "ttl", "600"),
 				),
 			},
+			{
+				// TTLs outside 60 to 86400, which the server accepts.
+				Config: testDNSRecordResource(zoneName, "test.local", rName, "api", "A", "192.168.1.2", 30),
+				Check:  testDNSRecordTTLOnServer(rNameFull, &zoneID, 30),
+			},
+			{
+				Config: testDNSRecordResource(zoneName, "test.local", rName, "api", "A", "192.168.1.2", 172800),
+				Check:  testDNSRecordTTLOnServer(rNameFull, &zoneID, 172800),
+			},
+			{
+				Config:      testDNSRecordResource(zoneName, "test.local", rName, "api", "A", "192.168.1.2", -1),
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`at least 0`),
+			},
 		},
 	})
+}
+
+// testDNSRecordTTLOnServer checks the record's TTL in state and on the
+// server.
+func testDNSRecordTTLOnServer(name string, zoneID *string, want int) resource.TestCheckFunc {
+	return resource.ComposeAggregateTestCheckFunc(
+		resource.TestCheckResourceAttr(name, "ttl", strconv.Itoa(want)),
+		func(s *terraform.State) error {
+			id := s.RootModule().Resources[name].Primary.ID
+			zone, err := testClient().DNSZones.GetZone(context.Background(), *zoneID)
+			if err != nil {
+				return err
+			}
+			for _, rec := range zone.Records {
+				if rec.Id == id {
+					if rec.Ttl != want {
+						return fmt.Errorf("TTL on the server: expected %d, found %d", want, rec.Ttl)
+					}
+					return nil
+				}
+			}
+			return fmt.Errorf("record %s is not in zone %s", id, *zoneID)
+		},
+	)
 }
 
 func Test_DNSRecord_CNAME(t *testing.T) {
