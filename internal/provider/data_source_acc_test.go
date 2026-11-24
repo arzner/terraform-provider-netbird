@@ -185,6 +185,8 @@ data "netbird_peer" "p" {
 		resource.TestCheckResourceAttr("data.netbird_peer.p", "id", peerID),
 		resource.TestCheckResourceAttr("data.netbird_peer.p", "name", "peer1"),
 		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "os"),
+		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "created_at"),
+		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "ephemeral"),
 		resource.TestCheckResourceAttrSet("data.netbird_peer.p", "ip"),
 		// The data source reads the list endpoint; compare with the peer
 		// endpoint's address.

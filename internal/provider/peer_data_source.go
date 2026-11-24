@@ -65,6 +65,14 @@ func (d *PeerDataSource) Schema(ctx context.Context, req datasource.SchemaReques
 				MarkdownDescription: "Peer Last Seen timedate",
 				Computed:            true,
 			},
+			"created_at": schema.StringAttribute{
+				MarkdownDescription: "When the peer was created (RFC 3339, UTC)",
+				Computed:            true,
+			},
+			"ephemeral": schema.BoolAttribute{
+				MarkdownDescription: "Whether the peer is ephemeral (registered with an ephemeral setup key; removed after it has been offline for a while)",
+				Computed:            true,
+			},
 			"os": schema.StringAttribute{
 				MarkdownDescription: "Peer OS",
 				Computed:            true,

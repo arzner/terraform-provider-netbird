@@ -45,7 +45,9 @@ data "netbird_peer" "example" {
 - `connected` (Boolean) Peer Connection Status
 - `connection_ip` (String) Peer Public IP
 - `country_code` (String) Peer country code
+- `created_at` (String) When the peer was created (RFC 3339, UTC)
 - `dns_label` (String) Peer DNS Label
+- `ephemeral` (Boolean) Whether the peer is ephemeral (registered with an ephemeral setup key; removed after it has been offline for a while)
 - `extra_dns_labels` (List of String) Peer extra DNS Labels
 - `geoname_id` (Number) Peer Location ID
 - `groups` (List of String) Peer groups
