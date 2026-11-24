@@ -1,0 +1,5 @@
+terraform import netbird_reverse_proxy_domain.example reverse_proxy_domain_id
+
+# For example
+
+terraform import netbird_reverse_proxy_domain.example d50m8vatvgfc7398k3a0

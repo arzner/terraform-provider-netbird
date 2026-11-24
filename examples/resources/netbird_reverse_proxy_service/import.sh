@@ -1,0 +1,5 @@
+terraform import netbird_reverse_proxy_service.web_app reverse_proxy_service_id
+
+# For example
+
+terraform import netbird_reverse_proxy_service.web_app d50m9a2tvgfc7398k3b0
