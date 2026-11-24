@@ -171,6 +171,7 @@ func Test_userResourceAPIToTerraform_absentFlag(t *testing.T) {
 	for name, tc := range map[string]struct{ prior, want types.Bool }{
 		"known service user": {types.BoolValue(true), types.BoolValue(true)},
 		"import":             {types.BoolNull(), types.BoolNull()},
+		"unknown prior":      {types.BoolUnknown(), types.BoolNull()},
 	} {
 		data := UserModel{IsServiceUser: tc.prior, AutoGroups: types.ListNull(types.StringType)}
 		if d := userResourceAPIToTerraform(context.Background(), &api.User{Id: "u1", Role: "user", Status: api.UserStatusActive}, &data); d.HasError() {
