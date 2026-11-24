@@ -1,5 +1,5 @@
-terraform import netbird_agent_network_guardrail.example guardrail_id
+terraform import netbird_agent_network_guardrail.strict guardrail_id
 
 # For example
 
-terraform import netbird_agent_network_guardrail.example d50ma0itvgfc7398k3c0
+terraform import netbird_agent_network_guardrail.strict ainguard_d50ma0itvgfc7398k3c0

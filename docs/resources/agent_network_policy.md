@@ -85,9 +85,9 @@ Optional:
 Import is supported using the following syntax:
 
 ```shell
-terraform import netbird_agent_network_policy.example policy_id
+terraform import netbird_agent_network_policy.engineering policy_id
 
 # For example
 
-terraform import netbird_agent_network_policy.example d50mab2tvgfc7398k3d0
+terraform import netbird_agent_network_policy.engineering ainpol_d50mab2tvgfc7398k3d0
 ```

@@ -1,5 +1,6 @@
-terraform import netbird_agent_network_provider.example provider_id
+# The ID is the provider instance's `id` from the API, not its catalog `provider_id`.
+terraform import netbird_agent_network_provider.openai provider_instance_id
 
 # For example
 
-terraform import netbird_agent_network_provider.example d50mal2tvgfc7398k3e0
+terraform import netbird_agent_network_provider.openai d50mal2tvgfc7398k3e0
