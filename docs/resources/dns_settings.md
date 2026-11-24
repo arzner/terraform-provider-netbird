@@ -3,12 +3,12 @@
 page_title: "netbird_dns_settings Resource - netbird"
 subcategory: ""
 description: |-
-  Manage Account DNS Settings (Only one of this resource should be used per provider).
+  Manage Account DNS Settings (Only one of this resource should be used per provider). Destroying the resource only removes it from the state: the settings on the server stay as they are.
 ---
 
 # netbird_dns_settings (Resource)
 
-Manage Account DNS Settings (Only one of this resource should be used per provider).
+Manage Account DNS Settings (Only one of this resource should be used per provider). Destroying the resource only removes it from the state: the settings on the server stay as they are.
 
 ## Example Usage
 

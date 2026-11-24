@@ -3,12 +3,12 @@
 page_title: "netbird_account_settings Resource - netbird"
 subcategory: ""
 description: |-
-  Manage Account-wide Settings
+  Manage Account-wide Settings. Destroying the resource only removes it from the state: the settings on the server stay as they are.
 ---
 
 # netbird_account_settings (Resource)
 
-Manage Account-wide Settings
+Manage Account-wide Settings. Destroying the resource only removes it from the state: the settings on the server stay as they are.
 
 ## Example Usage
 
