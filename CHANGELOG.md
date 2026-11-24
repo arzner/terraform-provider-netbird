@@ -67,8 +67,8 @@ it is based on.
 ### Fixed
 
 - Docs: `netbird_dns_settings` and `netbird_account_settings` say that a destroy leaves the
-  settings on the server; `netbird_peer` describes adopting a peer, a new `id`, and that a destroy
-  deletes the peer (#99).
+  settings on the server; `netbird_peer` describes adopting a peer, a new `id` (and its limits),
+  that a destroy deletes the peer, and how to stop managing one without deleting it (#99).
 - `netbird_reverse_proxy_service`: an `access_restrictions` block that sets nothing (for example
   `crowdsec_mode = null`), or an empty list in it such as `allowed_cidrs = []`, no longer fails
   the apply with an inconsistent result. A subnet target without a host, or with a host the
