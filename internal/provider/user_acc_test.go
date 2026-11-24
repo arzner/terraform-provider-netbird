@@ -177,7 +177,7 @@ resource "netbird_user" %q {
 				// One that resolves to another name is refused at apply,
 				// before anything is written (the role change too).
 				Config:      fromApply(rName+"-renamed", "network_admin"),
-				ExpectError: regexp.MustCompile(`Name cannot be changed`),
+				ExpectError: regexp.MustCompile(`(?s)Error running apply.*Name cannot be changed`),
 			},
 			{
 				PreConfig: func() {

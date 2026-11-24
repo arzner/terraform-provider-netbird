@@ -172,8 +172,8 @@ func userAPIToTerraform(ctx context.Context, user *api.User, data *UserModel) di
 	data.IsBlocked = types.BoolValue(user.IsBlocked)
 	data.IsCurrent = types.BoolPointerValue(user.IsCurrent)
 	// is_service_user: keep the prior value when the API omits it. Fresh
-	// data source models are already null; the resource reads an absent
-	// value as a regular user (userResourceAPIToTerraform).
+	// data source models are already null; the resource keeps a known kind
+	// and leaves an unreported one null (userResourceAPIToTerraform).
 	if user.IsServiceUser != nil {
 		data.IsServiceUser = types.BoolValue(*user.IsServiceUser)
 	}
@@ -435,8 +435,8 @@ func immutableUserChanges(plan, state UserModel) diag.Diagnostics {
 }
 
 // userResourceAPIToTerraform maps a user for the resource: an
-// is_service_user the API omits (identity provider users) and no prior value
-// for, as on import, is a regular user.
+// is_service_user the API omits keeps a known prior kind and otherwise, as
+// on import, stays null.
 func userResourceAPIToTerraform(ctx context.Context, user *api.User, data *UserModel) diag.Diagnostics {
 	prior := data.IsServiceUser
 	d := userAPIToTerraform(ctx, user, data)
