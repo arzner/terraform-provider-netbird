@@ -354,6 +354,33 @@ func Test_Policy_AuthorizedGroups(t *testing.T) {
 					},
 				),
 			},
+			{
+				// The extra entry changes in place; the policy keeps its ID.
+				Config: config(fmt.Sprintf(`{ %q = ["root"], %q = ["admin", "ops"] }`, e2eGroupNotAllID(), e2eGroupAllID())),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPtr(rNameFull, "id", &createdID),
+					resource.TestCheckResourceAttr(rNameFull, "rule.0.authorized_groups.%", "2"),
+					func(*terraform.State) error {
+						policy, err := testClient().Policies.Get(context.Background(), createdID)
+						if err != nil {
+							return err
+						}
+						got := *policy.Rules[0].AuthorizedGroups
+						if !slices.Equal(got[e2eGroupAllID()], []string{"admin", "ops"}) || len(got) != 2 {
+							return fmt.Errorf("authorized groups on the server: %v", got)
+						}
+						return nil
+					},
+				),
+			},
+			// Imported, the whole map comes back, extra entry included.
+			{ResourceName: rNameFull, ImportState: true, ImportStateVerify: true},
+			{
+				// An empty map: the server leaves it out of the response and
+				// the configured {} stays.
+				Config: config("{}"),
+				Check:  resource.TestCheckResourceAttr(rNameFull, "rule.0.authorized_groups.%", "0"),
+			},
 		},
 	})
 }

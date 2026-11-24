@@ -40,12 +40,16 @@ var _ resource.ResourceWithValidateConfig = &Policy{}
 // source of a netbird-ssh rule and accepts extra keys
 // (policies_handler.go, v0.83.2 and v0.82.1). An empty map is not checked.
 func sourcesWithoutAuthorizedUsers(sources *[]string, groups types.Map) []string {
-	if sources == nil || groups.IsNull() || groups.IsUnknown() || len(groups.Elements()) == 0 {
+	if sources == nil || groups.IsNull() || groups.IsUnknown() {
+		return nil
+	}
+	entries := groups.Elements() // a copy on every call
+	if len(entries) == 0 {
 		return nil
 	}
 	var missing []string
 	for _, s := range *sources {
-		if _, ok := groups.Elements()[s]; !ok {
+		if _, ok := entries[s]; !ok {
 			missing = append(missing, s)
 		}
 	}
@@ -68,7 +72,10 @@ func (r *Policy) ValidateConfig(ctx context.Context, req resource.ValidateConfig
 		attrs := obj.Attributes()
 		groups, _ := attrs["authorized_groups"].(types.Map)
 		protocol, _ := attrs["protocol"].(types.String)
-		if groups.IsNull() || groups.IsUnknown() || protocol.IsNull() || protocol.IsUnknown() {
+		if protocol.IsNull() {
+			protocol = types.StringValue("all") // the schema default
+		}
+		if groups.IsNull() || groups.IsUnknown() || protocol.IsUnknown() {
 			continue
 		}
 		at := path.Root("rule").AtListIndex(i).AtName("authorized_groups")
@@ -458,8 +465,9 @@ func policyAPIToTerraform(ctx context.Context, policy *api.Policy, data *PolicyM
 		if r.AuthorizedGroups != nil && len(*r.AuthorizedGroups) > 0 {
 			mapValues := map[string]attr.Value{}
 			priorGroups, _ := prior.Attributes()["authorized_groups"].(types.Map)
+			priorEntries := priorGroups.Elements()
 			for k, v := range *r.AuthorizedGroups {
-				priorList, _ := priorGroups.Elements()[k].(types.List)
+				priorList, _ := priorEntries[k].(types.List)
 				listVal, d := sortedStringList(ctx, priorList, v)
 				ret.Append(d...)
 				mapValues[k] = listVal
@@ -467,7 +475,12 @@ func policyAPIToTerraform(ctx context.Context, policy *api.Policy, data *PolicyM
 			ruleModel.AuthorizedGroups, diag = types.MapValue(mapElemType, mapValues)
 			ret.Append(diag...)
 		} else {
+			// The server leaves an empty map out of the response: a planned
+			// or stored empty map stays empty.
 			ruleModel.AuthorizedGroups = types.MapNull(mapElemType)
+			if priorGroups, ok := prior.Attributes()["authorized_groups"].(types.Map); ok && !priorGroups.IsNull() && !priorGroups.IsUnknown() && len(priorGroups.Elements()) == 0 {
+				ruleModel.AuthorizedGroups = types.MapValueMust(mapElemType, map[string]attr.Value{})
+			}
 		}
 		rulesList = append(rulesList, ruleModel)
 	}
@@ -613,8 +626,13 @@ func policyRulesTerraformToAPI(ctx context.Context, data *PolicyModel) ([]api.Po
 					ret.AddError("Unexpected Value", fmt.Sprintf("data.Rules[%d].authorized_groups[%s] expected to be types.List, found %T", i, k, val))
 					return nil, ret
 				}
+				// A list that does not convert (a null user) must not be sent:
+				// the server reads an empty list as every local user.
 				var users []string
-				listVal.ElementsAs(ctx, &users, false)
+				if d := listVal.ElementsAs(ctx, &users, false); d.HasError() {
+					ret.Append(d...)
+					return nil, ret
+				}
 				ag[k] = users
 			}
 			rule.AuthorizedGroups = &ag

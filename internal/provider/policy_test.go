@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -328,7 +330,7 @@ func Test_policyRulesAuthorizedGroupsValidation(t *testing.T) {
 		}
 	}
 
-	// authorized_groups keys must be present in sources
+	// a non-empty authorized_groups needs an entry for every source
 	model := &PolicyModel{
 		Rules: types.ListValueMust(PolicyRuleModel{}.TFType(), []attr.Value{
 			types.ObjectValueMust(PolicyRuleModel{}.TFType().AttrTypes, map[string]attr.Value{
@@ -336,7 +338,7 @@ func Test_policyRulesAuthorizedGroupsValidation(t *testing.T) {
 				"action":               types.StringValue("accept"),
 				"bidirectional":        types.BoolValue(true),
 				"description":          types.StringNull(),
-				"sources":              types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g1")}),
+				"sources":              types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g1"), types.StringValue("g2")}),
 				"destinations":         types.ListValueMust(types.StringType, []attr.Value{types.StringValue("g2")}),
 				"enabled":              types.BoolValue(true),
 				"name":                 types.StringValue("test"),
@@ -346,14 +348,34 @@ func Test_policyRulesAuthorizedGroupsValidation(t *testing.T) {
 				"source_resource":      types.ObjectNull(PolicyRuleResourceModel{}.TFType().AttrTypes),
 				"destination_resource": types.ObjectNull(PolicyRuleResourceModel{}.TFType().AttrTypes),
 				"authorized_groups": types.MapValueMust(types.ListType{ElemType: types.StringType}, map[string]attr.Value{
-					"not-in-sources": types.ListValueMust(types.StringType, []attr.Value{types.StringValue("root")}),
+					"g1": types.ListValueMust(types.StringType, []attr.Value{types.StringValue("root")}),
 				}),
 			}),
 		}),
 	}
 	_, diag := policyRulesTerraformToAPI(context.Background(), model)
-	if !diag.HasError() {
-		t.Fatal("Expected validation error for a source without an authorized_groups entry, but got none")
+	if !diag.HasError() || !strings.Contains(fmt.Sprint(diag), "g2") {
+		t.Fatalf("Expected a validation error naming g2, found %v", diag)
+	}
+
+	// a user list that does not convert is not sent (an empty list would
+	// mean every local user)
+	first, ok := model.Rules.Elements()[0].(types.Object)
+	if !ok {
+		t.Fatal("a rule is not an object")
+	}
+	rule := first.Attributes()
+	attrs := map[string]attr.Value{}
+	for k, v := range rule {
+		attrs[k] = v
+	}
+	attrs["authorized_groups"] = types.MapValueMust(types.ListType{ElemType: types.StringType}, map[string]attr.Value{
+		"g1": types.ListValueMust(types.StringType, []attr.Value{types.StringValue("root")}),
+		"g2": types.ListValueMust(types.StringType, []attr.Value{types.StringValue("admin"), types.StringNull()}),
+	})
+	model.Rules = types.ListValueMust(PolicyRuleModel{}.TFType(), []attr.Value{types.ObjectValueMust(PolicyRuleModel{}.TFType().AttrTypes, attrs)})
+	if req, diag := policyRulesTerraformToAPI(context.Background(), model); !diag.HasError() || req != nil {
+		t.Fatalf("Expected an error and no request for a null user, found %v, %v", req, diag)
 	}
 }
 
@@ -419,7 +441,9 @@ func Test_policyValidateConfigAuthorizedGroups(t *testing.T) {
 		for n, at := range ruleType.AttributeTypes {
 			rule[n] = tftypes.NewValue(at, nil)
 		}
-		rule["protocol"] = tftypes.NewValue(tftypes.String, protocol)
+		if protocol != "" {
+			rule["protocol"] = tftypes.NewValue(tftypes.String, protocol)
+		}
 		rule["sources"] = strs("g1", "g2")
 		m := map[string]tftypes.Value{}
 		for _, k := range keys {
@@ -441,6 +465,7 @@ func Test_policyValidateConfigAuthorizedGroups(t *testing.T) {
 		"an extra key":      {config("netbird-ssh", "g1", "g2", "g3"), false},
 		"a source left out": {config("netbird-ssh", "g1"), true},
 		"not netbird-ssh":   {config("tcp", "g1", "g2"), true},
+		"protocol left out": {config("", "g1", "g2"), true}, // the default all
 	} {
 		resp := resource.ValidateConfigResponse{}
 		r.ValidateConfig(ctx, resource.ValidateConfigRequest{Config: tfsdk.Config{Schema: sch.Schema, Raw: tc.config}}, &resp)
@@ -468,6 +493,46 @@ func Test_portRegex(t *testing.T) {
 	for _, c := range noMatchCases {
 		if r.MatchString(c) {
 			t.Fatalf("Exepected %s not to match regex", c)
+		}
+	}
+}
+
+// The server leaves an empty authorized_groups out of the response: a planned
+// or stored empty map stays empty, and without one the read is null.
+func Test_policyAPIToTerraform_emptyAuthorizedGroups(t *testing.T) {
+	ctx := context.Background()
+	mapType := types.ListType{ElemType: types.StringType}
+	prior := func(groups types.Map) types.List {
+		attrs := map[string]attr.Value{}
+		for n, at := range (PolicyRuleModel{}).TFType().AttrTypes {
+			v, err := at.ValueFromTerraform(ctx, tftypes.NewValue(at.TerraformType(ctx), nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			attrs[n] = v
+		}
+		attrs["authorized_groups"] = groups
+		return types.ListValueMust(PolicyRuleModel{}.TFType(), []attr.Value{types.ObjectValueMust(PolicyRuleModel{}.TFType().AttrTypes, attrs)})
+	}
+	empty := types.MapValueMust(mapType, map[string]attr.Value{})
+	for name, tc := range map[string]struct {
+		prior types.List
+		want  types.Map
+	}{
+		"planned empty": {prior(empty), empty},
+		"import":        {types.ListNull(PolicyRuleModel{}.TFType()), types.MapNull(mapType)},
+	} {
+		data := PolicyModel{Rules: tc.prior, SourcePostureChecks: types.ListNull(types.StringType)}
+		policy := &api.Policy{Id: valPtr("p1"), Name: "p", Enabled: true, Rules: []api.PolicyRule{{
+			Id: valPtr("r1"), Name: "r", Action: api.PolicyRuleActionAccept, Protocol: api.PolicyRuleProtocolNetbirdSsh, Enabled: true,
+		}}}
+		if d := policyAPIToTerraform(ctx, policy, &data); d.HasError() {
+			t.Fatalf("%s: %v", name, d)
+		}
+		var rules []PolicyRuleModel
+		data.Rules.ElementsAs(ctx, &rules, false)
+		if len(rules) != 1 || !rules[0].AuthorizedGroups.Equal(tc.want) {
+			t.Errorf("%s: expected %v, found %v", name, tc.want, rules)
 		}
 	}
 }
