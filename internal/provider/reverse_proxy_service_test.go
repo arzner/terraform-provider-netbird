@@ -1926,3 +1926,69 @@ func Test_reverseProxyService_updateSendsLiveMode(t *testing.T) {
 		t.Errorf("expected mode tcp in state, found %v", got)
 	}
 }
+
+// With the mode known only from the live service, a disabled target on an
+// L4 service is refused before the PUT.
+func Test_reverseProxyService_updateChecksTargetsForLiveMode(t *testing.T) {
+	ctx := context.Background()
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"s1","name":"svc","domain":"svc.example","enabled":true,"mode":"tcp","listen_port":15432,"targets":[],"auth":{},"meta":{"created_at":"2026-01-01T00:00:00Z","status":"active"}}`)
+	}))
+	defer srv.Close()
+	r := &ReverseProxyService{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	targetsType, ok := typ.AttributeTypes["targets"].(tftypes.List)
+	if !ok {
+		t.Fatal("targets is not a list")
+	}
+	targetType, ok := targetsType.ElementType.(tftypes.Object)
+	if !ok {
+		t.Fatal("a target is not an object")
+	}
+	tv := map[string]tftypes.Value{}
+	for n, at := range targetType.AttributeTypes {
+		tv[n] = tftypes.NewValue(at, nil)
+	}
+	tv["target_id"] = tftypes.NewValue(tftypes.String, "peer1")
+	tv["target_type"] = tftypes.NewValue(tftypes.String, "peer")
+	tv["port"] = tftypes.NewValue(tftypes.Number, 5002)
+	tv["protocol"] = tftypes.NewValue(tftypes.String, "tcp")
+	tv["enabled"] = tftypes.NewValue(tftypes.Bool, false)
+	value := func(mode tftypes.Value) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range typ.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["id"] = tftypes.NewValue(tftypes.String, "s1")
+		values["name"] = tftypes.NewValue(tftypes.String, "svc")
+		values["domain"] = tftypes.NewValue(tftypes.String, "svc.example")
+		values["enabled"] = tftypes.NewValue(tftypes.Bool, true)
+		values["listen_port"] = tftypes.NewValue(tftypes.Number, 15432)
+		values["mode"] = mode
+		values["targets"] = tftypes.NewValue(targetsType, []tftypes.Value{tftypes.NewValue(targetType, tv)})
+		return tftypes.NewValue(typ, values)
+	}
+	plan := value(tftypes.NewValue(tftypes.String, tftypes.UnknownValue))
+	state := value(tftypes.NewValue(tftypes.String, nil))
+	resp := resource.UpdateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: state}}
+	r.Update(ctx, resource.UpdateRequest{
+		Plan:   tfsdk.Plan{Schema: sch.Schema, Raw: plan},
+		Config: tfsdk.Config{Schema: sch.Schema, Raw: value(tftypes.NewValue(tftypes.String, nil))},
+		State:  tfsdk.State{Schema: sch.Schema, Raw: state},
+	}, &resp)
+	found := false
+	for _, d := range resp.Diagnostics.Errors() {
+		found = found || d.Summary() == "L4 targets are always enabled"
+	}
+	if !found || slices.Contains(methods, http.MethodPut) {
+		t.Errorf("expected the disabled target refused without a PUT, found %v after %v", resp.Diagnostics, methods)
+	}
+}

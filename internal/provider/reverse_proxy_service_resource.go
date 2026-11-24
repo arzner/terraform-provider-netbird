@@ -1459,9 +1459,16 @@ func (r *ReverseProxyService) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 	if serviceReq.Mode == nil && live.Mode != nil && *live.Mode != "" {
-		// A mode the plan does not know is the live one.
+		// A mode the plan does not know is the live one, and the checks the
+		// plan could not make for it are made now.
 		mode := api.ServiceRequestMode(*live.Mode)
 		serviceReq.Mode = &mode
+		if *live.Mode != "http" {
+			if d := l4DisabledTargetProblems(data.Targets); d.HasError() {
+				resp.Diagnostics.Append(d...)
+				return
+			}
+		}
 	}
 	keepLiveUnknownAccess(&serviceReq, data, live)
 	if err := privateRequestProblem(serviceReq, live.Private != nil && *live.Private); err != nil {
@@ -1578,7 +1585,7 @@ func (r *ReverseProxyService) ModifyPlan(ctx context.Context, req resource.Modif
 		plan.Private = types.BoolValue(false)
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("private"), plan.Private)...)
 	}
-	if !plan.Mode.IsNull() && !plan.Mode.IsUnknown() && plan.Mode.ValueString() != "http" {
+	if !plan.Mode.IsNull() && !plan.Mode.IsUnknown() && normalMode(plan.Mode) != "http" {
 		// Also on a plan without changes, which is where an imported value
 		// would otherwise pass for one that works.
 		resp.Diagnostics.Append(directUpstreamWarnings(config.Targets, plan.Mode.ValueString())...)

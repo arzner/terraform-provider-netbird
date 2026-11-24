@@ -1757,20 +1757,36 @@ resource "netbird_reverse_proxy_service" %q {
 		CheckDestroy:             testCheckGone(testClient().ReverseProxyServices.Get, &createdID),
 		Steps: []resource.TestStep{
 			{
-				Config: config(`mode = "tls"`, 5001, ""),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					testRecordID(rNameFull, &createdID),
-					resource.TestCheckResourceAttr(rNameFull, "mode", "tls"),
-				),
-			},
-			{
-				// From imported state only: the read recovers tls with no
-				// prior mode, and the next plan keeps it.
+				// A service created outside Terraform, imported into empty
+				// state: the read recovers tls with no prior mode, and the
+				// next plan keeps it.
+				PreConfig: func() {
+					mode := api.ServiceRequestModeTls
+					port := 15443
+					svc, err := testClient().ReverseProxyServices.Create(context.Background(), api.ServiceRequest{
+						Name: rName, Domain: domain, Enabled: true, Mode: &mode, ListenPort: &port,
+						Targets: &[]api.ServiceTarget{{
+							TargetId: peerID, TargetType: api.ServiceTargetTargetTypePeer,
+							Port: 5001, Protocol: api.ServiceTargetProtocolTcp, Enabled: true,
+						}},
+						Auth: &api.ServiceAuthConfig{},
+					})
+					if err != nil {
+						t.Fatalf("create the TLS service: %v", err)
+					}
+					createdID = svc.Id
+				},
 				Config:             config("", 5001, ""),
 				ResourceName:       rNameFull,
 				ImportState:        true,
-				ImportStateVerify:  true,
+				ImportStateKind:    resource.ImportCommandWithID,
+				ImportStateIdFunc:  func(*terraform.State) (string, error) { return createdID, nil },
 				ImportStatePersist: true,
+			},
+			{
+				// The imported state matches the configuration.
+				Config:   config("", 5001, ""),
+				PlanOnly: true,
 			},
 			{
 				// The server keeps an L4 target enabled.

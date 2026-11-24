@@ -104,13 +104,15 @@ func Test_ReverseProxyService_legacyStatePlan(t *testing.T) {
 		emptyMode   bool // mode stored as "" by an older read, left out
 		unknownName bool // the new name is known only at apply
 		private     bool // made private with a group
+		direct      bool // a target with direct_upstream = true
 	}{
-		"name unknown, empty mode": {rename: true, emptyMode: true, unknownName: true},
-		"made private, empty mode": {emptyMode: true, private: true},
-		"renamed, empty mode":      {rename: true, wantUnknown: true, emptyMode: true},
-		"unchanged":                {},
-		"renamed":                  {rename: true, wantUnknown: true},
-		"renamed, no mode":         {rename: true, wantUnknown: true, noMode: true},
+		"renamed, empty mode, direct upstream": {rename: true, wantUnknown: true, emptyMode: true, direct: true},
+		"name unknown, empty mode":             {rename: true, emptyMode: true, unknownName: true},
+		"made private, empty mode":             {emptyMode: true, private: true},
+		"renamed, empty mode":                  {rename: true, wantUnknown: true, emptyMode: true},
+		"unchanged":                            {},
+		"renamed":                              {rename: true, wantUnknown: true},
+		"renamed, no mode":                     {rename: true, wantUnknown: true, noMode: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := map[string]tftypes.Value{}
@@ -144,6 +146,27 @@ func Test_ReverseProxyService_legacyStatePlan(t *testing.T) {
 			}
 			if tc.rename {
 				config["name"], proposed["name"] = str("svc2"), str("svc2")
+			}
+			if tc.direct {
+				optsType, ok := targetType.AttributeTypes["options"].(tftypes.Object)
+				if !ok {
+					t.Fatal("options is not an object")
+				}
+				opts := map[string]tftypes.Value{}
+				for n, at := range optsType.AttributeTypes {
+					opts[n] = tftypes.NewValue(at, nil)
+				}
+				opts["direct_upstream"] = boolean(true)
+				withOpts := func(base map[string]tftypes.Value) tftypes.Value {
+					m := map[string]tftypes.Value{}
+					for k, v := range base {
+						m[k] = v
+					}
+					m["options"] = tftypes.NewValue(optsType, opts)
+					return target(m)
+				}
+				config["targets"] = withOpts(configuredTarget)
+				proposed["targets"] = withOpts(priorTarget)
 			}
 			if tc.unknownName {
 				unknown := tftypes.NewValue(tftypes.String, tftypes.UnknownValue)
@@ -180,6 +203,10 @@ func Test_ReverseProxyService_legacyStatePlan(t *testing.T) {
 			for _, d := range resp.Diagnostics {
 				if d.Severity == tfprotov6.DiagnosticSeverityError {
 					t.Fatalf("plan: %s: %s", d.Summary, d.Detail)
+				}
+				if tc.direct && d.Severity == tfprotov6.DiagnosticSeverityWarning {
+					// A stored "" is HTTP, where direct_upstream applies.
+					t.Errorf("unexpected warning for an HTTP service: %s: %s", d.Summary, d.Detail)
 				}
 			}
 			planned, err := resp.PlannedState.Unmarshal(typ)
