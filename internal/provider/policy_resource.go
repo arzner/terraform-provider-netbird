@@ -329,7 +329,7 @@ func (r *Policy) Schema(ctx context.Context, req resource.SchemaRequest, resp *r
 							Validators: []validator.Object{objectvalidator.ConflictsWith(path.MatchRelative().AtParent().AtName("destinations"))},
 						},
 						"authorized_groups": schema.MapAttribute{
-							MarkdownDescription: "Map of group IDs to the local users their members may log in as over SSH; an empty list allows every local user. When set and not empty, it needs an entry for every group in `sources`, and any other key grants its group's users access too. Not set or empty, every active NetBird user (not only those in `sources`) may log in as any local user, while the rule's sources still decide which peers can reach the destination; a temporary SSH access policy created by the server is the exception, as it names its user itself. Only applicable when protocol is `netbird-ssh`.",
+							MarkdownDescription: "Map of group IDs to the local users their members may log in as over SSH; an empty list allows every local user. When set and not empty, it needs an entry for every group in `sources`, and any other key grants its group's users access too. Not set or empty, every active NetBird user (not only those in `sources`) may log in as any local user, while the rule's sources still decide which peers can reach the destination; a temporary SSH access policy created by the server names its user itself, but an update through this resource drops that user (the policy API does not carry it), so do not manage such a policy here. Only applicable when protocol is `netbird-ssh`.",
 							ElementType:         types.ListType{ElemType: types.StringType},
 							Optional:            true,
 							Computed:            true,

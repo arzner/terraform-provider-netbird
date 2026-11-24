@@ -365,6 +365,9 @@ func Test_Policy_AuthorizedGroups(t *testing.T) {
 						if err != nil {
 							return err
 						}
+						if len(policy.Rules) != 1 || policy.Rules[0].AuthorizedGroups == nil {
+							return fmt.Errorf("expected one rule with authorized groups, found %+v", policy.Rules)
+						}
 						got := *policy.Rules[0].AuthorizedGroups
 						if !slices.Equal(got[e2eGroupAllID()], []string{"admin", "ops"}) || len(got) != 2 {
 							return fmt.Errorf("authorized groups on the server: %v", got)
