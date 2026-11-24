@@ -265,3 +265,37 @@ func Test_user_updateRefusesResolvedRename(t *testing.T) {
 		t.Errorf("expected the rename refused without a request, found %v after %d requests", resp.Diagnostics, requests)
 	}
 }
+
+// The create checks the resolved configuration again and sends nothing for
+// a user it cannot make as configured.
+func Test_user_createRefusesResolvedBlock(t *testing.T) {
+	ctx := context.Background()
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	r := &User{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	values := map[string]tftypes.Value{}
+	for n, at := range typ.AttributeTypes {
+		values[n] = tftypes.NewValue(at, nil)
+	}
+	values["name"] = tftypes.NewValue(tftypes.String, "ci")
+	values["role"] = tftypes.NewValue(tftypes.String, "user")
+	values["is_service_user"] = tftypes.NewValue(tftypes.Bool, true)
+	values["is_blocked"] = tftypes.NewValue(tftypes.Bool, true)
+	values["auto_groups"] = tftypes.NewValue(tftypes.List{ElementType: tftypes.String}, []tftypes.Value{})
+	v := tftypes.NewValue(typ, values)
+	resp := resource.CreateResponse{State: tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(typ, nil)}}
+	r.Create(ctx, resource.CreateRequest{Plan: tfsdk.Plan{Schema: sch.Schema, Raw: v}, Config: tfsdk.Config{Schema: sch.Schema, Raw: v}}, &resp)
+	if !resp.Diagnostics.HasError() || requests != 0 {
+		t.Errorf("expected the create refused without a request, found %v after %d requests", resp.Diagnostics, requests)
+	}
+}

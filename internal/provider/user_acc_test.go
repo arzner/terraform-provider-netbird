@@ -250,6 +250,36 @@ resource "netbird_user" %q {
 				ExpectError: regexp.MustCompile(`Name and email required`),
 			},
 			{
+				// A block flag known only at apply passes the plan; the create
+				// refuses it before sending anything, so no user is left.
+				Config: fmt.Sprintf(`resource "terraform_data" "blocked" {
+  input = true
+}
+
+resource "netbird_user" %q {
+  name            = %q
+  is_service_user = true
+  is_blocked      = terraform_data.blocked.output
+}`, rName, rName),
+				ExpectError: regexp.MustCompile(`(?s)Error running apply.*Cannot create a blocked user`),
+			},
+			{
+				PreConfig: func() {
+					users, err := testClient().Users.List(context.Background())
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, u := range users {
+						if u.Name == rName {
+							t.Fatalf("user %s (%s) was created although the create was refused", rName, u.Id)
+						}
+					}
+				},
+				Config:             config(`email = "` + rName + `@example.com"`),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: true,
+			},
+			{
 				// An invitation with an email but no name.
 				Config:      fmt.Sprintf("resource \"netbird_user\" %q {\n  email = %q\n}", rName, rName+"@example.com"),
 				PlanOnly:    true,

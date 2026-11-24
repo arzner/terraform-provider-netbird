@@ -196,6 +196,17 @@ func (r *User) Create(ctx context.Context, req resource.CreateRequest, resp *res
 		return
 	}
 
+	var config UserModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	// Values known only now are checked before anything is sent.
+	if d := newUserProblems(config); d.HasError() {
+		resp.Diagnostics.Append(d...)
+		return
+	}
+
 	userReq := api.UserCreateRequest{
 		AutoGroups:    stringListDefault(ctx, data.AutoGroups, []string{}),
 		IsServiceUser: data.IsServiceUser.ValueBool(),
@@ -350,16 +361,24 @@ func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, r
 		return
 	}
 
-	known := func(v types.String) bool { return !v.IsNull() && !v.IsUnknown() }
-	missing := func(v types.String) bool { return v.IsNull() || (known(v) && v.ValueString() == "") }
-	service := config.IsServiceUser.Equal(types.BoolValue(true))
 	// Left out, a new user is a regular user: plan it as such.
 	if config.IsServiceUser.IsNull() {
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("is_service_user"), types.BoolValue(false))...)
 	}
+	resp.Diagnostics.Append(newUserProblems(config)...)
+}
+
+// newUserProblems reports what the create cannot make as configured. The
+// plan runs it on the configuration and the create again on the resolved
+// one, before it sends anything: a value known only at apply passes the plan.
+func newUserProblems(config UserModel) diag.Diagnostics {
+	var d diag.Diagnostics
+	known := func(v types.String) bool { return !v.IsNull() && !v.IsUnknown() }
+	missing := func(v types.String) bool { return v.IsNull() || (known(v) && v.ValueString() == "") }
+	service := config.IsServiceUser.Equal(types.BoolValue(true))
 	regular := config.IsServiceUser.IsNull() || config.IsServiceUser.Equal(types.BoolValue(false))
 	if config.IsBlocked.Equal(types.BoolValue(true)) {
-		resp.Diagnostics.AddAttributeError(path.Root("is_blocked"), "Cannot create a blocked user",
+		d.AddAttributeError(path.Root("is_blocked"), "Cannot create a blocked user",
 			"NetBird creates users unblocked (the create request has no block flag); create the user first, then set is_blocked = true.")
 	}
 	if config.Role.Equal(types.StringValue("owner")) {
@@ -367,7 +386,7 @@ func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, r
 		if service {
 			detail = "NetBird refuses the owner role for a service user, also by transfer; choose another role."
 		}
-		resp.Diagnostics.AddAttributeError(path.Root("role"), "Cannot create an owner", detail)
+		d.AddAttributeError(path.Root("role"), "Cannot create an owner", detail)
 	}
 	// What each kind cannot take; with the kind not known yet, the plan is
 	// refused only when neither kind could be created.
@@ -375,12 +394,13 @@ func (r *User) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, r
 	serviceFails := known(config.Email) && config.Email.ValueString() != ""
 	switch {
 	case regular && regularFails, config.IsServiceUser.IsUnknown() && regularFails && serviceFails:
-		resp.Diagnostics.AddError("Name and email required",
+		d.AddError("Name and email required",
 			"A regular user is created as an invitation, which needs a name and an email; set both, or is_service_user = true (without an email) for a service user.")
 	case service && serviceFails:
-		resp.Diagnostics.AddAttributeError(path.Root("email"), "Service users have no email",
+		d.AddAttributeError(path.Root("email"), "Service users have no email",
 			"NetBird creates service users without an email; leave email out for a service user.")
 	}
+	return d
 }
 
 // immutableUserChanges reports a known planned name, email or kind that
@@ -402,6 +422,10 @@ func immutableUserChanges(plan, state UserModel) diag.Diagnostics {
 			d.AddAttributeError(path.Root("name"), "Name cannot be changed",
 				"A regular user's name comes from the identity provider and NetBird does not change it. Keep the current name in the configuration, or leave it out.")
 		}
+	}
+	if !plan.IsServiceUser.IsNull() && !plan.IsServiceUser.IsUnknown() && state.IsServiceUser.IsNull() {
+		d.AddAttributeError(path.Root("is_service_user"), "User kind not reported",
+			"The server does not report this user's kind, so a configured is_service_user cannot be checked; leave it out.")
 	}
 	if changed(plan.IsServiceUser, state.IsServiceUser) {
 		d.AddAttributeError(path.Root("is_service_user"), "User kind cannot be changed",
