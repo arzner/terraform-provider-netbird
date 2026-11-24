@@ -2,6 +2,13 @@ package provider
 
 import (
 	"context"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
+	netbird "github.com/netbirdio/netbird/shared/management/client/rest"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"slices"
 	"testing"
@@ -1831,5 +1838,66 @@ func Test_preserveTargetPlanValues_order(t *testing.T) {
 		if !slices.Equal(ids, tc.want) {
 			t.Errorf("%s: expected %v, found %v", name, tc.want, ids)
 		}
+	}
+}
+
+// Read keeps the stored target order when the server returns the same
+// targets in another order.
+func Test_reverseProxyService_readKeepsTargetOrder(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"s1","name":"svc","domain":"svc.example","enabled":true,"mode":"http","listen_port":0,`+
+			`"targets":[{"target_id":"b","target_type":"peer","port":9090,"protocol":"http","path":"/","enabled":true},`+
+			`{"target_id":"a","target_type":"peer","port":8080,"protocol":"http","path":"/","enabled":true}],`+
+			`"auth":{},"meta":{"created_at":"2026-01-01T00:00:00Z","status":"active"}}`)
+	}))
+	defer srv.Close()
+	r := &ReverseProxyService{client: netbird.NewWithOptions(netbird.WithManagementURL(srv.URL), netbird.WithPAT("t"))}
+	var sch resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &sch)
+	typ, ok := sch.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	if !ok {
+		t.Fatal("schema type is not an object")
+	}
+	targetsType, ok := typ.AttributeTypes["targets"].(tftypes.List)
+	if !ok {
+		t.Fatal("targets is not a list")
+	}
+	targetType, ok := targetsType.ElementType.(tftypes.Object)
+	if !ok {
+		t.Fatal("a target is not an object")
+	}
+	target := func(id string, port int) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for n, at := range targetType.AttributeTypes {
+			values[n] = tftypes.NewValue(at, nil)
+		}
+		values["target_id"] = tftypes.NewValue(tftypes.String, id)
+		values["target_type"] = tftypes.NewValue(tftypes.String, "peer")
+		values["port"] = tftypes.NewValue(tftypes.Number, port)
+		values["protocol"] = tftypes.NewValue(tftypes.String, "http")
+		values["path"] = tftypes.NewValue(tftypes.String, "/")
+		values["enabled"] = tftypes.NewValue(tftypes.Bool, true)
+		return tftypes.NewValue(targetType, values)
+	}
+	values := map[string]tftypes.Value{}
+	for n, at := range typ.AttributeTypes {
+		values[n] = tftypes.NewValue(at, nil)
+	}
+	values["id"] = tftypes.NewValue(tftypes.String, "s1")
+	values["targets"] = tftypes.NewValue(targetsType, []tftypes.Value{target("a", 8080), target("b", 9090)})
+	state := tfsdk.State{Schema: sch.Schema, Raw: tftypes.NewValue(typ, values)}
+	resp := resource.ReadResponse{State: state}
+	r.Read(ctx, resource.ReadRequest{State: state}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatal(resp.Diagnostics)
+	}
+	var got []ReverseProxyServiceTargetModel
+	var targets types.List
+	resp.State.GetAttribute(ctx, path.Root("targets"), &targets)
+	targets.ElementsAs(ctx, &got, false)
+	if len(got) != 2 || got[0].TargetId.ValueString() != "a" || got[0].Port.ValueInt64() != 8080 || got[1].TargetId.ValueString() != "b" {
+		t.Errorf("expected the stored order a, b, found %+v", got)
 	}
 }

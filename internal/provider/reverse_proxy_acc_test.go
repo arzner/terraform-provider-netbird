@@ -1776,8 +1776,8 @@ func testImportedTargets(stored *map[string]map[string]string) resource.ImportSt
 				diffs = append(diffs, k+": not imported")
 				continue
 			}
-			for field := range want {
-				if have[field] != want[field] {
+			for field, v := range want {
+				if hv, ok := have[field]; !ok || hv != v {
 					diffs = append(diffs, k+": "+field)
 				}
 			}
